@@ -1,0 +1,46 @@
+# --- secrets: never commit ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+id_ed25519*
+id_rsa*
+
+# --- python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+htmlcov/
+.coverage
+
+# --- envforge data: trajectories, eval reports, checkpoints ---
+data/*
+!data/.gitkeep
+!data/samples/
+runs/
+checkpoints/
+adapters/
+*.jsonl
+!packs/**/*.jsonl
+!data/samples/**/*.jsonl
+
+# --- model weights: never in git ---
+*.safetensors
+*.bin
+*.gguf
+*.pt
+*.pth
+
+# --- editors / os ---
+.vscode/
+.idea/
+.DS_Store
+*.swp

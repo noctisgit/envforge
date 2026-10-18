@@ -1,0 +1,14 @@
+{
+  "run_id": "sample-netops-scripted",
+  "pack": "netops",
+  "model": "scripted",
+  "episodes": 6,
+  "tiers": [
+    1,
+    2,
+    3
+  ],
+  "seed_start": 0,
+  "max_steps": 25,
+  "started_at": "2026-10-18T21:30:23.810812+00:00"
+}
