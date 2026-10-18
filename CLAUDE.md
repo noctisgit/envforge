@@ -52,11 +52,23 @@ envforge/
   packs/
     netops/         reference sim pack (see packs/netops/README.md)
   cli.py            typer CLI
-  config.py         env/.env loading, defaults, data dir
+  config.py         env/.env loading, defaults, data dir, workspace dirs
+  web/              optional FastAPI layer (uv sync --extra web); see docs/WEB.md
+    settings.py     DATABASE_URL, AUTH_PROVIDER=local|clerk, APP_SECRET_KEY, ...
+    db.py, models.py, migrations/   SQLAlchemy 2 + Alembic (users, workspaces, members, provider_keys, runs)
+    crypto.py       Fernet encryption of provider keys (derived from APP_SECRET_KEY)
+    auth/           local (argon2 + session cookie) and clerk (JWT via JWKS); one current_user dep
+    services.py     workspace access, key resolution, run enqueue
+    routers/        auth, workspaces (+keys, packs), runs (+episodes, transcripts)
+    worker.py       claims queued runs, executes with the workspace's keys, writes progress/metrics
+    app.py          FastAPI factory; entry points envforge-api / envforge-worker
+web/                Next.js UI (login, runs, run detail, settings); proxies /api/* to FastAPI
+deploy/             Dockerfiles + Caddyfile; docker-compose.yml at repo root (postgres, api, worker, web)
 docs/
   ARCHITECTURE.md   design decisions, the pack contract, phase roadmap
   PACKS.md          how to write a new pack (copy this when adding a domain)
   LEARNING.md       module-by-module walkthrough + ML concepts, for the human maintainer
+  WEB.md            web layer: config, auth providers, key handling, deploy, endpoints
 tests/              pytest; everything runs offline with the scripted model
 data/               trajectories and eval reports (gitignored except data/samples/)
 ```
@@ -79,6 +91,15 @@ uv run envforge compare data/runs/<a> data/runs/<b>   # side-by-side
 uv run envforge show data/runs/<run-id> --episode 3   # print one trajectory
 uv run pytest                                         # must pass before committing
 uv run ruff check . && uv run ruff format .           # lint/format
+
+# web layer (optional)
+uv sync --extra dev --extra web
+uv run envforge-api                                   # FastAPI on :8000 (/docs)
+uv run envforge-worker                                # executes queued runs
+cd web && npm install && npm run dev                  # Next.js on :3000
+docker compose up -d postgres                         # Postgres for local dev (or the full stack on a VPS)
+uv run alembic upgrade head                           # apply migrations (Postgres)
+uv run alembic revision --autogenerate -m "..."       # after editing envforge/web/models.py
 ```
 
 Model strings are `provider:model-id`:
@@ -104,7 +125,12 @@ Model strings are `provider:model-id`:
 - Prefer small, readable Python over clever Python: this repo doubles as the
   maintainer's Python learning material. Type hints and docstrings on public functions.
 - Python 3.12+. Dependencies via `uv add <pkg>` (never bare `pip install`),
-  which updates `pyproject.toml` and `uv.lock` together.
+  which updates `pyproject.toml` and `uv.lock` together. Web-only deps go in the
+  `web` extra: `uv add --optional web <pkg>`.
+- **Web layer rules.** Provider keys are only ever decrypted in the worker; API
+  responses carry the masked form. `APP_SECRET_KEY` must not change once keys are
+  stored. Every schema change ships with an Alembic migration. Routers stay thin;
+  logic lives in `services.py`. The UI talks only to `/api/*`.
 
 ## Roadmap (see docs/ARCHITECTURE.md for detail)
 

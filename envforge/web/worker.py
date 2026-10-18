@@ -85,8 +85,17 @@ def execute(db: Session, run: Run) -> None:
             extra_meta={"workspace": ws.slug, "label": run.label},
         )
         run.run_dir = str(run_dir)
-        run.metrics = evaluate_run(run_dir).model_dump()
-        run.status = "completed"
+        report = evaluate_run(run_dir)
+        run.metrics = report.model_dump()
+        if report.overall.n and report.overall.error_rate == 1.0:
+            # every episode blew up before verification (bad key, dead endpoint, ...)
+            from envforge.core.trajectory import load_run
+
+            first = next((t for t in load_run(run_dir) if t.error), None)
+            run.status = "failed"
+            run.error = first.error if first else "all episodes errored"
+        else:
+            run.status = "completed"
     except _Cancelled:
         run.run_dir = str(config.runs_dir(ws.slug) / run.id)
         run.metrics = evaluate_run(run.run_dir).model_dump()
@@ -104,17 +113,28 @@ class _Cancelled(Exception):
 
 
 def run_forever(poll_s: float = 2.0, once: bool = False) -> int:
+    from envforge.web.settings import get_settings
+
+    if get_settings().DATABASE_URL.startswith("sqlite"):
+        from envforge.web.db import create_all
+
+        create_all()  # dev convenience; Postgres runs `alembic upgrade head` first
     Session_ = session_factory()
     handled = 0
     while True:
-        with Session_() as db:
-            run = claim_next(db)
-            if run:
-                execute(db, run)
-                handled += 1
-                if once:
-                    return handled
-                continue
+        try:
+            with Session_() as db:
+                run = claim_next(db)
+                if run:
+                    execute(db, run)
+                    handled += 1
+                    if once:
+                        return handled
+                    continue
+        except Exception as e:  # noqa: BLE001 - keep the worker alive on transient DB errors
+            print(f"[worker] {type(e).__name__}: {e}", flush=True)
+            if once:
+                raise
         if once:
             return handled
         time.sleep(poll_s)

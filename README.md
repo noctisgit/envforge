@@ -83,10 +83,22 @@ A pack is a subpackage of `envforge/packs/` that subclasses `Environment` and im
 See [docs/PACKS.md](docs/PACKS.md) for the contract and a template, and
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for why it is shaped this way.
 
-## Workspaces
+## Workspaces and the web UI
 
-All outputs are namespaced: `data/workspaces/<workspace>/{runs,sft}`. Pass `--workspace` or set
-`ENVFORGE_WORKSPACE`. Multi-user auth, when added, maps a user to a workspace.
+All outputs are namespaced: `data/workspaces/<workspace>/{runs,sft}`. From the CLI, pass
+`--workspace` or set `ENVFORGE_WORKSPACE`.
+
+The optional web layer adds accounts, workspaces, per-workspace provider keys (encrypted at
+rest), model preferences, a run queue with a worker, and a UI for metrics and transcripts.
+Auth is pluggable: `AUTH_PROVIDER=local` (email + password) or `clerk`. Postgres is the
+production database; `docker compose up -d` brings up the whole stack. See
+[docs/WEB.md](docs/WEB.md).
+
+```bash
+uv sync --extra dev --extra web
+uv run envforge-api & uv run envforge-worker &        # :8000
+cd web && npm install && npm run dev                   # :3000
+```
 
 ## Learning
 

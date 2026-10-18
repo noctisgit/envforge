@@ -1,0 +1,5 @@
+# Reverse proxy for a single VPS. Replace the hostname; Caddy fetches TLS automatically.
+# apt install caddy && cp deploy/Caddyfile /etc/caddy/Caddyfile && systemctl reload caddy
+envforge.example.com {
+    reverse_proxy localhost:3000
+}

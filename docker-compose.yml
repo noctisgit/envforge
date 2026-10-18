@@ -1,0 +1,73 @@
+# Local/VPS stack. Postgres is the only thing that must run in a container;
+# api, worker and web can also run directly with `uv run` / `npm run` for development.
+#
+#   docker compose up -d postgres            # just the DB (dev)
+#   docker compose up -d                     # everything (VPS)
+#   docker compose exec api alembic upgrade head
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: envforge
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-envforge}
+      POSTGRES_DB: envforge
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U envforge"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build: { context: ., dockerfile: deploy/Dockerfile.api }
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://envforge:${POSTGRES_PASSWORD:-envforge}@postgres:5432/envforge
+      ENVFORGE_DATA_DIR: /data
+    volumes:
+      - envdata:/data
+    depends_on:
+      postgres: { condition: service_healthy }
+    ports:
+      - "127.0.0.1:8000:8000"
+    command: >
+      sh -c "alembic upgrade head &&
+             uvicorn envforge.web.app:app --host 0.0.0.0 --port 8000 --workers 2"
+
+  worker:
+    build: { context: ., dockerfile: deploy/Dockerfile.api }
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://envforge:${POSTGRES_PASSWORD:-envforge}@postgres:5432/envforge
+      ENVFORGE_DATA_DIR: /data
+    volumes:
+      - envdata:/data
+    depends_on:
+      postgres: { condition: service_healthy }
+    command: envforge-worker --poll 2
+
+  web:
+    build:
+      context: ./web
+      dockerfile: ../deploy/Dockerfile.web
+      args:
+        NEXT_PUBLIC_AUTH_PROVIDER: ${NEXT_PUBLIC_AUTH_PROVIDER:-local}
+        NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: ${NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY:-}
+    restart: unless-stopped
+    environment:
+      API_URL: http://api:8000
+      CLERK_SECRET_KEY: ${CLERK_SECRET_KEY:-}
+    depends_on: [api]
+    ports:
+      - "127.0.0.1:3000:3000"
+
+volumes:
+  pgdata:
+  envdata:
