@@ -12,10 +12,17 @@ from envforge.models.base import AssistantTurn, ChatModel, Message
 
 
 class AnthropicModel(ChatModel):
-    def __init__(self, model: str, *, max_tokens: int = 2048, temperature: float = 0.0) -> None:
+    def __init__(
+        self,
+        model: str,
+        *,
+        max_tokens: int = 2048,
+        temperature: float = 0.0,
+        api_key: str | None = None,
+    ) -> None:
         from anthropic import Anthropic  # imported lazily so offline use needs no key
 
-        api_key = env("ANTHROPIC_API_KEY")
+        api_key = api_key or env("ANTHROPIC_API_KEY")
         if not api_key:
             raise RuntimeError("ANTHROPIC_API_KEY is not set (see .env.example)")
         self._client = Anthropic(api_key=api_key)

@@ -16,7 +16,16 @@ PROVIDER_HELP = (
 )
 
 
-def load_model(spec: str, *, temperature: float = 0.0, max_tokens: int = 2048) -> ChatModel:
+def load_model(
+    spec: str,
+    *,
+    temperature: float = 0.0,
+    max_tokens: int = 2048,
+    api_key: str | None = None,
+    base_url: str | None = None,
+) -> ChatModel:
+    """Build a model from its spec. `api_key`/`base_url` override the environment
+    (used by the web layer to run with a workspace's own keys)."""
     spec = spec.strip()
     if spec in ("scripted", "scripted:"):
         from envforge.models.scripted import ScriptedModel
@@ -37,11 +46,20 @@ def load_model(spec: str, *, temperature: float = 0.0, max_tokens: int = 2048) -
     if provider == "anthropic":
         from envforge.models.anthropic_model import AnthropicModel
 
-        return AnthropicModel(model, temperature=temperature, max_tokens=max_tokens)
+        return AnthropicModel(
+            model, temperature=temperature, max_tokens=max_tokens, api_key=api_key
+        )
     if provider in ("openai", "vercel", "vllm"):
         from envforge.models.openai_compat import OpenAICompatModel
 
-        return OpenAICompatModel(provider, model, temperature=temperature, max_tokens=max_tokens)
+        return OpenAICompatModel(
+            provider,
+            model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            api_key=api_key,
+            base_url=base_url,
+        )
     raise ValueError(f"Unknown provider '{provider}'. {PROVIDER_HELP}")
 
 
