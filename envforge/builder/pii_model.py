@@ -345,17 +345,24 @@ def _name_like(word: str, known: Collection[str], loose: bool, common: Collectio
 
 
 def _trim(text: str, span: Span, common: Collection[str]) -> Span | None:
-    """Drop leading/trailing filler tokens; None if nothing is left."""
+    """Drop leading/trailing filler tokens; None if nothing is left. Where nothing is
+    dropped the model's boundary stays ("(977) 625-2661" keeps its bracket)."""
     tokens = [(m.start(), m.end()) for m in _TOKEN.finditer(text, span.start, span.end)]
+    n = len(tokens)
     while tokens and _filler(text[tokens[0][0] : tokens[0][1]], common):
         tokens.pop(0)
+    front_trimmed = len(tokens) < n
+    n = len(tokens)
     while tokens and _filler(text[tokens[-1][0] : tokens[-1][1]], common):
         tokens.pop()
     if not tokens:
         return None
-    start, end = tokens[0][0], tokens[-1][1]
+    start = tokens[0][0] if front_trimmed else span.start
+    end = tokens[-1][1] if len(tokens) < n else span.end
+    while start < end and text[start].isspace():
+        start += 1
     # trailing sentence punctuation is not part of a value ("cminh730." -> "cminh730")
-    while end > start and text[end - 1] in ".,;:!?'’\"":
+    while end > start and text[end - 1] in ".,;:!?'’\" \t\n":
         end -= 1
     if end - start < 2:
         return None

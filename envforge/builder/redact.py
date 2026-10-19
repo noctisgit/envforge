@@ -673,7 +673,7 @@ def _finditer_outside(
 # An agent asking for a name: the customer's next turn is often just the name
 # ("may I have your name please?" -> "Crystal Minh"), with no cue in that turn.
 NAME_REQUEST_RE = re.compile(
-    r"(?i)\b(?:(?:your|the)\s+(?:full\s+|first\s+(?:and\s+last\s+)?|last\s+)?name|"
+    r"(?i)\b(?:(?:your|the)\s+(?:full\s+|first\s+(?:and\s+last\s+)?|last\s+)?name|you\s+(?:full|first|last)\s+name|"
     r"who\s+(?:am\s+i|i'?m)\s+(?:speaking|chatting|talking)\s+(?:to|with)|name\s+(?:please|on\s+the\s+account))"
 )
 # A reply that starts with a name: 1-4 name-like words, then the end of the turn or a
@@ -1958,7 +1958,6 @@ IDENTITY_REQUEST_RE = re.compile(
     r"(?i)\b(?:name|user\s?name|user\s?id|account\s?(?:id|number|#)|e-?mail|phone|"
     r"(?:mobile|cell|contact)\s+number|address|zip(?:\s*code)?|postal\s+code|date\s+of\s+birth)\b"
 )
-_ASKING_RE = re.compile(r"(?i)\?|\b(?:please|may i|can i|could (?:you|i)|provide|confirm|need)\b")
 _LETTER_DIGIT_RE = re.compile(
     r"(?<![\w<@.-])(?=[\w.-]*[A-Za-z])(?=[\w.-]*\d)[A-Za-z0-9][\w.-]{3,}(?![\w>@-])"
 )
@@ -2000,7 +1999,9 @@ def risk(
     for i, (b, a) in enumerate(zip(before_turns, after_turns, strict=False)):
         original, out = b.text, a.text
         prev = _question_before(before_turns, i)
-        if b.role == "customer" and prev and _ASKING_RE.search(prev) and out == original:
+        # an agent line naming an identity field is a request, "?" or not ("Also
+        # account id and order id"); only customer replies tier 1 left alone count
+        if b.role == "customer" and prev and out == original:
             content = _content_words(original)
             n_words = len(original.split())
             if NAME_REQUEST_RE.search(prev) and content and n_words <= 6:
