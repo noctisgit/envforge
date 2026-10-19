@@ -3,7 +3,7 @@
 envforge packs
 envforge tasks netops --tier 2 --n 3
 envforge run netops --model scripted --episodes 10
-envforge run netops --model anthropic:claude-sonnet-4-5 --episodes 30 --tiers 1,2,3
+envforge run netops --model anthropic:claude-sonnet-5-5 --episodes 30 --tiers 1,2,3
 envforge eval data/runs/<run-id>
 envforge compare data/runs/<a> data/runs/<b> ...
 envforge show data/runs/<run-id> --episode 0

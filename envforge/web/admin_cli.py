@@ -1,6 +1,7 @@
 """`envforge admin …` — server administration from a shell on the box.
 
     uv run envforge admin users
+    uv run envforge admin create-user me@example.com --admin
     uv run envforge admin reset-password me@example.com
     docker compose exec api envforge admin reset-password me@example.com   # the Docker stack
 
@@ -34,11 +35,16 @@ def _user(db, email: str):
 
 
 @admin_app.command("users")
-def list_users() -> None:
+def list_users(
+    count: bool = typer.Option(False, "--count", help="print only the number of accounts"),
+) -> None:
     """List accounts with their workspace and run counts."""
     from envforge.web.models import Run, User, WorkspaceMember
 
     with _session() as db:
+        if count:
+            print(db.scalar(select(func.count()).select_from(User)))
+            return
         t = Table("email", "name", "admin", "workspaces", "runs", "created")
         for u in db.scalars(select(User).order_by(User.created_at)):
             n_ws = db.scalar(
@@ -56,6 +62,61 @@ def list_users() -> None:
                 u.created_at.strftime("%Y-%m-%d"),
             )
         console.print(t)
+
+
+def _read_password(password_stdin: bool) -> str:
+    """The new password from stdin (scripts: never in argv or the environment) or a prompt."""
+    import sys
+
+    if password_stdin:
+        password = sys.stdin.readline().rstrip("\r\n")
+    else:
+        password = typer.prompt("password", hide_input=True, confirmation_prompt=True)
+    if len(password) < 10:
+        raise typer.BadParameter("password must be at least 10 characters")
+    return password
+
+
+@admin_app.command("create-user")
+def create_user(
+    email: str,
+    name: str = typer.Option("", "--name", help="display name"),
+    admin: bool = typer.Option(False, "--admin", help="make this account a server admin"),
+    password_stdin: bool = typer.Option(
+        False, "--password-stdin", help="read the password from the first line of stdin"
+    ),
+) -> None:
+    """Create a local (email + password) account with its own private workspace.
+
+    Used by install.sh to create the first admin, so nobody can claim the server by
+    signing up first. `--password-stdin` keeps the password out of argv and `ps`.
+    """
+    from pydantic import TypeAdapter, ValidationError
+    from pydantic.networks import EmailStr
+
+    from envforge.web.auth.local import hash_password
+    from envforge.web.models import User
+    from envforge.web.services import ensure_personal_workspace
+
+    try:
+        email = TypeAdapter(EmailStr).validate_python(email.strip()).lower()
+    except ValidationError as e:
+        raise typer.BadParameter(f"not a valid email address: {email}") from e
+    password = _read_password(password_stdin)
+    with _session() as db:
+        if db.scalar(select(User).where(User.email == email)):
+            raise typer.BadParameter(f"{email} already has an account")
+        user = User(
+            email=email,
+            display_name=name.strip()[:120],
+            password_hash=hash_password(password),
+            is_admin=admin,
+        )
+        db.add(user)
+        db.flush()
+        ws = ensure_personal_workspace(db, user)
+        db.commit()
+        console.print(f"created {email}{' (admin)' if admin else ''} with workspace '{ws.name}'")
 
 
 @admin_app.command("reset-password")

@@ -1,9 +1,10 @@
-# Local/VPS stack. Postgres is the only thing that must run in a container;
-# api, worker and web can also run directly with `uv run` / `npm run` for development.
+# The whole stack. ./install.sh sets up .env and runs this for you.
 #
-#   docker compose up -d postgres            # just the DB (dev)
-#   docker compose up -d                     # everything (VPS)
-#   docker compose exec api alembic upgrade head
+#   docker compose up -d --build             # everything (migrations run when api starts)
+#   docker compose up -d postgres            # just the DB, for local development
+#
+# Host ports come from .env: WEB_LISTEN / WEB_PORT (the UI, default 127.0.0.1:3000),
+# API_PORT (8000) and POSTGRES_PORT (5432), the last two bound to 127.0.0.1 only.
 
 services:
   postgres:
@@ -16,7 +17,7 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     ports:
-      - "127.0.0.1:5432:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432" # host access for local development only
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U envforge"]
       interval: 5s
@@ -35,7 +36,7 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
     ports:
-      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:${API_PORT:-8000}:8000" # the UI reaches the API inside Docker; this is for dev
     # One process on purpose: login rate limits live in memory (envforge/web/security.py),
     # and FastAPI serves sync endpoints from a thread pool, which is plenty here.
     command: >
@@ -88,7 +89,9 @@ services:
       CLERK_SECRET_KEY: ${CLERK_SECRET_KEY:-}
     depends_on: [api]
     ports:
-      - "127.0.0.1:3000:3000"
+      # Where the UI listens on the host. Default: this machine only (put nginx, Caddy,
+      # cloudflared... in front). WEB_LISTEN=0.0.0.0 in .env exposes it on the network.
+      - "${WEB_LISTEN:-127.0.0.1}:${WEB_PORT:-3000}:3000"
 
 volumes:
   pgdata:

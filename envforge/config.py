@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 # Load .env from the current working directory (or any parent) once, at import time.
 load_dotenv()
 
-DEFAULT_MODEL: str = os.getenv("ENVFORGE_DEFAULT_MODEL", "anthropic:claude-sonnet-4-5")
+DEFAULT_MODEL: str = os.getenv("ENVFORGE_DEFAULT_MODEL", "anthropic:claude-sonnet-5-5")
 DATA_DIR: Path = Path(os.getenv("ENVFORGE_DATA_DIR", "./data")).resolve()
 
 # Workspaces namespace everything a user produces (runs, filtered data, adapters).

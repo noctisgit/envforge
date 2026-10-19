@@ -115,13 +115,17 @@ offers it on a run, on a selection of runs, and on the compare page.
 ## Administration
 
 ```bash
-docker compose exec api envforge admin users
+docker compose exec api envforge admin users [--count]
+docker compose exec api envforge admin create-user someone@example.com [--name N] [--admin]
 docker compose exec api envforge admin reset-password me@example.com   # also signs them out
 docker compose exec api envforge admin sign-out someone@example.com
 docker compose exec api envforge admin set-admin someone@example.com [--off]
 ```
 
 Users can also "Sign out everywhere" from Settings. Sessions carry an epoch that these bump.
+`create-user` is how accounts are added when sign-up is off (`ALLOW_SIGNUP=false`, the
+installer's default); it prompts for the password, or reads it from stdin with
+`--password-stdin` so it never appears in argv or shell history.
 
 ## Keys and model resolution
 
@@ -156,15 +160,25 @@ echo 'DATABASE_URL=postgresql+psycopg://envforge:envforge@localhost:5432/envforg
 uv run alembic upgrade head
 ```
 
-## Deploying on one VPS (Ubuntu 24.04)
+## Deploying (one machine)
 
 ```bash
-# docker + compose plugin, then:
-git clone git@github.com:noctisgit/envforge.git && cd envforge
-cp .env.example .env            # set APP_SECRET_KEY, POSTGRES_PASSWORD, AUTH_PROVIDER, COOKIE_SECURE=true
-docker compose up -d --build    # postgres, api (runs migrations), worker, web
-# put Caddy (deploy/Caddyfile) or nginx in front of :3000 for TLS
+git clone https://github.com/noctisgit/envforge && cd envforge
+./install.sh            # or: ./install.sh --yes --admin-email … --admin-password-file …
 ```
+
+`install.sh` checks Docker/Compose/disk/memory, writes `.env` with random `APP_SECRET_KEY`
+and `POSTGRES_PASSWORD` (an existing `.env` is kept), builds and starts the stack
+(postgres, api — which runs migrations — worker, builder, web), waits for `/api/health`,
+and creates the first admin with `envforge admin create-user`, so the server can't be
+claimed by whoever signs up first. Re-running it is the update path (`git pull &&
+./install.sh`). `./install.sh --help` lists the flags.
+
+The UI listens on `WEB_LISTEN:WEB_PORT` (default `127.0.0.1:3000`). TLS and a domain are
+up to you: nginx, Caddy (`deploy/Caddyfile` is an example), a Cloudflare Tunnel or a port
+forward in front of it. Behind HTTPS, set `COOKIE_SECURE=true` (`./install.sh --url
+https://…` does). `API_PORT` / `POSTGRES_PORT` are published on 127.0.0.1 only, for
+development; the installer moves them if the defaults are taken.
 
 Trajectories live in the `envdata` volume under `/data/workspaces/<slug>/runs/`; the DB holds
 users, workspaces, encrypted keys, and run status/metrics/usage. Back up both:

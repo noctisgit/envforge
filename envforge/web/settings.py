@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class WebSettings(BaseSettings):
@@ -40,7 +40,8 @@ class WebSettings(BaseSettings):
     # public hosts and the Tailscale range are allowed, so nobody can aim the worker at
     # this machine, the Docker network or a cloud metadata endpoint.
     BASE_URL_ALLOW_PRIVATE: bool = False
-    BASE_URL_ALLOW_CIDRS: list[str] = ["100.64.0.0/10"]
+    # comma-separated in .env (NoDecode: not parsed as JSON; see _split)
+    BASE_URL_ALLOW_CIDRS: Annotated[list[str], NoDecode] = ["100.64.0.0/10"]
 
     # --- limits ---
     MAX_ACTIVE_RUNS_PER_WORKSPACE: int = 3  # queued + running
@@ -50,7 +51,7 @@ class WebSettings(BaseSettings):
     SIGNUPS_PER_HOUR: int = 5  # per client IP
 
     # --- http ---
-    CORS_ORIGINS: list[str] = ["http://localhost:3000"]
+    CORS_ORIGINS: Annotated[list[str], NoDecode] = ["http://localhost:3000"]
     COOKIE_SECURE: bool = False  # set true behind HTTPS
     COOKIE_NAME: str = "envforge_session"
 

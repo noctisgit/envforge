@@ -116,8 +116,10 @@ def test_upload_is_parsed_redacted_and_raw_file_deleted(builder):
     assert not list(path.parent.glob("*.raw"))
     with CorpusStore(path) as store:
         assert store.count(upload_id=up["id"]) == 2
-        stored = "\n".join(c.render() if hasattr(c, "render") else str(c.to_dict())
-                           for c in store.get(store.iter_ids(unique_only=False)))
+        stored = "\n".join(
+            c.render() if hasattr(c, "render") else str(c.to_dict())
+            for c in store.get(store.iter_ids(unique_only=False))
+        )
     assert (
         "jane.doe@example.com" not in stored
         and "555 0101" not in stored
