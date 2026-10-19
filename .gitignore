@@ -25,7 +25,7 @@ htmlcov/
 data/*
 !data/.gitkeep
 !data/samples/
-runs/
+/runs/
 checkpoints/
 adapters/
 *.jsonl

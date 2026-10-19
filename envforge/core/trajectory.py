@@ -20,19 +20,30 @@ from pydantic import BaseModel, Field
 
 from envforge.core.env import Task, ToolCall, Verdict
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2  # v2: Usage gained cache_read_tokens / cache_write_tokens (see ARCHITECTURE.md)
 
 
 class Usage(BaseModel):
-    """Token accounting for one model call, or summed over an episode."""
+    """Token accounting for one model call, or summed over an episode.
+
+    `input_tokens` is the *whole* prompt, whatever the provider: prompt caching means
+    part of it may have been read from cache (`cache_read_tokens`, billed at a fraction
+    of the input price) or written to it (`cache_write_tokens`, billed at a small
+    premium). Both are subsets of `input_tokens`. Files written before schema v2 have no
+    cache fields; they read as 0, which was true then (nothing was cached).
+    """
 
     input_tokens: int = 0
     output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
 
     def __add__(self, other: Usage) -> Usage:
         return Usage(
             input_tokens=self.input_tokens + other.input_tokens,
             output_tokens=self.output_tokens + other.output_tokens,
+            cache_read_tokens=self.cache_read_tokens + other.cache_read_tokens,
+            cache_write_tokens=self.cache_write_tokens + other.cache_write_tokens,
         )
 
 

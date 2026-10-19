@@ -36,11 +36,33 @@ services:
       postgres: { condition: service_healthy }
     ports:
       - "127.0.0.1:8000:8000"
+    # One process on purpose: login rate limits live in memory (envforge/web/security.py),
+    # and FastAPI serves sync endpoints from a thread pool, which is plenty here.
     command: >
       sh -c "alembic upgrade head &&
-             uvicorn envforge.web.app:app --host 0.0.0.0 --port 8000 --workers 2"
+             uvicorn envforge.web.app:app --host 0.0.0.0 --port 8000 --workers 1"
 
   worker:
+    build: { context: ., dockerfile: deploy/Dockerfile.api }
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://envforge:${POSTGRES_PASSWORD:-envforge}@postgres:5432/envforge
+      ENVFORGE_DATA_DIR: /data
+      ENVFORGE_SANDBOX: docker
+    volumes:
+      - envdata:/data
+      # Sandbox packs (repofix) start locked-down sibling containers through the host's
+      # Docker daemon. This makes the worker root-equivalent on the host, so run it on a
+      # box you control. Drop this line to run sim packs only.
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      postgres: { condition: service_healthy }
+    command: envforge-worker --poll 2 --kind runs
+
+  # Environment builder: chat turns and upload processing (parse + redact). Separate from
+  # the run worker so a long evaluation never blocks the builder. No Docker socket needed.
+  builder:
     build: { context: ., dockerfile: deploy/Dockerfile.api }
     restart: unless-stopped
     env_file: .env
@@ -51,7 +73,7 @@ services:
       - envdata:/data
     depends_on:
       postgres: { condition: service_healthy }
-    command: envforge-worker --poll 2
+    command: envforge-worker --poll 1 --kind builder
 
   web:
     build:

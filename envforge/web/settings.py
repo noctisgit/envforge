@@ -36,13 +36,24 @@ class WebSettings(BaseSettings):
     # --- model keys ---
     # If true, a workspace with no key of its own may fall back to the server's .env keys.
     ALLOW_SERVER_KEYS: bool = False
+    # A vLLM base URL makes the worker send requests wherever it points. By default only
+    # public hosts and the Tailscale range are allowed, so nobody can aim the worker at
+    # this machine, the Docker network or a cloud metadata endpoint.
+    BASE_URL_ALLOW_PRIVATE: bool = False
+    BASE_URL_ALLOW_CIDRS: list[str] = ["100.64.0.0/10"]
+
+    # --- limits ---
+    MAX_ACTIVE_RUNS_PER_WORKSPACE: int = 3  # queued + running
+    STALE_RUN_SECONDS: int = 180  # a running run with no worker heartbeat this long is failed
+    LOGIN_ATTEMPTS_PER_MINUTE: int = 10  # per client IP (and per email)
+    SIGNUPS_PER_HOUR: int = 5  # per client IP
 
     # --- http ---
     CORS_ORIGINS: list[str] = ["http://localhost:3000"]
     COOKIE_SECURE: bool = False  # set true behind HTTPS
     COOKIE_NAME: str = "envforge_session"
 
-    @field_validator("CORS_ORIGINS", mode="before")
+    @field_validator("CORS_ORIGINS", "BASE_URL_ALLOW_CIDRS", mode="before")
     @classmethod
     def _split(cls, v):
         if isinstance(v, str):

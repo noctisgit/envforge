@@ -1,0 +1,189 @@
+[
+  {
+    "id": "HD-1018",
+    "channel": "chat",
+    "messages": [
+      {
+        "role": "customer",
+        "text": "I need admin rights on my laptop to install some software",
+        "ts": "2026-09-05T11:00:00"
+      },
+      {
+        "role": "agent",
+        "text": "We don't grant local admin rights, it's against our security policy. Which software do you need? Most approved apps are in the Software Center.",
+        "ts": "2026-09-05T11:02:00"
+      },
+      {
+        "role": "customer",
+        "text": "Tableau",
+        "ts": "2026-09-05T11:04:00"
+      },
+      {
+        "role": "agent",
+        "text": "Tableau is approved but licensed. I've requested a license for you; once it's assigned you can install it from the Software Center without admin rights.",
+        "ts": "2026-09-05T11:06:00"
+      },
+      {
+        "role": "customer",
+        "text": "ok makes sense",
+        "ts": "2026-09-05T11:08:00"
+      }
+    ]
+  },
+  {
+    "id": "HD-1019",
+    "channel": "chat",
+    "messages": [
+      {
+        "role": "customer",
+        "text": "The conference room display in Room 4B won't connect to my laptop",
+        "ts": "2026-09-05T13:00:00"
+      },
+      {
+        "role": "agent",
+        "text": "Are you using the HDMI cable or the wireless dongle?",
+        "ts": "2026-09-05T13:02:00"
+      },
+      {
+        "role": "customer",
+        "text": "wireless",
+        "ts": "2026-09-05T13:04:00"
+      },
+      {
+        "role": "agent",
+        "text": "The 4B display's wireless receiver is offline in our monitoring, so it's the room device, not your laptop. I've power-cycled it remotely; give it two minutes.",
+        "ts": "2026-09-05T13:06:00"
+      },
+      {
+        "role": "customer",
+        "text": "it shows up now",
+        "ts": "2026-09-05T13:08:00"
+      }
+    ]
+  },
+  {
+    "id": "HD-1020",
+    "channel": "chat",
+    "messages": [
+      {
+        "role": "customer",
+        "text": "Whole 2nd floor can't print, all printers offline",
+        "ts": "2026-09-05T15:00:00"
+      },
+      {
+        "role": "agent",
+        "text": "Thanks for letting us know. We have an active network outage affecting the 2nd floor switch since 10:05, the network team is on it.",
+        "ts": "2026-09-05T15:02:00"
+      },
+      {
+        "role": "agent",
+        "text": "Please don't restart the printers, it won't help and makes recovery slower. I've linked your report to outage OUT-77 and you'll get an update when it's resolved.",
+        "ts": "2026-09-05T15:04:00"
+      },
+      {
+        "role": "customer",
+        "text": "ok, thanks for the heads up",
+        "ts": "2026-09-05T15:06:00"
+      }
+    ]
+  },
+  {
+    "id": "HD-1021",
+    "channel": "chat",
+    "messages": [
+      {
+        "role": "customer",
+        "text": "my mouse is broken, the scroll wheel doesn't work",
+        "ts": "2026-09-06T09:00:00"
+      },
+      {
+        "role": "agent",
+        "text": "Mice and keyboards are standard accessories under $150, no approval needed. I've sent a replacement mouse to your desk, it'll arrive this afternoon.",
+        "ts": "2026-09-06T09:02:00"
+      },
+      {
+        "role": "customer",
+        "text": "thank you!",
+        "ts": "2026-09-06T09:04:00"
+      }
+    ]
+  },
+  {
+    "id": "HD-1022",
+    "channel": "chat",
+    "messages": [
+      {
+        "role": "customer",
+        "text": "Outlook keeps asking for my password over and over",
+        "ts": "2026-09-06T11:00:00"
+      },
+      {
+        "role": "agent",
+        "text": "That often happens after a password change when old credentials are cached. Did you change your password recently?",
+        "ts": "2026-09-06T11:02:00"
+      },
+      {
+        "role": "customer",
+        "text": "yes yesterday",
+        "ts": "2026-09-06T11:04:00"
+      },
+      {
+        "role": "agent",
+        "text": "I've cleared the cached credentials for your account on the server side. Close Outlook, reopen it, and sign in once with the new password.",
+        "ts": "2026-09-06T11:06:00"
+      },
+      {
+        "role": "customer",
+        "text": "fixed, thanks",
+        "ts": "2026-09-06T11:08:00"
+      }
+    ]
+  },
+  {
+    "id": "HD-1023",
+    "channel": "chat",
+    "messages": [
+      {
+        "role": "customer",
+        "text": "Can you install the plotter driver for PRN-500 on my laptop LT-3311? I'm in the design team",
+        "ts": "2026-09-06T13:00:00"
+      },
+      {
+        "role": "agent",
+        "text": "PRN-500 is restricted to the design group. I can see you're a member, so I'm pushing the PRN-500 driver to LT-3311 now.",
+        "ts": "2026-09-06T13:02:00"
+      },
+      {
+        "role": "customer",
+        "text": "thanks",
+        "ts": "2026-09-06T13:04:00"
+      }
+    ]
+  },
+  {
+    "id": "HD-1024",
+    "channel": "chat",
+    "messages": [
+      {
+        "role": "customer",
+        "text": "please give me access to PRN-500, the plotter. I'm in sales",
+        "ts": "2026-09-06T15:00:00"
+      },
+      {
+        "role": "agent",
+        "text": "PRN-500 is restricted to the design group, and access needs approval from the design team lead. Would you like me to request it?",
+        "ts": "2026-09-06T15:02:00"
+      },
+      {
+        "role": "customer",
+        "text": "yes please",
+        "ts": "2026-09-06T15:04:00"
+      },
+      {
+        "role": "agent",
+        "text": "I've sent an access request for PRN-500 to the design team lead. You'll get an email once it's approved.",
+        "ts": "2026-09-06T15:06:00"
+      }
+    ]
+  }
+]

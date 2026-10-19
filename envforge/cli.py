@@ -7,7 +7,10 @@ envforge run netops --model anthropic:claude-sonnet-4-5 --episodes 30 --tiers 1,
 envforge eval data/runs/<run-id>
 envforge compare data/runs/<a> data/runs/<b> ...
 envforge show data/runs/<run-id> --episode 0
-envforge filter data/runs/<run-id> --min-reward 1.0 -o data/sft/good.jsonl
+envforge filter data/runs/<run-id> --min-reward 1.0 --format chat -o data/sft/good.jsonl
+envforge compute vllm-up Qwen/Qwen2.5-3B-Instruct --host gpu-1      (docs/COMPUTE.md)
+envforge train dataset <runs> --name v1 && envforge train sft v1 --base <hf-id> --host gpu-1 (docs/TRAINING.md)
+envforge admin reset-password me@example.com                        (web layer)
 """
 
 from __future__ import annotations
@@ -20,16 +23,28 @@ from rich.console import Console
 from rich.table import Table
 
 from envforge import config
+from envforge.compute.cli import compute_app
 from envforge.core.evaluate import Metrics, evaluate_run, filter_trajectories
 from envforge.core.registry import discover_packs, get_pack
 from envforge.core.runner import run_many
 from envforge.core.trajectory import load_run
+from envforge.declarative.cli import env_app
 from envforge.models import PROVIDER_HELP, load_model
+from envforge.train.cli import train_app
 
 app = typer.Typer(
     help="Pluggable RL environments + eval-to-training pipeline for LLM agents.",
     no_args_is_help=True,
 )
+app.add_typer(compute_app, name="compute")
+app.add_typer(train_app, name="train")
+app.add_typer(env_app, name="env")
+try:  # the admin commands need the web extra (uv sync --extra web)
+    from envforge.web.admin_cli import admin_app
+
+    app.add_typer(admin_app, name="admin")
+except ImportError:
+    pass
 console = Console()
 
 
@@ -130,7 +145,14 @@ def _metrics_row(label: str, m: Metrics) -> list[str]:
         f"{m.collateral_rate:.0%}",
         f"{m.max_steps_rate:.0%}",
         f"{m.input_tokens + m.output_tokens:,}",
+        _cost(m.cost_usd),
     ]
+
+
+def _cost(usd: float | None) -> str:
+    if usd is None:
+        return "?"
+    return "$0" if usd == 0 else f"${usd:,.4f}" if usd < 1 else f"${usd:,.2f}"
 
 
 def _print_report(report) -> None:
@@ -145,6 +167,7 @@ def _print_report(report) -> None:
         "collateral",
         "budget out",
         "tokens",
+        "cost",
         title=f"{report.meta.get('pack', '?')} · {report.meta.get('model', '?')}",
     )
     t.add_row(*_metrics_row("overall", report.overall), style="bold")
@@ -166,7 +189,7 @@ def eval_cmd(run_dir: Path, as_json: bool = typer.Option(False, "--json")) -> No
 @app.command()
 def compare(run_dirs: list[Path]) -> None:
     """Side-by-side metrics for several runs (e.g. different models or before/after training)."""
-    t = Table("run", "model", "n", "solve", "reward", "steps", "collateral", "tokens")
+    t = Table("run", "model", "n", "solve", "reward", "steps", "collateral", "tokens", "cost")
     for rd in run_dirs:
         r = evaluate_run(rd)
         m = r.overall
@@ -179,6 +202,7 @@ def compare(run_dirs: list[Path]) -> None:
             f"{m.mean_steps:.1f}",
             f"{m.collateral_rate:.0%}",
             f"{m.input_tokens + m.output_tokens:,}",
+            _cost(m.cost_usd),
         )
     console.print(t)
 
@@ -218,20 +242,29 @@ def filter_cmd(
     output: Path = typer.Option(
         None, "-o", "--output", help="default data/workspaces/<ws>/sft/filtered.jsonl"
     ),
+    fmt: str = typer.Option(
+        "trajectory", "--format", help="trajectory (lossless) | chat (OpenAI messages, for SFT)"
+    ),
 ) -> None:
     """Rejection sampling: keep high-reward trajectories from one or more runs into one JSONL."""
+    from envforge.train.filter import dataset_lines, tool_schemas
+
+    if fmt not in ("trajectory", "chat"):
+        raise typer.BadParameter("--format must be trajectory or chat")
     output = output or (config.sft_dir(workspace) / "filtered.jsonl")
     kept = []
     total = 0
+    packs = set()
     for rd in run_dirs:
         trajs = load_run(rd)
         total += len(trajs)
         kept.extend(filter_trajectories(trajs, min_reward=min_reward))
+        packs.add(evaluate_run(rd).meta.get("pack"))
+    tools = tool_schemas(get_pack(packs.pop())) if fmt == "chat" and len(packs) == 1 else None
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("w", encoding="utf-8") as f:
-        for t in kept:
-            f.write(t.model_dump_json() + "\n")
-    console.print(f"kept {len(kept)}/{total} trajectories -> {output}")
+        f.writelines(dataset_lines(kept, fmt=fmt, tools=tools))  # type: ignore[arg-type]
+    console.print(f"kept {len(kept)}/{total} trajectories -> {output} ({fmt})")
 
 
 if __name__ == "__main__":

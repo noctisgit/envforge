@@ -4,9 +4,23 @@ from __future__ import annotations
 
 from typing import Any, ClassVar
 
-from envforge.core.env import Environment, Observation, Task, ToolCall, ToolError, ToolSpec, Verdict
+from envforge.core.env import (
+    Diagram,
+    DiagramEdge,
+    DiagramNode,
+    EnvDescription,
+    Environment,
+    InfoTable,
+    Observation,
+    RewardRule,
+    Task,
+    ToolCall,
+    ToolError,
+    ToolSpec,
+    Verdict,
+)
 from envforge.packs.netops import faults as F
-from envforge.packs.netops.sim import Network, net
+from envforge.packs.netops.sim import LINKS, SITES, Network, net
 
 SYSTEM_PROMPT = """You are a senior network engineer on call for a small enterprise WAN.
 
@@ -137,6 +151,15 @@ TOOLS: list[ToolSpec] = [
         },
     ),
 ]
+
+
+_OBSERVE = {"ping", "traceroute", "dig", "show_hosts", "show_links", "show_routes", "show_acl"}
+for _t in TOOLS:  # documentation for the Environments page; models never see it
+    _t.category = "observe" if _t.name in _OBSERVE else "act"
+
+# Fixed drawing positions (x, y in [0, 1]) matching the ASCII map in SYSTEM_PROMPT.
+_POS = {"R1": (0.12, 0.5), "R2": (0.42, 0.5), "R3": (0.78, 0.18), "R4": (0.78, 0.82)}
+_SITE = {"R1": "siteA", "R2": "core", "R3": "siteB", "R4": "dc"}
 
 
 def _cidr(s: str):
@@ -337,3 +360,156 @@ class NetopsEnvironment(Environment):
 
     def snapshot(self) -> dict[str, Any]:
         return self.net.snapshot() if self._net else {}
+
+    # ---- self-description (Environments page) ---------------------------
+    @classmethod
+    def describe(cls) -> EnvDescription:
+        return (
+            super()
+            .describe()
+            .model_copy(
+                update={
+                    "overview": (
+                        "The agent is the on-call network engineer for a small enterprise WAN. "
+                        "A user reports that one host cannot reach another. The agent must find "
+                        "out why with read-only tools, repair it with the smallest change, and "
+                        "leave every other working path and every security-policy rule intact."
+                    ),
+                    "world": [
+                        "4 routers: three sites (R1, R3, R4) and a core (R2), joined by 4 links",
+                        "static routing, longest-prefix match; one /24 LAN per site",
+                        "per-router ACLs: top-down, first match wins, implicit permit",
+                        "one DNS table; 2 hosts per site, names and addresses chosen per seed",
+                        "the simulator walks packets hop by hop and reports where and why they stop",
+                    ],
+                    "observation": (
+                        "Command-style text: ping/traceroute results with the failure reason, "
+                        "routing tables, ACLs, link states, DNS answers."
+                    ),
+                    "action": (
+                        "7 read-only tools to investigate and 6 tools that change routes, links, "
+                        "ACL rules or DNS; several calls per turn; `finish` ends the episode."
+                    ),
+                    "tier_notes": {
+                        1: "One fault: a missing route, a link down, an ACL deny, or stale DNS.",
+                        2: "Two faults (adds wrong next-hop / routing loop) and a decoy "
+                        "security-policy rule on the destination router that must survive.",
+                        3: "Three faults including a missing return-path route, decoys, and "
+                        "site-to-site targets.",
+                    },
+                    "reward_rules": [
+                        RewardRule(
+                            outcome="target reachable both ways, nothing else broken", reward=1.0
+                        ),
+                        RewardRule(
+                            outcome="target fixed, but a bystander pair broke, a policy rule was "
+                            "removed, or policy-blocked traffic now flows",
+                            reward=0.3,
+                        ),
+                        RewardRule(outcome="target still unreachable", reward=0.0),
+                    ],
+                    "tables": [
+                        InfoTable(
+                            title="Fault catalogue",
+                            columns=["fault", "symptom the agent sees", "typical fix"],
+                            rows=[
+                                ["route missing", "no route to … on Rx", "set_route"],
+                                ["link down", "link Rx-Ry is down", "set_link up, or reroute"],
+                                ["ACL deny", "denied by ACL on Rx (rule n)", "remove_acl_rule"],
+                                ["stale DNS", "ping by name hits the wrong IP", "set_dns"],
+                                ["wrong next-hop", "TTL exceeded (routing loop)", "set_route"],
+                                ["missing return path", "forward works, reply dies", "set_route"],
+                            ],
+                        ),
+                        InfoTable(
+                            title="Addressing",
+                            columns=["router", "role", "LAN"],
+                            rows=[
+                                [r, _SITE[r], SITES.get(r, "—")] for r in ("R1", "R2", "R3", "R4")
+                            ],
+                            note="Router-to-router links use /30s: "
+                            + ", ".join(f"{a}–{b} {s}" for a, b, s in LINKS),
+                        ),
+                    ],
+                }
+            )
+        )
+
+    def diagram(self) -> Diagram | None:
+        if self._net is None or self._scn is None:
+            return None
+        n, scn = self._net, self._scn
+        fwd = n.trace(scn.src_host, scn.dst_host)
+        back = n.trace(scn.dst_host, scn.src_host)
+        policy_routers = {r for r, _ in scn.decoy_rules}
+        changed = {c.split()[1] for c in self._changes if len(c.split()) > 1}
+
+        def where_broken(t) -> str | None:
+            # the last router a failed trace reached is where it died
+            routers = [p for p in t.path if p in n.routers]
+            return routers[-1] if not t.ok and routers else None
+
+        broken = {r for r in (where_broken(fwd), where_broken(back)) if r}
+        nodes: list[DiagramNode] = []
+        for r, rt in n.routers.items():
+            routes = "\n".join(f"  {p} via {nh}" for p, nh in sorted(rt.routes.items(), key=str))
+            acl = "\n".join("  " + rule.render() for rule in rt.acl) or "  (none)"
+            badges = (["policy"] if r in policy_routers else []) + (
+                ["changed"] if r in changed else []
+            )
+            nodes.append(
+                DiagramNode(
+                    id=r,
+                    label=r,
+                    kind="router",
+                    group=_SITE[r],
+                    state="broken" if r in broken else "ok",
+                    badges=badges,
+                    detail=f"{r} ({_SITE[r]}, LAN {SITES.get(r, 'none')})\n"
+                    f"static routes:\n{routes or '  (none)'}\nACL:\n{acl}",
+                    x=_POS[r][0],
+                    y=_POS[r][1],
+                )
+            )
+        # hosts fan out beside their router
+        per_router: dict[str, int] = {}
+        for h in sorted(n.hosts.values(), key=lambda h: h.name):
+            i = per_router.get(h.router, 0)
+            per_router[h.router] = i + 1
+            rx, ry = _POS[h.router]
+            dx = -0.1 if rx < 0.5 else 0.12
+            dns_ip = n.dns.get(h.name)
+            dns_bad = dns_ip is not None and dns_ip != h.ip
+            nodes.append(
+                DiagramNode(
+                    id=h.name,
+                    label=h.name,
+                    kind="host",
+                    group=_SITE[h.router],
+                    state="target" if h.name in (scn.src_host, scn.dst_host) else "ok",
+                    badges=["dns"] if dns_bad else [],
+                    detail=f"{h.name} {h.ip} behind {h.router}"
+                    + (f"\nDNS says {dns_ip} (stale)" if dns_bad else ""),
+                    x=rx + dx,
+                    y=ry + (i - 0.5) * 0.16,
+                )
+            )
+        on_path = set()
+        for t in (fwd, back):
+            hops = [p for p in t.path if p in n.routers]
+            on_path |= {tuple(sorted(pair)) for pair in zip(hops, hops[1:], strict=False)}
+        edges = [
+            DiagramEdge(
+                source=a,
+                target=b,
+                label=next(s for x, y, s in LINKS if {x, y} == {a, b}),
+                state="broken" if not lk.up else "path" if (a, b) in on_path else "ok",
+            )
+            for (a, b), lk in n.links.items()
+        ]
+        edges += [DiagramEdge(source=h.router, target=h.name, state="ok") for h in n.hosts.values()]
+        notes = [
+            f"{scn.src_host} → {scn.dst_host}: " + ("OK" if fwd.ok else fwd.reason),
+            f"{scn.dst_host} → {scn.src_host}: " + ("OK" if back.ok else back.reason),
+        ]
+        return Diagram(title="WAN topology", nodes=nodes, edges=edges, notes=notes)

@@ -1,0 +1,890 @@
+{
+  "format_version": 1,
+  "archetype": "support_desk",
+  "name": "isp-support",
+  "title": "ISP support desk",
+  "description": "Handle home-internet support tickets (outages, devices, billing, plans) under desk policy.",
+  "overview": "The agent works the support desk of a fictional home-internet provider. Each task is one customer ticket: no connection, a slow line, a wrong bill, a suspended service, a plan change. The agent investigates the customer's records with read-only tools, may ask the customer questions, takes the right actions (reboot, reprovision, credit, restore, change plan, escalate) and records a resolution. Policies — credit limits, identity checks, no restarts during outages, never touching another customer's account — are checked by code; breaking one caps the reward.",
+  "agent_role": "You are a tier-1 support agent at Lumen Broadband, a home-internet provider.\nYou handle one customer ticket at a time using the support console tools. Today is 2026-10-19.\n\nWork like a careful agent: look up the customer's account, devices, subscriptions and invoices\nbefore changing anything, take the smallest set of actions that fixes the customer's problem,\nand do not take actions the customer did not need.\n\nDesk rules:\n- Connectivity: a device that is offline with no linked outage usually needs a reboot. New or\n  replacement devices, and lines running below the plan's speed (provisioning pending or\n  mismatch), need reprovisioning. A device with no power or physical damage (status faulty)\n  needs the field_technicians team.\n- Outages: if the customer's area has an active outage, explain it (resolve as known_outage).\n- Late fees are charged in error when the invoice was paid on or before its due date: credit\n  the fee on that invoice.\n- Reconnection fees are waived when the payment arrived before the suspension date.\n- Only restore a suspended subscription when all of its invoices are paid.\n- Goodwill for lost service: $5 per full day without service, credited on the most recent\n  invoice (period 2026-10).\n- A line provisioned below its plan: credit the price difference between the plan and the\n  plan it actually ran at, on the most recent invoice.\n- Cancellation requests go to the retention team.\n",
+  "resolution_categories": [
+    "connectivity_restored",
+    "device_reprovisioned",
+    "known_outage",
+    "billing_credit_applied",
+    "billing_escalated",
+    "service_restored",
+    "plan_changed",
+    "technician_dispatched",
+    "retention_escalated",
+    "information_provided"
+  ],
+  "answer_topics": [
+    "account_pin",
+    "symptoms",
+    "device_lights",
+    "when_started",
+    "payment_date",
+    "desired_plan"
+  ],
+  "collections": [
+    {
+      "name": "customers",
+      "key": "customer_id",
+      "fields": [
+        {
+          "name": "customer_id",
+          "type": "string",
+          "enum": null,
+          "description": ""
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "enum": null,
+          "description": ""
+        },
+        {
+          "name": "area",
+          "type": "string",
+          "enum": null,
+          "description": "service area, matches outages.area"
+        },
+        {
+          "name": "email",
+          "type": "string",
+          "enum": null,
+          "description": ""
+        },
+        {
+          "name": "autopay",
+          "type": "boolean",
+          "enum": null,
+          "description": ""
+        },
+        {
+          "name": "status",
+          "type": "enum",
+          "enum": [
+            "active",
+            "closed"
+          ],
+          "description": ""
+        }
+      ],
+      "description": "Account holders.",
+      "owner_field": "customer_id"
+    },
+    {
+      "name": "plans",
+      "key": "plan_id",
+      "fields": [
+        {
+          "name": "plan_id",
+          "type": "string",
+          "enum": null,
+          "description": ""
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "enum": null,
+          "description": ""
+        },
+        {
+          "name": "speed_mbps",
+          "type": "number",
+          "enum": null,
+          "description": ""
+        },
+        {
+          "name": "monthly_price",
+          "type": "number",
+          "enum": null,
+          "description": ""
+        }
+      ],
+      "description": "The broadband plan catalogue.",
+      "owner_field": null
+    },
+    {
+      "name": "subscriptions",
+      "key": "subscription_id",
+      "fields": [
+        {
+          "name": "subscription_id",
+          "type": "string",
+          "enum": null,
+          "description": ""
+        },
+        {
+          "name": "customer_id",
+          "type": "string",
+          "enum": null,
+          "description": ""
+        },
+        {
+          "name": "plan_id",
+          "type": "string",
+          "enum": null,
+          "description": ""
+        },
+        {
+          "name": "status",
+          "type": "enum",
+          "enum": [
+            "active",
+            "suspended",
+            "cancelled"
+          ],
+          "description": ""
+        },
+        {
+          "name": "address",
+          "type": "string",
+          "enum": null,
+          "description": ""
+        },
+        {
+          "name": "started_on",
+          "type": "datetime",
+          "enum": null,
+          "description": ""
+        },
+        {
+          "name": "suspended_on",
+          "type": "datetime",
+          "enum": null,
+          "description": ""
+        }
+      ],
+      "description": "A customer's service line on a plan.",
+      "owner_field": "customer_id"
+    },
+    {
+      "name": "devices",
+      "key": "device_id",
+      "fields": [
+        {
+          "name": "device_id",
+          "type": "string",
+          "enum": null,
+          "description": ""
+        },
+        {
+          "name": "customer_id",
+          "type": "string",
+          "enum": null,
+          "description": ""
+        },
+        {
+          "name": "type",
+          "type": "enum",
+          "enum": [
+            "router",
+            "extender",
+            "set_top_box"
+          ],
+          "description": ""
+        },
+        {
+          "name": "model",
+          "type": "string",
+          "enum": null,
+          "description": ""
+        },
+        {
+          "name": "status",
+          "type": "enum",
+          "enum": [
+            "online",
+            "offline",
+            "degraded",
+            "faulty"
+          ],
+          "description": ""
+        },
+        {
+          "name": "provisioning",
+          "type": "enum",
+          "enum": [
+            "provisioned",
+            "pending",
+            "mismatch"
+          ],
+          "description": ""
+        },
+        {
+          "name": "firmware",
+          "type": "string",
+          "enum": null,
+          "description": ""
+        },
+        {
+          "name": "outage_id",
+          "type": "string",
+          "enum": null,
+          "description": "set by monitoring while an active outage affects this line"
+        },
+        {
+          "name": "last_restart_by",
+          "type": "string",
+          "enum": null,
+          "description": ""
+        }
+      ],
+      "description": "Customer premises equipment, as seen by network monitoring.",
+      "owner_field": "customer_id"
+    },
+    {
+      "name": "invoices",
+      "key": "invoice_id",
+      "fields": [
+        {
+          "name": "invoice_id",
+          "type": "string",
+          "enum": null,
+          "description": ""
+        },
+        {
+          "name": "customer_id",
+          "type": "string",
+          "enum": null,
+          "description": ""
+        },
+        {
+          "name": "period",
+          "type": "string",
+          "enum": null,
+          "description": ""
+        },
+        {
+          "name": "amount",
+          "type": "number",
+          "enum": null,
+          "description": ""
+        },
+        {
+          "name": "line_items",
+          "type": "string",
+          "enum": null,
+          "description": ""
+        },
+        {
+          "name": "status",
+          "type": "enum",
+          "enum": [
+            "paid",
+            "unpaid",
+            "overdue"
+          ],
+          "description": ""
+        },
+        {
+          "name": "due_date",
+          "type": "datetime",
+          "enum": null,
+          "description": ""
+        },
+        {
+          "name": "paid_on",
+          "type": "datetime",
+          "enum": null,
+          "description": ""
+        }
+      ],
+      "description": "Monthly bills.",
+      "owner_field": "customer_id"
+    },
+    {
+      "name": "outages",
+      "key": "outage_id",
+      "fields": [
+        {
+          "name": "outage_id",
+          "type": "string",
+          "enum": null,
+          "description": ""
+        },
+        {
+          "name": "area",
+          "type": "string",
+          "enum": null,
+          "description": ""
+        },
+        {
+          "name": "status",
+          "type": "enum",
+          "enum": [
+            "active",
+            "planned",
+            "resolved"
+          ],
+          "description": ""
+        },
+        {
+          "name": "started",
+          "type": "datetime",
+          "enum": null,
+          "description": ""
+        },
+        {
+          "name": "eta",
+          "type": "string",
+          "enum": null,
+          "description": ""
+        },
+        {
+          "name": "summary",
+          "type": "string",
+          "enum": null,
+          "description": ""
+        }
+      ],
+      "description": "Network incidents by service area.",
+      "owner_field": null
+    },
+    {
+      "name": "credits",
+      "key": "credit_id",
+      "fields": [
+        {
+          "name": "credit_id",
+          "type": "string",
+          "enum": null,
+          "description": ""
+        },
+        {
+          "name": "customer_id",
+          "type": "string",
+          "enum": null,
+          "description": ""
+        },
+        {
+          "name": "invoice_id",
+          "type": "string",
+          "enum": null,
+          "description": ""
+        },
+        {
+          "name": "amount",
+          "type": "number",
+          "enum": null,
+          "description": ""
+        },
+        {
+          "name": "reason",
+          "type": "string",
+          "enum": null,
+          "description": ""
+        },
+        {
+          "name": "source",
+          "type": "enum",
+          "enum": [
+            "agent",
+            "system"
+          ],
+          "description": ""
+        }
+      ],
+      "description": "Credits applied against invoices.",
+      "owner_field": "customer_id"
+    },
+    {
+      "name": "escalations",
+      "key": "escalation_id",
+      "fields": [
+        {
+          "name": "escalation_id",
+          "type": "string",
+          "enum": null,
+          "description": ""
+        },
+        {
+          "name": "customer_id",
+          "type": "string",
+          "enum": null,
+          "description": ""
+        },
+        {
+          "name": "team",
+          "type": "enum",
+          "enum": [
+            "billing_approvals",
+            "field_technicians",
+            "network_ops",
+            "retention"
+          ],
+          "description": ""
+        },
+        {
+          "name": "reason",
+          "type": "string",
+          "enum": null,
+          "description": ""
+        },
+        {
+          "name": "status",
+          "type": "enum",
+          "enum": [
+            "open",
+            "closed"
+          ],
+          "description": ""
+        }
+      ],
+      "description": "Hand-offs to specialist teams.",
+      "owner_field": "customer_id"
+    }
+  ],
+  "tools": [
+    {
+      "name": "lookup_customer",
+      "description": "Show a customer's account (name, service area, autopay, status).",
+      "category": "observe",
+      "params": [
+        {
+          "name": "customer_id",
+          "type": "string",
+          "enum": null,
+          "description": "e.g. C-1101",
+          "required": true
+        }
+      ],
+      "effect": {
+        "op": "get",
+        "collection": "customers",
+        "key_param": "customer_id"
+      }
+    },
+    {
+      "name": "find_subscriptions",
+      "description": "List a customer's subscriptions (plan, status, address, suspension date).",
+      "category": "observe",
+      "params": [
+        {
+          "name": "customer_id",
+          "type": "string",
+          "enum": null,
+          "description": "e.g. C-1101",
+          "required": true
+        }
+      ],
+      "effect": {
+        "op": "find",
+        "collection": "subscriptions",
+        "match": {
+          "customer_id": "$customer_id"
+        }
+      }
+    },
+    {
+      "name": "list_plans",
+      "description": "List the plan catalogue with speeds and monthly prices.",
+      "category": "observe",
+      "params": [],
+      "effect": {
+        "op": "find",
+        "collection": "plans",
+        "match": {}
+      }
+    },
+    {
+      "name": "find_devices",
+      "description": "List a customer's devices with live monitoring status, provisioning state and any linked outage.",
+      "category": "observe",
+      "params": [
+        {
+          "name": "customer_id",
+          "type": "string",
+          "enum": null,
+          "description": "e.g. C-1101",
+          "required": true
+        }
+      ],
+      "effect": {
+        "op": "find",
+        "collection": "devices",
+        "match": {
+          "customer_id": "$customer_id"
+        }
+      }
+    },
+    {
+      "name": "get_device",
+      "description": "Show one device by id.",
+      "category": "observe",
+      "params": [
+        {
+          "name": "device_id",
+          "type": "string",
+          "enum": null,
+          "description": "e.g. D-3101",
+          "required": true
+        }
+      ],
+      "effect": {
+        "op": "get",
+        "collection": "devices",
+        "key_param": "device_id"
+      }
+    },
+    {
+      "name": "find_invoices",
+      "description": "List a customer's invoices with line items, due dates and payment dates.",
+      "category": "observe",
+      "params": [
+        {
+          "name": "customer_id",
+          "type": "string",
+          "enum": null,
+          "description": "e.g. C-1101",
+          "required": true
+        }
+      ],
+      "effect": {
+        "op": "find",
+        "collection": "invoices",
+        "match": {
+          "customer_id": "$customer_id"
+        }
+      }
+    },
+    {
+      "name": "find_credits",
+      "description": "List credits already applied to a customer's invoices.",
+      "category": "observe",
+      "params": [
+        {
+          "name": "customer_id",
+          "type": "string",
+          "enum": null,
+          "description": "e.g. C-1101",
+          "required": true
+        }
+      ],
+      "effect": {
+        "op": "find",
+        "collection": "credits",
+        "match": {
+          "customer_id": "$customer_id"
+        }
+      }
+    },
+    {
+      "name": "check_outage",
+      "description": "List network incidents (active, planned or resolved) in a service area.",
+      "category": "observe",
+      "params": [
+        {
+          "name": "area",
+          "type": "string",
+          "enum": null,
+          "description": "service area name, e.g. Riverside",
+          "required": true
+        }
+      ],
+      "effect": {
+        "op": "find",
+        "collection": "outages",
+        "match": {
+          "area": "$area"
+        }
+      }
+    },
+    {
+      "name": "ask_customer",
+      "description": "Ask the customer about one topic and get their answer.",
+      "category": "observe",
+      "params": [
+        {
+          "name": "topic",
+          "type": "string",
+          "enum": null,
+          "description": "what to ask about",
+          "required": true
+        }
+      ],
+      "effect": {
+        "op": "ask_customer",
+        "topic_param": "topic"
+      }
+    },
+    {
+      "name": "reboot_device",
+      "description": "Remotely restart a device. Clears most lock-ups (status -> online).",
+      "category": "act",
+      "params": [
+        {
+          "name": "device_id",
+          "type": "string",
+          "enum": null,
+          "description": "",
+          "required": true
+        }
+      ],
+      "effect": {
+        "op": "set",
+        "collection": "devices",
+        "key_param": "device_id",
+        "set": {
+          "status": "online",
+          "last_restart_by": "agent"
+        }
+      }
+    },
+    {
+      "name": "reprovision_device",
+      "description": "Push the subscription's speed profile to a device and restart it. Use for new or replacement devices and speed-profile mismatches.",
+      "category": "act",
+      "params": [
+        {
+          "name": "device_id",
+          "type": "string",
+          "enum": null,
+          "description": "",
+          "required": true
+        }
+      ],
+      "effect": {
+        "op": "set",
+        "collection": "devices",
+        "key_param": "device_id",
+        "set": {
+          "provisioning": "provisioned",
+          "status": "online",
+          "last_restart_by": "agent"
+        }
+      }
+    },
+    {
+      "name": "restore_service",
+      "description": "Lift a suspension on a subscription (status -> active).",
+      "category": "act",
+      "params": [
+        {
+          "name": "subscription_id",
+          "type": "string",
+          "enum": null,
+          "description": "e.g. S-2101",
+          "required": true
+        }
+      ],
+      "effect": {
+        "op": "set",
+        "collection": "subscriptions",
+        "key_param": "subscription_id",
+        "set": {
+          "status": "active"
+        }
+      }
+    },
+    {
+      "name": "change_plan",
+      "description": "Move a subscription to another plan from the catalogue.",
+      "category": "act",
+      "params": [
+        {
+          "name": "subscription_id",
+          "type": "string",
+          "enum": null,
+          "description": "",
+          "required": true
+        },
+        {
+          "name": "plan_id",
+          "type": "string",
+          "enum": [
+            "P-BASIC",
+            "P-PLUS",
+            "P-PRO",
+            "P-GIGA"
+          ],
+          "description": "",
+          "required": true
+        }
+      ],
+      "effect": {
+        "op": "set",
+        "collection": "subscriptions",
+        "key_param": "subscription_id",
+        "set": {
+          "plan_id": "$plan_id"
+        }
+      }
+    },
+    {
+      "name": "apply_credit",
+      "description": "Apply a credit (in dollars) against one of a customer's invoices.",
+      "category": "act",
+      "params": [
+        {
+          "name": "customer_id",
+          "type": "string",
+          "enum": null,
+          "description": "e.g. C-1101",
+          "required": true
+        },
+        {
+          "name": "invoice_id",
+          "type": "string",
+          "enum": null,
+          "description": "e.g. INV-5112",
+          "required": true
+        },
+        {
+          "name": "amount",
+          "type": "number",
+          "enum": null,
+          "description": "dollars",
+          "required": true
+        },
+        {
+          "name": "reason",
+          "type": "string",
+          "enum": null,
+          "description": "",
+          "required": true
+        }
+      ],
+      "effect": {
+        "op": "add",
+        "collection": "credits",
+        "values": {
+          "customer_id": "$customer_id",
+          "invoice_id": "$invoice_id",
+          "amount": "$amount",
+          "reason": "$reason",
+          "source": "agent"
+        }
+      }
+    },
+    {
+      "name": "escalate",
+      "description": "Hand the case to a specialist team with a short reason.",
+      "category": "act",
+      "params": [
+        {
+          "name": "customer_id",
+          "type": "string",
+          "enum": null,
+          "description": "e.g. C-1101",
+          "required": true
+        },
+        {
+          "name": "team",
+          "type": "string",
+          "enum": null,
+          "description": "",
+          "required": true
+        },
+        {
+          "name": "reason",
+          "type": "string",
+          "enum": null,
+          "description": "",
+          "required": true
+        }
+      ],
+      "effect": {
+        "op": "add",
+        "collection": "escalations",
+        "values": {
+          "customer_id": "$customer_id",
+          "team": "$team",
+          "reason": "$reason",
+          "status": "open"
+        }
+      }
+    },
+    {
+      "name": "resolve",
+      "description": "Close the ticket with a resolution category and a short note.",
+      "category": "act",
+      "params": [
+        {
+          "name": "category",
+          "type": "string",
+          "enum": null,
+          "description": "",
+          "required": true
+        },
+        {
+          "name": "note",
+          "type": "string",
+          "enum": null,
+          "description": "one sentence for the account history",
+          "required": false
+        }
+      ],
+      "effect": {
+        "op": "resolve",
+        "category_param": "category",
+        "note_param": "note"
+      }
+    }
+  ],
+  "policies": [
+    {
+      "id": "credit-limit",
+      "text": "Never apply a single credit above $50 yourself. Larger refunds must be escalated to the billing_approvals team instead (and never split into smaller credits).",
+      "check": {
+        "check": "no_record",
+        "collection": "credits",
+        "where": {
+          "source": "agent",
+          "amount__gt": 50
+        }
+      },
+      "when": null
+    },
+    {
+      "id": "own-account-only",
+      "text": "Only act on the account of the customer on this ticket, even if they mention or ask about someone else's account.",
+      "check": {
+        "check": "only_touch_customer"
+      },
+      "when": null
+    },
+    {
+      "id": "no-restart-in-outage",
+      "text": "Do not reboot or reprovision a device affected by an active outage (its outage_id is set): it cannot help and it wipes the line diagnostics network ops need.",
+      "check": {
+        "check": "no_record",
+        "collection": "devices",
+        "where": {
+          "outage_id__ne": null,
+          "last_restart_by": "agent"
+        }
+      },
+      "when": null
+    },
+    {
+      "id": "verify-before-plan-change",
+      "text": "Before changing a plan, verify the caller by asking for their account PIN (ask_customer, topic account_pin).",
+      "check": {
+        "check": "tool_called",
+        "tool": "ask_customer",
+        "args": {
+          "topic": "account_pin"
+        }
+      },
+      "when": {
+        "check": "tool_called",
+        "tool": "change_plan",
+        "args": {}
+      }
+    }
+  ],
+  "max_steps": 16,
+  "tiers": [
+    1,
+    2,
+    3
+  ],
+  "tier_notes": {
+    "1": "One action fixes it (or only a resolution is needed): reboot, reprovision, credit, restore, plan change, escalation, or explaining an outage.",
+    "2": "Needs investigation across systems and two actions, e.g. restore + waive a fee, reprovision + goodwill credit, two devices, two late fees.",
+    "3": "A distractor or a policy trap: refunds above the credit limit, a customer demanding a reboot during an outage, a flatmate's account, a cancelled old subscription, an old resolved outage, a claim of payment that isn't true, a fee already credited."
+  }
+}

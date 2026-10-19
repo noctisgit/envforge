@@ -50,6 +50,9 @@ def user_from_claims(db: Session, claims: dict) -> User:
     if user:
         return user
     email = claims.get("email") or f"{clerk_id}@clerk.local"
+    if db.scalar(select(User).where(User.email == email)):
+        # an existing (e.g. local) account already has this email; never attach to it
+        email = f"{clerk_id}@clerk.local"
     user = User(
         email=email,
         display_name=claims.get("name") or claims.get("first_name") or "",

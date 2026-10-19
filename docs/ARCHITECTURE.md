@@ -23,8 +23,10 @@ store, evaluator, filter, (later) trainer and compute backends — only ever see
   environment work lives here because speed and reproducibility beat realism.
 - **`kind = "sandbox"`** — state is a real container, tools run commands inside it. For
   domains where the thing under test *is* real software. Slower, costs money, needs
-  isolation. Backends are pluggable (Docker on your own boxes first; Daytona/E2B/Modal later
-  when you need hundreds of parallel sandboxes with instant reset).
+  isolation. Backends are pluggable (`envforge/sandbox/`: Docker on your own boxes now —
+  no network, no capabilities, read-only root, resource limits, files moved by tar so it
+  works from inside a container; Daytona/E2B/Modal later when you need hundreds of
+  parallel sandboxes with instant reset). `repofix` is the reference sandbox pack.
 
 The runner does not care which; the pack declares it.
 
@@ -86,12 +88,28 @@ data/workspaces/<workspace>/runs/<run-id>/
 Trajectories are the product. Evaluation reads them; `filter` selects them;
 training consumes them. JSONL so many workers can append and nothing needs a database.
 
+`train/filter.py` turns kept trajectories into chat-format JSONL (OpenAI messages + tool
+schemas), rebuilding the exact opening prompt from `meta["first_observation"]`, which the
+runner records. Adding a key to `meta` is not a schema change.
+
+**Prompt caching.** Every prompt is laid out static-first: tools, then the system
+prompt (no timestamps or per-episode data), then the conversation, which only ever grows
+(history is never rewritten). The Anthropic adapter puts a cache breakpoint on the system
+block (caching tools + system, shared by every call of an episode and every episode of an
+environment) and turns on automatic caching for the conversation tail, so each step reads
+the previous prefix at ~0.1x. OpenAI and vLLM cache long prefixes automatically.
+
+**Cost.** Episodes record token usage; `models/catalog.py` prices them from the Vercel AI
+Gateway's public model list (which also prices native Anthropic/OpenAI ids). Prices are
+list prices without caching discounts — an estimate. vLLM and scripted runs cost $0.
+
 **Schema versioning.** `envforge.core.trajectory.SCHEMA_VERSION` is written into every
 line. Breaking changes bump it and get a note here.
 
 | version | change |
 |---|---|
 | 1 | initial |
+| 2 | `Usage` gains `cache_read_tokens` and `cache_write_tokens`; `input_tokens` is now the *whole* prompt for every provider (Anthropic's uncached remainder + cache writes + cache reads). v1 lines load unchanged: the new fields default to 0, which was true then (nothing was cached). |
 
 ## Workspaces
 
@@ -115,9 +133,9 @@ until there is something to authenticate.
 
 | Phase | Deliverable | What you learn |
 |---|---|---|
-| 1 ✅ | core, netops, adapters, eval, CLI | environments, rewards, trajectories, evaluation |
-| 2 | `sipops` sim pack; `repofix` sandbox pack; `sandbox/docker.py`; `compute/ssh.py` | the contract generalises; sandboxes; serving with vLLM |
-| 3 | `train/filter.py`, `train/sft.py` (TRL + LoRA), before/after eval | rejection sampling, SFT, overfitting, checkpoints |
+| 1 ✅ | core, netops, adapters, eval + cost, CLI, chat-format export | environments, rewards, trajectories, evaluation |
+| 2 ✅ | `sipops` sim pack; `repofix` sandbox pack; `sandbox/docker.py`; `compute/ssh.py` + vLLM | the contract generalises; sandboxes; serving with vLLM |
+| 3 ✅ | `train/dataset.py` (rejection sampling, seed bookkeeping), `train/sft.py` (LoRA SFT, assistant-only loss), `train/remote.py` (GPU box), vLLM LoRA serving, before/after eval — docs/TRAINING.md | rejection sampling, SFT, overfitting, contamination |
 | 4 | DPO then GRPO trainers on the same envs | preference data; online RL |
 
 ## Non-goals (for now)

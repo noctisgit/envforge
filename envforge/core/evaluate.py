@@ -10,6 +10,7 @@ Metrics are deliberately simple and are the same for every pack:
 - collateral_rate   fraction of episodes where verdict.details["collateral"] is truthy
 - max_steps_rate    fraction of episodes that ran out of budget
 - tokens            summed input/output tokens
+- cost_usd          estimated USD at list price (models/catalog.py); None if a price is unknown
 - wall_time_s       total wall-clock
 
 Per-tier breakdowns use the same fields.
@@ -24,6 +25,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from envforge.core.trajectory import Trajectory, TrajectoryStore
+from envforge.models.catalog import usage_cost
 
 
 class Metrics(BaseModel):
@@ -38,7 +40,19 @@ class Metrics(BaseModel):
     error_rate: float = 0.0
     input_tokens: int = 0
     output_tokens: int = 0
+    cache_read_tokens: int = 0  # part of input_tokens served from the prompt cache
+    cost_usd: float | None = 0.0
     wall_time_s: float = 0.0
+
+
+def trajectory_cost(t: Trajectory) -> float | None:
+    """Estimated USD for one episode, from its model and token usage."""
+    return usage_cost(t.model, t.usage)
+
+
+def _sum_cost(trajs: list[Trajectory]) -> float | None:
+    costs = [trajectory_cost(t) for t in trajs]
+    return None if any(c is None for c in costs) else sum(c for c in costs if c is not None)
 
 
 def compute_metrics(trajs: list[Trajectory]) -> Metrics:
@@ -60,6 +74,8 @@ def compute_metrics(trajs: list[Trajectory]) -> Metrics:
         error_rate=sum(1 for t in trajs if t.finished_reason == "error") / n,
         input_tokens=sum(t.usage.input_tokens for t in trajs),
         output_tokens=sum(t.usage.output_tokens for t in trajs),
+        cache_read_tokens=sum(t.usage.cache_read_tokens for t in trajs),
+        cost_usd=_sum_cost(trajs),
         wall_time_s=sum(t.wall_time_s for t in trajs),
     )
 

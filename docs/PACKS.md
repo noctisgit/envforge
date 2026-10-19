@@ -15,6 +15,7 @@ register an entry point in the `envforge.packs` group.
 - [ ] `verify()` is pure code; returns `Verdict(success, reward, details)`; put collateral findings in `details["collateral"]` (a list) so the evaluator counts them
 - [ ] `system_prompt()` describes the role and rules; keep tool semantics in the tool descriptions
 - [ ] `reference_solve()` returns tool calls that make `verify()` pass — the tests and the scripted model depend on it
+- [ ] optional but recommended: `category="observe"|"act"` on each `ToolSpec`, `describe()` and `diagram()` (below) so the Environments page can explain the pack
 - [ ] `tests/test_<name>_pack.py`: determinism, broken-initially, reference-passes, partial-fails, collateral-penalised
 - [ ] `envforge run <name> --model scripted --episodes 100` is 100% / 1.00 reward with 0% collateral
 
@@ -87,6 +88,27 @@ class MyEnvironment(Environment):
     def reference_solve(self) -> list[ToolCall]:
         return [ToolCall(id="ref1", name="...", args={...})]
 ```
+
+## Showing up in the Environments page
+
+Every pack appears in the web UI's Environments explorer with no extra code: the default
+`describe()` lists its tools, tiers and budget, and `tests/test_explore.py` checks every
+pack. To make it *explain* your domain, implement two optional hooks (see
+`envforge/core/env.py` and the netops/sipops/repofix packs for examples):
+
+- `describe()` — start from `super().describe()` and `model_copy(update={...})`: an
+  `overview`, `world` facts, `observation` / `action` sentences, `tier_notes`,
+  `reward_rules`, and any `tables` (`InfoTable`: fault catalogues, policies, corpora…).
+- `diagram()` — the world as a `Diagram` of `DiagramNode`s and `DiagramEdge`s:
+  `layout="graph"` (give `x`/`y` in [0, 1] for a hand-made layout, or leave them out for
+  automatic layout; `group` draws zones) or `layout="tree"` (set `parent`, e.g. a file
+  system). Use the standard states so the UI colours them: nodes `ok|broken|target|inactive`,
+  edges `ok|broken|path|inactive`; add free-form `badges` and a `detail` tooltip, and
+  `notes` for one-line captions. Sim packs: reflect *live* state — it is redrawn after every
+  replayed tool call. Sandbox packs: build it from the task alone (no `reset()`).
+
+Task previews and replays are generic (`envforge/core/explore.py`): they regenerate the
+task from its seed and re-apply tool calls, which is why determinism matters.
 
 ## Design advice
 

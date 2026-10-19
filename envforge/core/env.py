@@ -26,11 +26,17 @@ EnvKind = Literal["sim", "sandbox"]
 
 
 class ToolSpec(BaseModel):
-    """A tool the agent may call. `parameters` is a JSON Schema object."""
+    """A tool the agent may call. `parameters` is a JSON Schema object.
+
+    `category` is optional documentation for humans (the Environments page groups
+    tools by it): "observe" for read-only tools, "act" for tools that change state.
+    Models never see it.
+    """
 
     name: str
     description: str
     parameters: dict[str, Any] = Field(default_factory=lambda: {"type": "object", "properties": {}})
+    category: Literal["observe", "act"] | None = None
 
 
 class ToolCall(BaseModel):
@@ -73,6 +79,84 @@ class Verdict(BaseModel):
     success: bool
     reward: float
     details: dict[str, Any] = Field(default_factory=dict)
+
+
+# ---- self-description (for humans: the web UI's Environments page) -----------
+#
+# A pack can describe its world in a domain-neutral shape so one generic UI can show
+# any environment: a diagram is just nodes and edges with a few standard states, and
+# everything else is tables of strings. Nothing here is sent to the model.
+
+
+class DiagramNode(BaseModel):
+    """One thing in the world: a router, a host, a PBX, a file, a service..."""
+
+    id: str
+    label: str
+    kind: str = "node"  # the domain's own word, shown in legends and tooltips
+    group: str | None = None  # a zone or cluster label, e.g. a site name
+    # standard states the UI knows how to colour:
+    #   ok | broken (part of the fault) | target (named in the goal) | inactive
+    state: str = "ok"
+    badges: list[str] = Field(default_factory=list)  # e.g. ["policy", "changed"]
+    detail: str = ""  # tooltip / side-panel text; multi-line is fine
+    x: float | None = None  # optional fixed position in [0, 1]; else auto-layout
+    y: float | None = None
+    parent: str | None = None  # tree layouts: id of the parent node
+
+
+class DiagramEdge(BaseModel):
+    """A connection: a link, a trunk, a dependency, a call path."""
+
+    source: str
+    target: str
+    label: str = ""
+    # ok | broken | path (on the goal's route) | inactive
+    state: str = "ok"
+    directed: bool = False
+
+
+class Diagram(BaseModel):
+    """A picture of the world as data. `layout` is "graph" (nodes + edges) or "tree"
+    (nodes with `parent`, e.g. a file system)."""
+
+    title: str = ""
+    layout: Literal["graph", "tree"] = "graph"
+    nodes: list[DiagramNode] = Field(default_factory=list)
+    edges: list[DiagramEdge] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)  # short captions under the picture
+
+
+class InfoTable(BaseModel):
+    """A titled table of strings: fault catalogues, policy lists, corpus contents..."""
+
+    title: str
+    columns: list[str]
+    rows: list[list[str]]
+    note: str = ""
+
+
+class RewardRule(BaseModel):
+    outcome: str
+    reward: float
+
+
+class EnvDescription(BaseModel):
+    """Everything the Environments page shows about a pack (see Environment.describe)."""
+
+    name: str
+    kind: str
+    description: str
+    overview: str = ""  # a paragraph: what the agent is and what it must achieve
+    world: list[str] = Field(default_factory=list)  # bullet facts about the world
+    observation: str = ""  # what the agent sees
+    action: str = ""  # what the agent can do
+    max_steps: int
+    tiers: list[int]
+    tier_notes: dict[int, str] = Field(default_factory=dict)
+    reward_rules: list[RewardRule] = Field(default_factory=list)
+    tables: list[InfoTable] = Field(default_factory=list)
+    tools: list[ToolSpec] = Field(default_factory=list)
 
 
 class Environment(ABC):
@@ -146,3 +230,39 @@ class Environment(ABC):
     def snapshot(self) -> dict[str, Any]:
         """Serialisable view of current state, for debugging and `envforge show`."""
         return {}
+
+    # ---- optional: self-description for humans ----------------------------
+    @classmethod
+    def describe(cls) -> EnvDescription:
+        """What this environment is, for the Environments page.
+
+        The default is built from the class attributes and the tool list, so a new
+        pack shows up with no extra work. Override it to add an overview, world facts,
+        tier notes, reward rules and tables — start from `super().describe()` and
+        `model_copy(update={...})` the fields you fill in.
+        """
+        env = cls(cls.generate_task(0, cls.tiers[0]))
+        try:
+            tools = env.tools()  # no reset(): sandbox packs must not start a container here
+        finally:
+            env.close()
+        return EnvDescription(
+            name=cls.name,
+            kind=cls.kind,
+            description=cls.description,
+            observation="The text output of each tool call.",
+            action=f"Call any of {len(tools)} tools (several per turn), then `finish`.",
+            max_steps=cls.max_steps,
+            tiers=list(cls.tiers),
+            tools=tools,
+        )
+
+    def diagram(self) -> Diagram | None:
+        """The current world as a diagram, or None if the pack doesn't draw one.
+
+        Sim packs: called after `reset()` and after each replayed step, so it should
+        reflect live state (mark faults `broken`, the goal's endpoints `target`).
+        Sandbox packs: must work *without* `reset()` (from the task alone), because
+        previews and replays never start a container.
+        """
+        return None

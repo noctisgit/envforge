@@ -14,7 +14,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from envforge import __version__
-from envforge.web.routers import auth, runs, workspaces
+from envforge.web.routers import account, auth, builder, runs, workspaces
 from envforge.web.settings import get_settings
 
 
@@ -41,8 +41,10 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
     app.include_router(auth.router)
+    app.include_router(account.router)
     app.include_router(workspaces.router)
     app.include_router(runs.router)
+    app.include_router(builder.router)
 
     @app.get("/api/health")
     def health() -> dict:

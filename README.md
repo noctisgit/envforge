@@ -27,15 +27,17 @@ and fine-tuning for free.
 
 ## Status
 
-**Phase 1 — working.** Core contract, agent runner, trajectory store, evaluation, model adapters
-(Anthropic, OpenAI, Vercel AI Gateway, vLLM, offline scripted), and the `netops` reference pack.
-Everything runs on a CPU box; the only network calls are to model APIs.
+**Phases 1–3 — working.** Core contract, agent runner, trajectory store, evaluation with
+cost estimates, model adapters (Anthropic, OpenAI, Vercel AI Gateway, vLLM, offline scripted),
+three packs (`netops` and `sipops` simulations, the `repofix` Docker sandbox), rejection
+sampling to chat-format training data, and an SSH backend that serves open models with vLLM
+on a rented GPU box.
 
 | Phase | What | Where it runs |
 |---|---|---|
-| 1 ✅ | sim packs · API models · eval | control plane (CPU) |
-| 2 | second pack (sipops) · sandbox packs via Docker · SSH compute backend · vLLM serving | control plane + GPU box |
-| 3 | rejection sampling → LoRA SFT on a 3–4B open model → before/after eval | GPU box |
+| 1 ✅ | sim packs · API models · eval · cost · training-data export | control plane (CPU) |
+| 2 ✅ | sipops sim pack · repofix sandbox pack (Docker) · SSH compute backend · vLLM serving | control plane + GPU box |
+| 3 ✅ | rejection sampling → LoRA SFT on an open model → before/after eval ([docs/TRAINING.md](docs/TRAINING.md)) | GPU box |
 | 4 | DPO, then GRPO on the same environments | GPU box |
 
 ## Quick start
@@ -52,6 +54,7 @@ uv run envforge run netops --model scripted --episodes 9          # offline, no 
 uv run envforge run netops --model anthropic:claude-sonnet-4-5 --episodes 30
 uv run envforge show data/workspaces/default/runs/<run-id> --episode 0
 uv run envforge compare data/workspaces/default/runs/<a> data/workspaces/default/runs/<b>
+uv run envforge filter data/workspaces/default/runs/<a> --min-reward 1.0 --format chat
 ```
 
 Model strings are `provider:model-id`:
@@ -60,8 +63,8 @@ Model strings are `provider:model-id`:
 |---|---|---|
 | `anthropic` | `anthropic:claude-sonnet-4-5` | native Messages API |
 | `openai` | `openai:gpt-4o-mini` | |
-| `vercel` | `vercel:anthropic/claude-opus-5` | [AI Gateway](https://vercel.com/docs/ai-gateway), OpenAI-compatible, 400+ models |
-| `vllm` | `vllm:Qwen/Qwen2.5-3B-Instruct` | your own GPU box, `VLLM_BASE_URL` |
+| `vercel` | `vercel:anthropic/claude-sonnet-4.5` | [AI Gateway](https://vercel.com/docs/ai-gateway), OpenAI-compatible, 400+ models; ids use dots |
+| `vllm` | `vllm:Qwen/Qwen2.5-3B-Instruct` | your own GPU box, `VLLM_BASE_URL`; see [docs/COMPUTE.md](docs/COMPUTE.md) |
 | `scripted` | `scripted` / `scripted:error_every=3` | replays the pack's reference solution; offline |
 
 ## The reference pack: `netops`
@@ -76,6 +79,35 @@ damage, 0 otherwise.
 It is a real environment in miniature: observations are realistic command output, mistakes have
 consequences, and there is more than one correct fix.
 
+## More packs
+
+| pack | kind | the agent must… |
+|---|---|---|
+| `netops` | sim | restore connectivity on a small WAN (routes, ACLs, DNS, links) without breaking anything else |
+| `sipops` | sim | fix a broken SIP call path (dial plans, trunks, codecs, DNS, credentials, registrations) without breaking emergency routing or protected policy — [README](envforge/packs/sipops/README.md) |
+| `repofix` | sandbox | make a small Python repo's tests pass by fixing the source, inside a locked-down container, without editing tests or breaking hidden API — [README](envforge/packs/repofix/README.md) |
+
+`repofix` needs Docker (`ENVFORGE_SANDBOX=docker`, the default); containers run with no network,
+no capabilities, a read-only root and CPU/memory/pid limits (`envforge/sandbox/docker.py`).
+
+## Build environments from your own data
+
+The web UI's **Builder** turns an intent plus data (e.g. support chat logs: CSV, TXT, JSON) into a
+verifiable environment by chatting with a builder agent. Uploads are redacted before any model sees
+them; every change is a revision you can diff, roll back or branch; publishing a revision makes it a
+runnable pack in your workspace. See [docs/BUILDER.md](docs/BUILDER.md).
+
+## Open models on a GPU box
+
+```bash
+uv run envforge compute check --host gpu-1
+uv run envforge compute vllm-up Qwen/Qwen2.5-7B-Instruct --host gpu-1 --api-key "$VLLM_API_KEY"
+VLLM_BASE_URL=http://gpu-1:8000/v1 uv run envforge run netops --model vllm:Qwen/Qwen2.5-7B-Instruct
+```
+
+Needs a VM or bare-metal box with Docker and the NVIDIA container toolkit (RunPod Pods and Vast
+containers have no Docker daemon). See [docs/COMPUTE.md](docs/COMPUTE.md).
+
 ## Writing a pack
 
 A pack is a subpackage of `envforge/packs/` that subclasses `Environment` and implements
@@ -88,8 +120,12 @@ See [docs/PACKS.md](docs/PACKS.md) for the contract and a template, and
 All outputs are namespaced: `data/workspaces/<workspace>/{runs,sft}`. From the CLI, pass
 `--workspace` or set `ENVFORGE_WORKSPACE`.
 
-The optional web layer adds accounts, workspaces, per-workspace provider keys (encrypted at
-rest), model preferences, a run queue with a worker, and a UI for metrics and transcripts.
+The optional web layer adds accounts, private workspaces, per-user provider keys shared by all your workspaces (encrypted
+at rest), a searchable model picker limited to the providers you have keys for, a run queue with
+a worker, metrics and transcripts with step-by-step replays, run comparison and deletion,
+training-data export, token/cost usage per workspace and per user, and an Environments
+explorer (topology diagrams, dimensions, tools, tiers, reward rules, task previews) generated
+from each pack's own code.
 Auth is pluggable: `AUTH_PROVIDER=local` (email + password) or `clerk`. Postgres is the
 production database; `docker compose up -d` brings up the whole stack. See
 [docs/WEB.md](docs/WEB.md).

@@ -66,9 +66,12 @@ def run_episode(
         task=task,
         system_prompt="",
     )
+    total_usage = Usage()  # outside the try: tokens spent before an error still count
 
     try:
         first_obs = env.reset()
+        # kept so the exact opening prompt can be rebuilt for training data (train/filter.py)
+        traj.meta["first_observation"] = first_obs.text
         model.on_reset(env)
         system_prompt = env.system_prompt()
         traj.system_prompt = system_prompt
@@ -82,7 +85,6 @@ def run_episode(
                 content=f"TASK\n{task.goal}\n\nINITIAL STATE\n{first_obs.text}",
             ),
         ]
-        total_usage = Usage()
 
         for i in range(budget):
             t_call = time.perf_counter()
@@ -142,6 +144,7 @@ def run_episode(
     except Exception as e:  # noqa: BLE001 - record and continue the run
         traj.finished_reason = "error"
         traj.error = f"{type(e).__name__}: {e}"
+        traj.usage = total_usage
         try:
             traj.verdict = env.verify()
         except Exception:  # noqa: BLE001

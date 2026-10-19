@@ -49,6 +49,8 @@ class OpenAICompatModel(ChatModel):
         self._model = model
         self._max_tokens = max_tokens
         self._temperature = temperature
+        self._send_temperature = True  # cleared if the model rejects it
+        self._max_tokens_param = "max_tokens"  # or "max_completion_tokens"
         self.model_id = f"{provider}:{model}"
 
     @staticmethod
@@ -87,14 +89,37 @@ class OpenAICompatModel(ChatModel):
             for t in tools
         ]
 
+    def _create(self, messages: list[Message], tools: list[ToolSpec]) -> Any:
+        """Call the API, adapting once to models that reject our sampling parameters.
+
+        Reasoning models (gpt-5, o-series, ...) refuse `temperature` and want
+        `max_completion_tokens` instead of `max_tokens`. Rather than keep a list of
+        which model wants what, we learn it from the first 400 and remember it.
+        """
+        from openai import BadRequestError
+
+        while True:
+            kwargs: dict[str, Any] = {
+                "model": self._model,
+                "messages": self._to_openai(messages),
+                "tools": self._tools(tools),
+            }
+            if self._send_temperature:
+                kwargs["temperature"] = self._temperature
+            kwargs[self._max_tokens_param] = self._max_tokens
+            try:
+                return self._client.chat.completions.create(**kwargs)
+            except BadRequestError as e:
+                msg = str(e).lower()
+                if self._send_temperature and "temperature" in msg:
+                    self._send_temperature = False
+                elif self._max_tokens_param == "max_tokens" and "max_tokens" in msg:
+                    self._max_tokens_param = "max_completion_tokens"
+                else:
+                    raise
+
     def complete(self, messages: list[Message], tools: list[ToolSpec]) -> AssistantTurn:
-        resp = self._client.chat.completions.create(
-            model=self._model,
-            messages=self._to_openai(messages),
-            tools=self._tools(tools),
-            max_tokens=self._max_tokens,
-            temperature=self._temperature,
-        )
+        resp = self._create(messages, tools)
         choice = resp.choices[0].message
         calls: list[ToolCall] = []
         for tc in choice.tool_calls or []:
@@ -103,8 +128,17 @@ class OpenAICompatModel(ChatModel):
             except json.JSONDecodeError:
                 args = {"_raw": tc.function.arguments}
             calls.append(ToolCall(id=tc.id, name=tc.function.name, args=args))
+        # prompt_tokens is the whole prompt; OpenAI (and vLLM) cache long prompt prefixes
+        # automatically and report the reused part here. There is no write premium.
+        details = getattr(resp.usage, "prompt_tokens_details", None)
         usage = Usage(
             input_tokens=getattr(resp.usage, "prompt_tokens", 0) or 0,
             output_tokens=getattr(resp.usage, "completion_tokens", 0) or 0,
+            cache_read_tokens=(getattr(details, "cached_tokens", 0) or 0) if details else 0,
         )
-        return AssistantTurn(text=choice.content or "", tool_calls=calls, usage=usage)
+        return AssistantTurn(
+            text=choice.content or "",
+            tool_calls=calls,
+            usage=usage,
+            raw={"stop_reason": getattr(resp.choices[0], "finish_reason", None)},
+        )

@@ -1,0 +1,47 @@
+Conversation HD-1011
+[13:00] Customer: can't connect to VPN from home, says authentication failed
+[13:02] Agent: Is your regular password working for email right now?
+[13:04] Customer: yes email works
+[13:06] Agent: Your VPN certificate expired yesterday. I've issued a new certificate for your account; open the VPN client and choose Refresh certificate.
+[13:08] Customer: connected, thanks
+---
+Conversation HD-1012
+[15:00] Customer: Hi, PRN-210 is printing everything with streaks
+[15:02] Agent: Thanks for the report. PRN-210 already has an open vendor repair, VND-8812, for its fuser and sensor. Streaking fits the same fault.
+[15:04] Agent: I've added your report to VND-8812 rather than opening a new ticket. Please use PRN-211 until the technician visits tomorrow.
+[15:06] Customer: ok
+---
+Conversation HD-1013
+[09:00] Customer: Printer PRN-118 out of paper in all trays, and the supply room is empty too
+[09:02] Agent: Thanks! Paper is a consumable I can order directly.
+[09:04] Agent: Ordered 5 reams for the 1st floor supply room and asked facilities to fill PRN-118 now from the 2nd floor stock.
+[09:06] Customer: perfect
+---
+Conversation HD-1014
+[11:00] Customer: Hello, I was charged for a replacement keyboard on my department's card 4111 1111 1111 1111 but never received it. — Tom Becker
+[11:02] Agent: Hi Tom, thanks for writing. Please never send card numbers by email; I've removed it from the ticket. Order HW-2987 for a keyboard shows delivered to the 4th floor mailroom on Monday.
+[11:04] Customer: I checked the mailroom, it's not there
+[11:06] Agent: Then it's lost in delivery. I've reshipped the keyboard under HW-2987 at no extra charge and flagged the courier claim. It should reach your desk Thursday.
+[11:08] Customer: thank you
+---
+Conversation HD-1015
+[13:00] Customer: set up the new printer on my laptop? It's not showing up
+[13:02] Agent: Sure. Which printer, and what's your laptop tag?
+[13:04] Customer: PRN-404 on the 4th floor, laptop LT-2208
+[13:06] Agent: PRN-404 was added last week but the driver package wasn't assigned to the 4th floor group. I've added it, and pushed the PRN-404 driver to LT-2208.
+[13:08] Agent: It should appear in your printer list now. Set it as default if you like.
+[13:10] Customer: found it, printing a test page now. works
+---
+Conversation HD-1016
+[15:00] Customer: Every time I print it goes to the wrong printer on another floor
+[15:02] Agent: That's usually the default printer. Which one do you want as default?
+[15:04] Customer: PRN-302 near me, laptop LT-1190
+[15:06] Agent: Your default on LT-1190 was PRN-118 from your old desk. I've set PRN-302 as the default remotely.
+[15:08] Customer: yep that fixed it
+---
+Conversation HD-1017
+[09:00] Customer: Laptop LT-4471 won't turn on at all. Tried charging overnight. Ana Souza here, 555-0173
+[09:02] Agent: Thanks Ana. Does the charger light come on, and does anything happen when you hold the power button for 30 seconds?
+[09:04] Customer: charger light is on, holding power does nothing
+[09:06] Agent: That points to a motherboard failure. LT-4471 is under warranty, so I've opened a warranty repair and reserved loaner laptop LT-9001 for you; pick it up at the 2nd floor IT desk today.
+[09:08] Customer: ok thanks, heading there

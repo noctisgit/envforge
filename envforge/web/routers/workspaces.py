@@ -1,19 +1,22 @@
-"""/api/workspaces — list/create, settings, provider keys, packs."""
+"""/api/workspaces — list/create, settings, models, usage; /api/packs — environments."""
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from functools import lru_cache
+
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from envforge.core.registry import discover_packs
+from envforge.models import catalog
 from envforge.web import services as svc
 from envforge.web.auth import current_user
 from envforge.web.db import get_db
-from envforge.web.models import ProviderKey, User, Workspace, WorkspaceMember
+from envforge.web.models import User, Workspace, WorkspaceMember
 from envforge.web.schemas import (
-    KeyIn,
-    KeyOut,
+    ModelOut,
+    ModelsOut,
     PackOut,
     WorkspaceIn,
     WorkspaceOut,
@@ -21,14 +24,6 @@ from envforge.web.schemas import (
 )
 
 router = APIRouter(prefix="/api", tags=["workspaces"])
-
-
-def _keys_out(db: Session, ws: Workspace) -> list[KeyOut]:
-    rows = db.scalars(select(ProviderKey).where(ProviderKey.workspace_id == ws.id))
-    return [
-        KeyOut(provider=r.provider, masked=r.last4, base_url=r.base_url, updated_at=r.updated_at)
-        for r in rows
-    ]
 
 
 def _ws_out(db: Session, ws: Workspace, user: User) -> WorkspaceOut:
@@ -45,7 +40,8 @@ def _ws_out(db: Session, ws: Workspace, user: User) -> WorkspaceOut:
         default_model=ws.default_model,
         default_pack=ws.default_pack,
         default_episodes=ws.default_episodes,
-        keys=_keys_out(db, ws),
+        builder_model=ws.builder_model,
+        train_base_model=ws.train_base_model,
     )
 
 
@@ -61,6 +57,45 @@ def packs(_: User = Depends(current_user)) -> list[PackOut]:
         )
         for n, c in sorted(discover_packs().items())
     ]
+
+
+@lru_cache(maxsize=32)
+def _overview(name: str) -> dict:
+    from envforge.core.explore import pack_overview
+
+    return pack_overview(discover_packs()[name])
+
+
+def _pack_or_404(name: str):
+    packs = discover_packs()
+    if name not in packs:
+        raise HTTPException(404, f"unknown environment '{name}'")
+    return packs[name]
+
+
+@router.get("/packs/{name}")
+def pack_detail(name: str, _: User = Depends(current_user)) -> dict:
+    """Everything the Environments page shows: description, dimensions, tools, tiers,
+    reward rules, tables and a sample world diagram. Generic for every pack."""
+    _pack_or_404(name)
+    return _overview(name)
+
+
+@router.get("/packs/{name}/preview")
+def pack_preview(
+    name: str,
+    seed: int = Query(0, ge=0, le=2_000_000_000),
+    tier: int = Query(1),
+    _: User = Depends(current_user),
+) -> dict:
+    """One generated task: goal, hidden faults, first observation, diagrams before and
+    after the reference solution. No model involved, nothing is billed."""
+    from envforge.core.explore import preview_task
+
+    env_cls = _pack_or_404(name)
+    if tier not in env_cls.tiers:
+        raise HTTPException(400, f"tier must be one of {list(env_cls.tiers)}")
+    return preview_task(env_cls, seed, tier)
 
 
 @router.get("/workspaces", response_model=list[WorkspaceOut])
@@ -101,19 +136,33 @@ def update_settings(
     return _ws_out(db, ws, user)
 
 
-@router.put("/workspaces/{ws_id}/keys", response_model=list[KeyOut])
-def put_key(
-    ws_id: str, body: KeyIn, user: User = Depends(current_user), db: Session = Depends(get_db)
+@router.get("/workspaces/{ws_id}/models", response_model=ModelsOut)
+def list_models(
+    ws_id: str,
+    refresh: bool = False,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
 ):
-    ws = svc.require_workspace(db, user, ws_id, owner=True)
-    svc.set_key(db, ws, user, body.provider, body.secret, body.base_url)
-    return _keys_out(db, ws)
+    """Tool-capable models you can run in this workspace, given your provider keys."""
+    svc.require_workspace(db, user, ws_id)
+    providers = svc.available_providers(db, user.id)
+    if refresh:
+        catalog.gateway_models(refresh=True)
+    models = catalog.list_models(providers, native_ids=svc.provider_model_ids(db, user.id))
+    return ModelsOut(
+        providers=providers,
+        catalog_available=bool(catalog.gateway_models()),
+        models=[ModelOut(**m.to_dict()) for m in models],
+    )
 
 
-@router.delete("/workspaces/{ws_id}/keys/{provider}", response_model=list[KeyOut])
-def delete_key(
-    ws_id: str, provider: str, user: User = Depends(current_user), db: Session = Depends(get_db)
-):
-    ws = svc.require_workspace(db, user, ws_id, owner=True)
-    svc.delete_key(db, ws, provider)
-    return _keys_out(db, ws)
+@router.get("/workspaces/{ws_id}/usage")
+def workspace_usage(
+    ws_id: str,
+    days: int = Query(30, ge=1, le=365),
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Runs, episodes, tokens and estimated cost for this workspace, per member and per day."""
+    ws = svc.require_workspace(db, user, ws_id)
+    return svc.workspace_usage(db, ws, days)

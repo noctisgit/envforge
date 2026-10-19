@@ -1,4 +1,4 @@
-import type { Metrics } from "@/lib/api";
+import { fmtCost, type Metrics } from "@/lib/api";
 
 const pct = (x: number) => `${Math.round(x * 100)}%`;
 
@@ -18,6 +18,7 @@ export function MetricsTable({ overall, byTier }: { overall: Metrics; byTier: Re
           <th>collateral</th>
           <th>budget out</th>
           <th>tokens</th>
+          <th>cost</th>
         </tr>
       </thead>
       <tbody>
@@ -33,6 +34,7 @@ export function MetricsTable({ overall, byTier }: { overall: Metrics; byTier: Re
             <td style={{ color: m.collateral_rate > 0 ? "var(--warn)" : undefined }}>{pct(m.collateral_rate)}</td>
             <td>{pct(m.max_steps_rate)}</td>
             <td>{(m.input_tokens + m.output_tokens).toLocaleString()}</td>
+            <td>{fmtCost(m.cost_usd)}</td>
           </tr>
         ))}
       </tbody>

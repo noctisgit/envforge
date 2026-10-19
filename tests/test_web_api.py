@@ -12,6 +12,9 @@ os.environ.update(
         "AUTH_PROVIDER": "local",
         "APP_SECRET_KEY": "test-secret-key-that-is-long-enough-0123456789",
         "ALLOW_SERVER_KEYS": "false",
+        "ALLOW_SIGNUP": "true",
+        "COOKIE_SECURE": "false",
+        "ENVFORGE_OFFLINE": "1",  # model catalog: never fetch in tests
         "ENVFORGE_DATA_DIR": "",  # set per test below
     }
 )
@@ -32,6 +35,9 @@ def client(tmp_path, monkeypatch):
     from envforge import config
 
     importlib.reload(config)
+    from envforge.web.security import limiter
+
+    limiter.reset()
     engine = dbmod.make_engine("sqlite://")
     dbmod.set_engine(engine)
     from envforge.web import models  # noqa: F401
@@ -92,9 +98,8 @@ def test_personal_workspace_and_settings(client):
 
 def test_keys_are_encrypted_and_masked(client):
     _signup(client)
-    ws = client.get("/api/workspaces").json()[0]
     r = client.put(
-        f"/api/workspaces/{ws['id']}/keys",
+        "/api/me/keys",
         json={"provider": "anthropic", "secret": "sk-ant-api03-SECRETSECRET-xy12"},
     )
     assert r.status_code == 200
@@ -113,7 +118,7 @@ def test_keys_are_encrypted_and_masked(client):
         assert "SECRET" not in row.ciphertext
         assert crypto.decrypt(row.ciphertext) == "sk-ant-api03-SECRETSECRET-xy12"
 
-    r = client.delete(f"/api/workspaces/{ws['id']}/keys/anthropic")
+    r = client.delete("/api/me/keys/anthropic")
     assert r.status_code == 200 and r.json() == []
 
 
@@ -168,7 +173,4 @@ def test_other_users_cannot_see_my_workspace(client):
     _signup(client, email="mallory@example.com", pw="another-long-password")
     assert client.get(f"/api/workspaces/{ws['id']}").status_code == 404
     assert client.get(f"/api/workspaces/{ws['id']}/runs").status_code == 404
-    r = client.put(
-        f"/api/workspaces/{ws['id']}/keys", json={"provider": "openai", "secret": "sk-xxxxxxxxxx"}
-    )
-    assert r.status_code == 404
+    assert client.get(f"/api/workspaces/{ws['id']}/models").status_code == 404

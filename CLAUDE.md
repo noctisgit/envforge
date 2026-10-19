@@ -42,15 +42,31 @@ envforge/
     trajectory.py   Trajectory + Step dataclasses, JSONL writer/reader
     runner.py       agent loop: model <-> environment via tool calls; budgets; logging
     evaluate.py     aggregate trajectories -> metrics (solve rate, steps, collateral, cost)
+    explore.py      pack overview, task previews, episode replays (powers the Environments page)
     registry.py     pack discovery (entry points + packs/ directory)
   models/
     base.py         ChatModel interface (messages + tools -> assistant turn w/ tool calls)
     anthropic_model.py
     openai_compat.py   covers openai, vercel, vllm via base_url/api_key
     scripted.py     deterministic policy driven by a pack's reference solver; no network
+    catalog.py      model list + prices (Vercel AI Gateway public catalog); cost estimates
     __init__.py     load_model("provider:model-id")
   packs/
     netops/         reference sim pack (see packs/netops/README.md)
+    sipops/         SIP/VoIP call-routing sim pack
+    repofix/        reference sandbox pack: fix a small Python repo inside a container
+  declarative/      environments written as data: spec.py (EnvSpec/TaskRecord), runtime.py (spec+tasks -> Environment),
+                    rules.py, validate.py, store.py (spec.json + tasks.jsonl dirs), cli.py (`envforge env ...`), examples/
+  builder/          environment-builder data pipeline: ingest.py (CSV/TXT/JSON -> conversations), redact.py (PII),
+                    extract.py (conversation -> TaskRecord with any ChatModel)
+  sandbox/          Sandbox interface; docker.py (hardened, default) and local.py (tests only)
+  compute/          SSH GPU box driver + vLLM serving; `envforge compute ...` (docs/COMPUTE.md)
+  train/
+    filter.py       kept trajectories -> chat-format JSONL for SFT
+    dataset.py      rejection sampling: best episode per task, task-level val split, seed manifest, overlap()
+    sft.py          STANDALONE LoRA SFT script (assistant-only loss); copied to the GPU box — no envforge imports
+    remote.py       run sft.py in a detached container on a GPU box, follow progress, fetch the adapter
+    cli.py          `envforge train dataset|check-overlap|sft|follow|logs|fetch` (docs/TRAINING.md)
   cli.py            typer CLI
   config.py         env/.env loading, defaults, data dir, workspace dirs
   web/              optional FastAPI layer (uv sync --extra web); see docs/WEB.md
@@ -58,17 +74,24 @@ envforge/
     db.py, models.py, migrations/   SQLAlchemy 2 + Alembic (users, workspaces, members, provider_keys, runs)
     crypto.py       Fernet encryption of provider keys (derived from APP_SECRET_KEY)
     auth/           local (argon2 + session cookie) and clerk (JWT via JWKS); one current_user dep
-    services.py     workspace access, key resolution, run enqueue
-    routers/        auth, workspaces (+keys, packs), runs (+episodes, transcripts)
-    worker.py       claims queued runs, executes with the workspace's keys, writes progress/metrics
+    services.py     workspace access, key resolution, run enqueue, usage aggregation
+    security.py     vLLM base-URL checks (SSRF) and in-memory rate limiting
+    builder.py      builder projects, revision DAG, content-addressed task sets, uploads, publish, resolve_pack, jobs
+    builder_agent.py  the builder agent: tools + tool-use loop (runs in `envforge-worker --kind builder`)
+    admin_cli.py    `envforge admin users|reset-password|sign-out|set-admin`
+    routers/        auth (+me/usage), account (/api/me: profile, password, keys), workspaces (+packs, models, usage), runs (+episodes, export, replay, delete)
+    worker.py       claims queued runs, executes with the queuing user's keys, writes progress/tokens/cost, heartbeats
     app.py          FastAPI factory; entry points envforge-api / envforge-worker
-web/                Next.js UI (login, runs, run detail, settings); proxies /api/* to FastAPI
+web/                Next.js UI (login, runs, run detail + replay, compare, environments, builder, usage, profile, workspace settings); proxies /api/* to FastAPI
 deploy/             Dockerfiles + Caddyfile; docker-compose.yml at repo root (postgres, api, worker, web)
 docs/
   ARCHITECTURE.md   design decisions, the pack contract, phase roadmap
   PACKS.md          how to write a new pack (copy this when adding a domain)
   LEARNING.md       module-by-module walkthrough + ML concepts, for the human maintainer
-  WEB.md            web layer: config, auth providers, key handling, deploy, endpoints
+  WEB.md            web layer: config, auth providers, key handling, isolation, deploy, endpoints
+  COMPUTE.md        renting a GPU box, serving a model with vLLM, evaluating it
+  TRAINING.md       Phase 3 end to end: teacher runs -> dataset -> LoRA SFT -> adapter -> before/after eval
+  BUILDER.md        the environment builder: chat, uploads + redaction, declarative spec, revisions, publishing
 tests/              pytest; everything runs offline with the scripted model
 data/               trajectories and eval reports (gitignored except data/samples/)
 ```
@@ -120,7 +143,9 @@ Model strings are `provider:model-id`:
   `trajectory.py` without bumping `SCHEMA_VERSION` and adding a migration note in
   `docs/ARCHITECTURE.md`.
 - **Tests run offline.** Use the `scripted` model. Network-backed tests must be
-  marked `@pytest.mark.network` and skipped by default.
+  marked `@pytest.mark.network` and skipped by default (`uv run pytest -m network`);
+  Docker-backed tests are marked `@pytest.mark.docker` and skip when Docker is absent.
+  Set `ENVFORGE_OFFLINE=1` to keep the model catalog from fetching.
 - Run `uv run pytest` and `uv run ruff check .` before every commit.
 - Prefer small, readable Python over clever Python: this repo doubles as the
   maintainer's Python learning material. Type hints and docstrings on public functions.
@@ -134,9 +159,9 @@ Model strings are `provider:model-id`:
 
 ## Roadmap (see docs/ARCHITECTURE.md for detail)
 
-- **Phase 1 (this repo now):** core + netops sim pack + API model adapters + eval. CPU only.
-- **Phase 2:** second pack (sipops sim, then repofix sandbox via Docker); SSH compute
-  backend to spin up GPU boxes; vLLM serving an open model; same eval against it.
-- **Phase 3:** filter high-reward trajectories → LoRA SFT on a 3–4B open model (TRL)
-  on a rented GPU → re-eval → before/after in README.
+- **Phase 1 (done):** core + netops sim pack + API model adapters + eval + cost. CPU only.
+- **Phase 2 (done):** sipops sim pack, repofix sandbox pack via Docker; SSH compute
+  backend for GPU boxes; vLLM serving an open model; same eval against it.
+- **Phase 3 (done):** filter high-reward trajectories → LoRA SFT on an open model on a
+  rented GPU → serve the adapter with vLLM → re-eval on held-out seeds (docs/TRAINING.md).
 - **Phase 4:** DPO, then GRPO, using the same environments.
