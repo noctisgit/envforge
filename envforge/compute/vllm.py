@@ -14,6 +14,14 @@ Secrets (Hugging Face token, the vLLM API key) are sent over ssh *stdin* into a
 temporary env-file on the box (mode 600, deleted right after `docker run`), so
 they never appear in a process list or a log line on either machine. They are
 still visible to anyone with root on the box via `docker inspect` -- it's your box.
+
+**Pod runtime.** On a RunPod/Vast pod running the envforge GPU image there is no
+Docker; vLLM is already installed in the pod itself. With `runtime="pod"` the same
+functions start `vllm serve ...` as a detached background process instead (named
+`vllm-<port>`, see `envforge.compute.process`): same flags, same secrets-over-stdin,
+same health check. Weights go to the pod's `/root/.cache/huggingface` (mount a network
+volume there to keep them across pods). The vLLM argument list is built by one shared
+function, `vllm_args`, so both runtimes serve a model identically.
 """
 
 from __future__ import annotations
@@ -26,9 +34,12 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
+from envforge.compute import process
 from envforge.compute.base import ComputeBox, ComputeError
+from envforge.compute.runtime import Runtime, check_runtime
 
 #: Pinned vLLM release image. Pin, don't use `latest`: a silent upgrade can change
 #: tool-call parsing and therefore your eval numbers. Bump deliberately.
@@ -43,19 +54,26 @@ MODEL_LABEL = "envforge.model"
 ADAPTERS_DIR = "/root/envforge/adapters"
 
 _PARSER_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+_ADAPTER_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,62}$")
+# An interface address or host name for `vllm serve --host` (pod mode).
+_BIND_RE = re.compile(r"^[A-Za-z0-9_.:%\[\]][A-Za-z0-9_.:%\[\]-]*$")
 
 UrlOpen = Callable[..., Any]
 
 
 @dataclass(frozen=True)
 class VLLMServer:
-    """A started vLLM container and how to reach it."""
+    """A started vLLM server and how to reach it.
+
+    In docker mode `container` / `container_id` are the container's name and id; in pod
+    mode they are the process name (`vllm-<port>`) and its pid."""
 
     container: str
     container_id: str
     model: str
     port: int
     base_url: str
+    runtime: Runtime = "docker"
 
     @property
     def model_spec(self) -> str:
@@ -65,7 +83,7 @@ class VLLMServer:
 
 @dataclass(frozen=True)
 class VLLMStatus:
-    """What Docker says about the container for one port."""
+    """What Docker (or, in pod mode, the pid file) says about the server on one port."""
 
     container: str
     exists: bool
@@ -73,6 +91,8 @@ class VLLMStatus:
     image: str | None = None
     model: str | None = None
     started_at: str | None = None
+    #: Pod mode only: did /v1/models answer on the box? (None = not checked.)
+    healthy: bool | None = None
 
     @property
     def running(self) -> bool:
@@ -83,6 +103,11 @@ class VLLMStatus:
 def container_name(port: int) -> str:
     """The container name used for a given host port."""
     return f"envforge-vllm-{_check_port(port)}"
+
+
+def process_name(port: int) -> str:
+    """The background-process name used for a given port in pod mode."""
+    return f"vllm-{_check_port(port)}"
 
 
 def base_url_for(host: str, port: int) -> str:
@@ -119,6 +144,59 @@ def _env_file(secrets: dict[str, str | None]) -> str:
     return "".join(line + "\n" for line in lines)
 
 
+def vllm_args(
+    model: str,
+    *,
+    host: str,
+    port: int,
+    gpu_memory_utilization: float = 0.90,
+    max_model_len: int | None = None,
+    tool_call_parser: str = "hermes",
+    extra_args: Sequence[str] = (),
+    lora_adapters: Sequence[str] = (),
+    lora_root: str = "/adapters",
+    max_lora_rank: int = 64,
+) -> list[str]:
+    """The arguments for `vllm serve`, starting with the model; shared by both runtimes.
+
+    `--enable-auto-tool-choice --tool-call-parser` are always set: envforge's runner
+    only works with models that return structured tool calls.
+
+    `lora_adapters` names adapters trained with `envforge train`, found under
+    `lora_root` (`/adapters` inside a container, ADAPTERS_DIR in a pod). vLLM then
+    serves the base model *and* each adapter under its own name, so `vllm:<base>` and
+    `vllm:<adapter>` can be evaluated side by side.
+    """
+    _check_model(model)
+    _check_port(port)
+    if not _PARSER_RE.match(tool_call_parser):
+        raise ValueError(f"invalid tool call parser: {tool_call_parser!r}")
+    if not 0.0 < gpu_memory_utilization <= 1.0:
+        raise ValueError("gpu_memory_utilization must be in (0, 1]")
+    argv = [
+        model,
+        "--host",
+        host,
+        "--port",
+        str(port),
+        "--gpu-memory-utilization",
+        f"{gpu_memory_utilization:g}",
+        "--enable-auto-tool-choice",
+        "--tool-call-parser",
+        tool_call_parser,
+    ]
+    if max_model_len:
+        argv += ["--max-model-len", str(int(max_model_len))]
+    if lora_adapters:
+        for name in lora_adapters:
+            if not _ADAPTER_RE.match(name):
+                raise ValueError(f"invalid adapter name: {name!r}")
+        argv += ["--enable-lora", "--max-lora-rank", str(int(max_lora_rank)), "--lora-modules"]
+        argv += [f"{name}={lora_root}/{name}" for name in lora_adapters]
+    argv += [str(a) for a in extra_args]
+    return argv
+
+
 def build_docker_run(
     model: str,
     *,
@@ -135,21 +213,24 @@ def build_docker_run(
     """The `docker run` argv (without secrets) for serving `model` on host `port`.
 
     The image's entrypoint is `vllm serve`, so everything after the image name is
-    vLLM arguments. `--enable-auto-tool-choice --tool-call-parser` are always set:
-    envforge's runner only works with models that return structured tool calls.
-
-    `lora_adapters` names adapters trained with `envforge train` (in ADAPTERS_DIR on
-    the box). vLLM then serves the base model *and* each adapter under its own name,
-    so `vllm:<base>` and `vllm:<adapter>` can be evaluated side by side.
+    vLLM arguments (see `vllm_args`). Inside the container vLLM always listens on
+    CONTAINER_PORT; Docker maps the host `port` onto it.
     """
-    _check_model(model)
+    serve = vllm_args(
+        model,
+        host="0.0.0.0",
+        port=CONTAINER_PORT,
+        gpu_memory_utilization=gpu_memory_utilization,
+        max_model_len=max_model_len,
+        tool_call_parser=tool_call_parser,
+        extra_args=extra_args,
+        lora_adapters=lora_adapters,
+        lora_root="/adapters",
+        max_lora_rank=max_lora_rank,
+    )
     _check_port(port)
-    if not _PARSER_RE.match(tool_call_parser):
-        raise ValueError(f"invalid tool call parser: {tool_call_parser!r}")
-    if not 0.0 < gpu_memory_utilization <= 1.0:
-        raise ValueError("gpu_memory_utilization must be in (0, 1]")
     publish = f"{bind}:{port}:{CONTAINER_PORT}" if bind else f"{port}:{CONTAINER_PORT}"
-    argv = [
+    return [
         "docker",
         "run",
         "--detach",
@@ -166,28 +247,48 @@ def build_docker_run(
         f"{MODEL_LABEL}={model}",
         *(["--volume", f"{ADAPTERS_DIR}:/adapters:ro"] if lora_adapters else []),
         image,
-        # --- vLLM arguments ---
-        model,
-        "--host",
-        "0.0.0.0",
-        "--port",
-        str(CONTAINER_PORT),
-        "--gpu-memory-utilization",
-        f"{gpu_memory_utilization:g}",
-        "--enable-auto-tool-choice",
-        "--tool-call-parser",
-        tool_call_parser,
+        *serve,
     ]
-    if max_model_len:
-        argv += ["--max-model-len", str(int(max_model_len))]
-    if lora_adapters:
-        for name in lora_adapters:
-            if not re.match(r"^[a-z0-9][a-z0-9._-]{0,62}$", name):
-                raise ValueError(f"invalid adapter name: {name!r}")
-        argv += ["--enable-lora", "--max-lora-rank", str(int(max_lora_rank)), "--lora-modules"]
-        argv += [f"{name}=/adapters/{name}" for name in lora_adapters]
-    argv += [str(a) for a in extra_args]
-    return argv
+
+
+def build_pod_serve(
+    model: str,
+    *,
+    port: int = 8000,
+    gpu_memory_utilization: float = 0.90,
+    max_model_len: int | None = None,
+    tool_call_parser: str = "hermes",
+    bind: str | None = None,
+    extra_args: Sequence[str] = (),
+    lora_adapters: Sequence[str] = (),
+    max_lora_rank: int = 64,
+) -> list[str]:
+    """The `vllm serve ...` argv (without secrets) for pod mode.
+
+    No port mapping here: the process listens directly on `port`, on interface `bind`
+    (default all). With Tailscale in userspace mode (how the envforge GPU image runs
+    it), `--bind 127.0.0.1` makes vLLM reachable *only* through the tailnet and ssh
+    tunnels, not through the provider's public port mappings.
+    """
+    host = bind or "0.0.0.0"
+    if not _BIND_RE.match(host):
+        raise ValueError(f"invalid bind address: {host!r}")
+    return [
+        "vllm",
+        "serve",
+        *vllm_args(
+            model,
+            host=host,
+            port=port,
+            gpu_memory_utilization=gpu_memory_utilization,
+            max_model_len=max_model_len,
+            tool_call_parser=tool_call_parser,
+            extra_args=extra_args,
+            lora_adapters=lora_adapters,
+            lora_root=ADAPTERS_DIR,
+            max_lora_rank=max_lora_rank,
+        ),
+    ]
 
 
 def serve_vllm(
@@ -208,8 +309,10 @@ def serve_vllm(
     timeout: float = 1800,
     lora_adapters: Sequence[str] = (),
     max_lora_rank: int = 64,
+    runtime: Runtime = "docker",
 ) -> VLLMServer:
-    """Start vLLM serving `model` in a detached container on the box.
+    """Start vLLM serving `model` on the box: a detached container (docker runtime) or
+    a detached background process (pod runtime).
 
     Args:
         box: where to run it.
@@ -222,20 +325,45 @@ def serve_vllm(
         max_model_len: cap the context length to save KV-cache memory.
         tool_call_parser: vLLM parser matching the model's tool-call format.
         hf_token: needed for gated models (Llama, Gemma).
-        image: vLLM Docker image; pinned by default.
+        image: vLLM Docker image; pinned by default. Ignored in pod mode (the pod's
+            image already contains vLLM).
         extra_args: more vLLM flags, e.g. `("--dtype", "half")`.
-        bind: host interface to publish on (e.g. the box's Tailscale IP). Default: all.
+        bind: interface to listen on (docker: publish on, e.g. the box's Tailscale IP;
+            pod: `vllm serve --host`, e.g. `127.0.0.1`). Default: all.
         endpoint_host: host the control plane uses in the base URL (default `box.host`).
-        replace: remove an existing container for this port first.
+        replace: remove an existing container / stop an existing process for this port
+            first. With `replace=False` a running server on the port is an error.
         timeout: seconds allowed for `docker run` (includes pulling the image).
         lora_adapters: adapters (by name, from `envforge train`) to serve on top of
             `model`; each becomes its own model id, e.g. `vllm:netops-v1`.
         max_lora_rank: the largest LoRA rank among them (vLLM preallocates for it).
+        runtime: "docker" (VMs / bare metal) or "pod" (inside the envforge GPU image).
 
     Returns:
-        The container id and the base URL. The server is *starting*, not ready:
-        loading weights takes minutes, so follow with `wait_healthy`.
+        The container id (or pid) and the base URL. The server is *starting*, not
+        ready: loading weights takes minutes, so follow with `wait_healthy`.
     """
+    if check_runtime(runtime) == "pod":
+        return _serve_vllm_pod(
+            box,
+            build_pod_serve(
+                model,
+                port=port,
+                gpu_memory_utilization=gpu_memory_utilization,
+                max_model_len=max_model_len,
+                tool_call_parser=tool_call_parser,
+                bind=bind,
+                extra_args=extra_args,
+                lora_adapters=lora_adapters,
+                max_lora_rank=max_lora_rank,
+            ),
+            model=model,
+            port=port,
+            secrets={"HF_TOKEN": hf_token, "VLLM_API_KEY": api_key},
+            bind=bind,
+            endpoint_host=endpoint_host,
+            replace=replace,
+        )
     argv = build_docker_run(
         model,
         port=port,
@@ -276,6 +404,40 @@ def serve_vllm(
         model=model,
         port=port,
         base_url=base_url_for(endpoint_host or box.host, port),
+    )
+
+
+def _serve_vllm_pod(
+    box: ComputeBox,
+    argv: list[str],
+    *,
+    model: str,
+    port: int,
+    secrets: dict[str, str | None],
+    bind: str | None,
+    endpoint_host: str | None,
+    replace: bool,
+) -> VLLMServer:
+    """Pod mode: run `vllm serve` as the detached process `vllm-<port>`."""
+    name = process_name(port)
+    if replace:
+        process.stop_detached(box, name)
+    elif process.process_status(box, name).running:
+        raise ComputeError(f"{name} is already running on {box.host}; stop it or use replace")
+    meta = {
+        "model": model,
+        "port": port,
+        "bind": bind or "0.0.0.0",
+        "started_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    pid = process.start_detached(box, name, argv, secrets=secrets, meta=meta)
+    return VLLMServer(
+        container=name,
+        container_id=str(pid),
+        model=model,
+        port=port,
+        base_url=base_url_for(endpoint_host or box.host, port),
+        runtime="pod",
     )
 
 
@@ -332,8 +494,10 @@ def wait_healthy(
         sleep(interval)
 
 
-def stop_vllm(box: ComputeBox, port: int = 8000) -> bool:
-    """Stop and remove the container for `port`. Returns False if there was none."""
+def stop_vllm(box: ComputeBox, port: int = 8000, *, runtime: Runtime = "docker") -> bool:
+    """Stop and remove the container (or process) for `port`. False if there was none."""
+    if check_runtime(runtime) == "pod":
+        return process.stop_detached(box, process_name(port))
     name = container_name(port)
     r = box.run(["docker", "rm", "--force", name], timeout=120)
     if r.ok:
@@ -344,15 +508,58 @@ def stop_vllm(box: ComputeBox, port: int = 8000) -> bool:
     return False  # unreachable; keeps type checkers happy
 
 
-def vllm_logs(box: ComputeBox, port: int = 8000, tail: int = 200) -> str:
-    """The last `tail` lines of the container's output (vLLM logs to stderr)."""
+def vllm_logs(
+    box: ComputeBox, port: int = 8000, tail: int = 200, *, runtime: Runtime = "docker"
+) -> str:
+    """The last `tail` lines of the server's output (vLLM logs to stderr)."""
+    if check_runtime(runtime) == "pod":
+        return process.tail_log(box, process_name(port), tail)
     name = container_name(port)
     command = shlex.join(["docker", "logs", "--tail", str(int(tail)), name]) + " 2>&1"
     return box.run(command, timeout=60, check=True).stdout
 
 
-def vllm_status(box: ComputeBox, port: int = 8000) -> VLLMStatus:
-    """Ask Docker about the container for `port`."""
+def _probe_host(bind: str | None) -> str:
+    """Where to reach the server *from the box itself* for a health probe."""
+    if not bind or bind in ("0.0.0.0", "::", "[::]"):
+        return "127.0.0.1"
+    return bind
+
+
+def _vllm_status_pod(box: ComputeBox, port: int, probe: bool) -> VLLMStatus:
+    """Pod mode: pid file + (optionally) an HTTP probe of /v1/models run on the box."""
+    st = process.process_status(box, process_name(port))
+    if not st.exists:
+        return VLLMStatus(container=st.name, exists=False)
+    healthy: bool | None = None
+    if probe and st.running:
+        url = base_url_for(_probe_host(st.meta.get("bind")), port) + "/models"
+        # Any HTTP answer means vLLM is up: 200, or 401 when it requires a key we don't send.
+        command = shlex.join(
+            ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "--max-time", "5", url]
+        )
+        r = box.run(command, timeout=30)
+        healthy = r.stdout.strip() in ("200", "401")
+    return VLLMStatus(
+        container=st.name,
+        exists=True,
+        state="running" if st.running else "exited",
+        image=None,
+        model=st.meta.get("model"),
+        started_at=st.meta.get("started_at"),
+        healthy=healthy,
+    )
+
+
+def vllm_status(
+    box: ComputeBox, port: int = 8000, *, runtime: Runtime = "docker", probe: bool = True
+) -> VLLMStatus:
+    """Ask Docker about the container for `port` (or, in pod mode, the pid file).
+
+    In pod mode `probe=True` also asks the server for /v1/models from the box itself
+    (no key needed to tell "up" from "down"), filling in `healthy`."""
+    if check_runtime(runtime) == "pod":
+        return _vllm_status_pod(box, port, probe)
     name = container_name(port)
     fmt = (
         "{{.State.Status}}|{{.Config.Image}}|"

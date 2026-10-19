@@ -1,12 +1,12 @@
 "use client";
 
-import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { DiagramView } from "@/components/DiagramView";
 import { ExportButton } from "@/components/ExportButton";
 import { MetricsTable } from "@/components/MetricsTable";
+import { Page, PageHeader, Panel } from "@/components/Page";
 import { Api, ApiError, fmtCost, fmtTokens, type EpisodeSummary, type ReplayFrame, type Run, type Trajectory } from "@/lib/api";
 import { useWorkspace } from "@/lib/workspace";
 
@@ -47,62 +47,63 @@ export default function RunDetailPage() {
   useEffect(() => {
     if (!ws || open === null) return;
     setTraj(null);
-    Api.episode(ws.id, runId, open).then(setTraj).catch(() => {});
+    Api.episode(ws.id, runId, open)
+      .then(setTraj)
+      .catch(() => {});
   }, [ws, runId, open]);
 
   if (err) return <div style={{ color: "var(--bad)" }}>{err}</div>;
   if (!ws || !run) return null;
 
   return (
-    <div className="space-y-6">
-      <div className="flex flex-wrap items-center gap-3">
-        <Link href="/runs" style={{ color: "var(--muted)" }}>
-          ← Runs
-        </Link>
-        <h1 className="mono text-lg font-semibold">{run.label || run.id}</h1>
-        <span className={`pill pill-${run.status}`}>{run.status}</span>
-        <div className="ml-auto flex items-center gap-2">
-          {episodes.length > 0 && <ExportButton wsId={ws.id} runIds={[run.id]} />}
-          {!active && (
-            <button
-              className="btn-ghost"
-              style={{ color: "var(--bad)" }}
-              onClick={async () => {
-                const ok = await confirm({
-                  title: "Delete this run?",
-                  body: `${run.label || run.id} and its ${run.progress} recorded episodes will be permanently deleted. Your usage history keeps its token and cost totals.`,
-                  confirmLabel: "Delete run",
-                  tone: "danger",
-                });
-                if (!ok) return;
-                await Api.deleteRun(ws.id, run.id);
-                router.replace("/runs");
-              }}
-            >
-              Delete
-            </button>
-          )}
-          {active && (
-            <button
-              className="btn-ghost"
-              onClick={async () => {
-                const ok = await confirm({
-                  title: "Cancel this run?",
-                  body: "The worker stops after the episode it is on. Finished episodes and their usage are kept.",
-                  confirmLabel: "Cancel run",
-                  cancelLabel: "Keep running",
-                  tone: "danger",
-                });
-                if (ok) setRun(await Api.cancelRun(ws.id, run.id));
-              }}
-            >
-              Cancel
-            </button>
-          )}
-        </div>
-      </div>
+    <Page>
+      <PageHeader
+        back={{ href: "/runs", label: "Runs" }}
+        title={<span className="mono">{run.label || run.id}</span>}
+        meta={<span className={`pill pill-${run.status}`}>{run.status}</span>}
+        actions={
+          <>
+            {episodes.length > 0 && <ExportButton wsId={ws.id} runIds={[run.id]} />}
+            {!active && (
+              <button
+                className="btn-danger"
+                onClick={async () => {
+                  const ok = await confirm({
+                    title: "Delete this run?",
+                    body: `${run.label || run.id} and its ${run.progress} recorded episodes will be permanently deleted. Your usage history keeps its token and cost totals.`,
+                    confirmLabel: "Delete run",
+                    tone: "danger",
+                  });
+                  if (!ok) return;
+                  await Api.deleteRun(ws.id, run.id);
+                  router.replace("/runs");
+                }}
+              >
+                Delete
+              </button>
+            )}
+            {active && (
+              <button
+                className="btn-ghost"
+                onClick={async () => {
+                  const ok = await confirm({
+                    title: "Cancel this run?",
+                    body: "The worker stops after the episode it is on. Finished episodes and their usage are kept.",
+                    confirmLabel: "Cancel run",
+                    cancelLabel: "Keep running",
+                    tone: "danger",
+                  });
+                  if (ok) setRun(await Api.cancelRun(ws.id, run.id));
+                }}
+              >
+                Cancel
+              </button>
+            )}
+          </>
+        }
+      />
 
-      <div className="panel grid grid-cols-2 gap-4 p-5 text-sm md:grid-cols-4">
+      <div className="panel grid grid-cols-2 gap-4 p-5 text-sm md:grid-cols-4 xl:grid-cols-6">
         <Field k="model" v={<span className="mono">{run.model}</span>} />
         <Field k="pack" v={run.pack} />
         <Field k="progress" v={`${run.progress}/${run.episodes}`} />
@@ -121,19 +122,19 @@ export default function RunDetailPage() {
       </div>
 
       {run.error && (
-        <pre className="panel mono overflow-x-auto whitespace-pre-wrap p-4 text-xs" style={{ color: "var(--bad)" }}>
+        <pre className="panel mono overflow-x-auto whitespace-pre-wrap p-5 text-xs" style={{ color: "var(--bad)" }}>
           {run.error}
         </pre>
       )}
 
       {run.metrics && (
-        <div className="panel overflow-x-auto p-2">
+        <Panel title="Metrics" flush>
           <MetricsTable overall={run.metrics.overall} byTier={run.metrics.by_tier} />
-        </div>
+        </Panel>
       )}
 
       {episodes.length > 0 && (
-        <div className="panel overflow-x-auto p-2">
+        <Panel title="Episodes" hint="Click an episode to replay it and read its transcript." flush>
           <table className="data">
             <thead>
               <tr>
@@ -151,7 +152,12 @@ export default function RunDetailPage() {
             </thead>
             <tbody>
               {episodes.map((e) => (
-                <tr key={e.episode} onClick={() => setOpen(open === e.episode ? null : e.episode)} className="cursor-pointer" style={open === e.episode ? { background: "var(--line)" } : undefined}>
+                <tr
+                  key={e.episode}
+                  onClick={() => setOpen(open === e.episode ? null : e.episode)}
+                  className="cursor-pointer"
+                  style={open === e.episode ? { background: "var(--line)" } : undefined}
+                >
                   <td>{e.episode}</td>
                   <td className="mono">{e.task_id}</td>
                   <td>{e.tier}</td>
@@ -166,16 +172,16 @@ export default function RunDetailPage() {
               ))}
             </tbody>
           </table>
-        </div>
+        </Panel>
       )}
 
       {open !== null && (
-        <>
+        <div className="grid grid-cols-1 items-start gap-6 2xl:grid-cols-2">
           <Replay wsId={ws.id} runId={run.id} episode={open} />
           <Transcript traj={traj} episode={open} />
-        </>
+        </div>
       )}
-    </div>
+    </Page>
   );
 }
 
@@ -192,7 +198,7 @@ function Transcript({ traj, episode }: { traj: Trajectory | null; episode: numbe
   if (!traj) return <div className="panel p-5 text-sm">Loading episode {episode}…</div>;
   return (
     <div className="panel space-y-4 p-5 text-sm">
-      <div className="font-semibold">Episode {episode}</div>
+      <h2 className="text-sm font-semibold">Episode {episode}</h2>
       <div>
         <div className="label">goal</div>
         <div>{traj.task.goal}</div>
@@ -252,11 +258,11 @@ function Replay({ wsId, runId, episode }: { wsId: string; runId: string; episode
 
   if (err)
     return (
-      <div className="panel p-4 text-xs" style={{ color: "var(--muted)" }}>
+      <div className="panel p-5 text-xs" style={{ color: "var(--muted)" }}>
         Replay not available: {err}
       </div>
     );
-  if (!frames) return <div className="panel p-4 text-sm">Replaying episode {episode}…</div>;
+  if (!frames) return <div className="panel p-5 text-sm">Replaying episode {episode}…</div>;
 
   // indexes of the frames to step through
   const idx = frames.map((_, k) => k).filter((k) => k === 0 || !onlyChanges || frames[k].changed);
@@ -265,10 +271,8 @@ function Replay({ wsId, runId, episode }: { wsId: string; runId: string; episode
   return (
     <div className="panel space-y-3 p-5">
       <div className="flex flex-wrap items-center gap-3 text-sm">
-        <span className="font-semibold">Replay · episode {episode}</span>
-        <span style={{ color: "var(--muted)" }}>
-          {pos === 0 ? "start (before any action)" : `call ${pos} of ${idx.length - 1}`}
-        </span>
+        <h2 className="font-semibold">Replay · episode {episode}</h2>
+        <span style={{ color: "var(--muted)" }}>{pos === 0 ? "start (before any action)" : `call ${pos} of ${idx.length - 1}`}</span>
         <div className="ml-auto flex items-center gap-2">
           <label className="flex items-center gap-1 text-xs" style={{ color: "var(--muted)" }}>
             <input
@@ -289,13 +293,29 @@ function Replay({ wsId, runId, episode }: { wsId: string; runId: string; episode
           </button>
         </div>
       </div>
-      <input type="range" min={0} max={idx.length - 1} value={pos} onChange={(e) => setI(Number(e.target.value))} className="w-full" aria-label="replay position" />
+      <input
+        type="range"
+        min={0}
+        max={idx.length - 1}
+        value={pos}
+        onChange={(e) => setI(Number(e.target.value))}
+        className="w-full"
+        aria-label="replay position"
+      />
       {f.call && (
         <div className="text-sm">
           <span className="mono" style={{ color: f.error ? "var(--bad)" : "var(--accent)" }}>
-            {f.call.name}({Object.entries(f.call.args).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(", ")})
+            {f.call.name}(
+            {Object.entries(f.call.args)
+              .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
+              .join(", ")}
+            )
           </span>
-          {f.changed && <span className="ml-2 text-xs" style={{ color: "var(--warn)" }}>changed the world</span>}
+          {f.changed && (
+            <span className="ml-2 text-xs" style={{ color: "var(--warn)" }}>
+              changed the world
+            </span>
+          )}
           {f.observation && (
             <pre className="mono mt-1 max-h-40 overflow-auto whitespace-pre-wrap text-xs" style={{ color: "var(--muted)" }}>
               {f.observation}

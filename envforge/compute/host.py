@@ -7,6 +7,11 @@ Before serving a model we want to know, in order:
 3. does the box have an NVIDIA driver (`nvidia-smi`)?
 4. can a *container* see the GPU? (needs the NVIDIA Container Toolkit; this is the
    step that most often fails on a fresh box)
+
+That list is for the **docker** runtime. In the **pod** runtime (a RunPod/Vast pod
+running the envforge GPU image) there is no Docker to check; instead we confirm it
+really is the envforge image, that the GPU is visible, and that vLLM and the training
+libraries import. See `envforge.compute.runtime` for what the two runtimes are.
 """
 
 from __future__ import annotations
@@ -14,9 +19,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from envforge.compute.base import ComputeBox, ComputeError
+from envforge.compute.runtime import POD_MARKER, POD_VERSION_FILE, Runtime, check_runtime
 
 #: Tiny image used to prove containers can see the GPU (the toolkit injects nvidia-smi).
 GPU_TEST_IMAGE = "ubuntu:24.04"
+
+#: Imported on a pod to prove serving and training will work (prints vLLM's version).
+POD_IMPORT_CHECK = (
+    "import accelerate, datasets, peft, torch, transformers, vllm; "
+    "print(f'vllm {vllm.__version__}, torch {torch.__version__}, peft {peft.__version__}')"
+)
 
 GPU_QUERY = [
     "nvidia-smi",
@@ -57,18 +69,30 @@ def _first_line(text: str) -> str:
     return lines[0] if lines else ""
 
 
-def check(box: ComputeBox, *, gpu_test_image: str = GPU_TEST_IMAGE) -> list[CheckResult]:
-    """Run the four readiness checks in order. Later checks are skipped (reported as
-    failed) once ssh fails, because nothing else can work without it."""
+#: Check names per runtime, in the order they run.
+CHECK_NAMES: dict[str, tuple[str, ...]] = {
+    "docker": ("ssh", "docker", "nvidia-smi", "nvidia-container-toolkit"),
+    "pod": ("ssh", "envforge-image", "nvidia-smi", "python-deps"),
+}
+
+
+def check(
+    box: ComputeBox, *, gpu_test_image: str = GPU_TEST_IMAGE, runtime: Runtime = "docker"
+) -> list[CheckResult]:
+    """Run the four readiness checks for `runtime` in order. Later checks are skipped
+    (reported as failed) once ssh fails, because nothing else can work without it."""
+    runtime = check_runtime(runtime)
     results: list[CheckResult] = []
 
     r = box.run(["echo", "envforge-ok"], timeout=30)
     ssh_ok = r.ok and "envforge-ok" in r.stdout
     results.append(CheckResult("ssh", ssh_ok, "reachable" if ssh_ok else _first_line(r.stderr)))
     if not ssh_ok:
-        for name in ("docker", "nvidia-smi", "nvidia-container-toolkit"):
+        for name in CHECK_NAMES[runtime][1:]:
             results.append(CheckResult(name, False, "skipped: ssh failed"))
         return results
+    if runtime == "pod":
+        return results + _pod_checks(box)
 
     r = box.run(["docker", "version", "--format", "{{.Server.Version}}"], timeout=30)
     detail = f"server {r.stdout.strip()}" if r.ok else _first_line(r.stderr or r.stdout)
@@ -85,6 +109,40 @@ def check(box: ComputeBox, *, gpu_test_image: str = GPU_TEST_IMAGE) -> list[Chec
     )
     detail = "containers can see the GPU" if r.ok else _first_line(r.stderr or r.stdout)
     results.append(CheckResult("nvidia-container-toolkit", r.ok, detail))
+    return results
+
+
+def _last_line(text: str) -> str:
+    lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
+    return lines[-1] if lines else ""
+
+
+def _pod_checks(box: ComputeBox) -> list[CheckResult]:
+    """The three checks after ssh for a pod running the envforge GPU image."""
+    results: list[CheckResult] = []
+
+    r = box.run(
+        f"if [ -f {POD_MARKER} ]; then cat {POD_VERSION_FILE} 2>/dev/null || echo unknown; "
+        "else echo missing; exit 3; fi",
+        timeout=30,
+    )
+    if r.ok:
+        results.append(
+            CheckResult("envforge-image", True, f"envforge GPU image {r.stdout.strip()}")
+        )
+    else:
+        detail = f"{POD_MARKER} missing: not the envforge GPU image"
+        results.append(CheckResult("envforge-image", False, detail))
+
+    r = box.run(["nvidia-smi", "-L"], timeout=30)
+    detail = _first_line(r.stdout) if r.ok else _first_line(r.stderr or r.stdout)
+    results.append(CheckResult("nvidia-smi", r.ok, detail or "no GPUs listed"))
+
+    # Importing vllm + torch takes a few seconds; it proves the Python stack is intact.
+    # On failure the useful line of a traceback is the last one (the exception).
+    r = box.run(["python3", "-c", POD_IMPORT_CHECK], timeout=180)
+    detail = _first_line(r.stdout) if r.ok else _last_line(r.stderr or r.stdout)
+    results.append(CheckResult("python-deps", r.ok, detail or "import failed"))
     return results
 
 

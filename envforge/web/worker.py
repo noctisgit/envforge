@@ -11,7 +11,6 @@ heartbeats the run, and any worker fails runs whose heartbeat went stale.
 
 from __future__ import annotations
 
-import json
 import os
 import threading
 import time
@@ -217,59 +216,165 @@ def _reap_sandboxes() -> None:
         print(f"[worker] sandbox cleanup skipped: {type(e).__name__}: {e}", flush=True)
 
 
+def download_to(url: str, dest: Path, *, max_bytes: int, on_progress=None) -> int:
+    """Stream an https URL to `dest`. Every redirect hop is re-checked against the same
+    public-hosts-only rule as the original URL, and the size is capped while reading
+    (a server can lie about Content-Length)."""
+    import urllib.request
+    from urllib.parse import urlparse
+
+    from envforge.web.security import check_base_url
+
+    class _CheckedRedirects(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: N802
+            if urlparse(newurl).scheme != "https":
+                raise ValueError("refusing a redirect to a non-https URL")
+            check_base_url(newurl)
+            return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+    check_base_url(url)
+    opener = urllib.request.build_opener(_CheckedRedirects())
+    got, last = 0, 0.0
+    with opener.open(
+        urllib.request.Request(url, headers={"User-Agent": "envforge"}), timeout=60
+    ) as r:
+        total = int(r.headers.get("Content-Length") or 0)
+        if total > max_bytes:
+            raise ValueError(
+                f"file is {total / 2**30:.1f} GiB; the limit is {max_bytes / 2**30:.0f} GiB"
+            )
+        with dest.open("wb") as f:
+            while chunk := r.read(1024 * 1024):
+                got += len(chunk)
+                if got > max_bytes:
+                    raise ValueError(f"download exceeded the {max_bytes / 2**30:.0f} GiB limit")
+                f.write(chunk)
+                if on_progress and time.monotonic() - last > 2:
+                    last = time.monotonic()
+                    on_progress({"stage": "downloading", "bytes": got, "total": total or None})
+    return got
+
+
+def _gunzip(src: Path, dest: Path, *, max_bytes: int) -> None:
+    """Decompress a .gz upload, capping the output size (a tiny file can inflate hugely)."""
+    import gzip
+    import shutil as sh
+
+    written = 0
+    with gzip.open(src, "rb") as fin, dest.open("wb") as fout:
+        while chunk := fin.read(1024 * 1024):
+            written += len(chunk)
+            if written > max_bytes:
+                raise ValueError(f"decompressed size exceeds {max_bytes / 2**30:.0f} GiB")
+            fout.write(chunk)
+    sh.copystat(src, dest)
+
+
 def process_upload(db: Session, job) -> None:
-    """Parse an uploaded log file, redact personal data, profile it, and delete the raw file.
+    """Bring one upload into the project's conversation store.
 
-    Only the redacted conversations are kept; nothing downstream (the builder model,
-    the UI) ever sees the original text.
+    download (URL imports) -> decompress (.gz) -> stream, parse and REDACT every
+    conversation with the project's privacy settings before storing it -> deduplicate and
+    cluster the whole project corpus -> a redaction report on a stratified sample. The raw
+    file is always deleted at the end; only redacted text is ever stored.
     """
-    from dataclasses import asdict
-
-    from envforge.builder.ingest import Mapping, parse_file, profile
-    from envforge.builder.redact import redact_conversation
-    from envforge.web.models import EnvUpload
+    from envforge.builder import corpus as C
+    from envforge.builder.ingest import Mapping
+    from envforge.builder.redact import build_redaction_report
+    from envforge.web import builder as B
+    from envforge.web.models import EnvProject, EnvUpload
 
     up = db.get(EnvUpload, (job.payload or {}).get("upload_id"))
     assert up is not None
+    project = db.get(EnvProject, up.project_id)
+    ws = db.get(Workspace, project.workspace_id)
     raw = Path(up.path or "")
-    up.status = "processing"
+    src = raw
+    up.status, up.progress = "processing", {"stage": "starting"}
     db.commit()
+    last = [0.0]
+
+    def progress(info: dict, force: bool = False) -> None:
+        if force or time.monotonic() - last[0] > 2:
+            last[0] = time.monotonic()
+            up.progress = info
+            job.progress = f"{info.get('stage', 'processing')} {up.filename}"
+            job.heartbeat_at = datetime.now(UTC)
+            db.commit()
+
+    limit = get_settings().MAX_CORPUS_BYTES
     try:
+        if up.source == "url":
+            progress({"stage": "downloading"}, force=True)
+            up.size_bytes = download_to(up.source_url, raw, max_bytes=limit, on_progress=progress)
+        if up.filename.lower().endswith(".gz"):
+            progress({"stage": "decompressing"}, force=True)
+            inner = Path(up.filename[:-3]).suffix or ".jsonl"
+            src = raw.with_name(f"{up.id}{inner}")
+            _gunzip(raw, src, max_bytes=limit * 4)
         m = (job.payload or {}).get("mapping")
-        parsed = parse_file(raw, mapping=Mapping(**m) if m else None)
-        counts: dict[str, int] = {}
-        redacted = []
-        for conv in parsed.conversations:
-            clean, c = redact_conversation(conv)
-            for k, v in c.items():
-                counts[k] = counts.get(k, 0) + v
-            redacted.append(clean)
-        out = raw.with_suffix(".jsonl")
-        with out.open("w", encoding="utf-8") as f:
-            for conv in redacted:
-                f.write(json.dumps(conv.to_dict()) + "\n")
-        guess = asdict(parsed.format)
-        up.detected_format = {
-            "format": guess.get("format"),
-            "confidence": guess.get("confidence"),
-            "reasons": guess.get("reasons"),
-            "mapping": asdict(parsed.mapping),
-            "warnings": parsed.warnings[:20],
-            "skipped_rows": parsed.skipped_rows,
-            "truncated": parsed.truncated,
-        }
-        up.n_conversations = len(redacted)
-        up.redactions = counts
-        up.profile = profile(redacted)
-        up.path = str(out)
-        up.status = "ready" if redacted else "failed"
-        up.error = None if redacted else "no conversations found — check the format"
+        # NER / the PII span model load a model per process: keep the pool small then
+        heavy = project.privacy_ner or project.privacy_tier2 in ("auto", "all")
+        workers = 1 if heavy else max(1, min(4, (os.cpu_count() or 2) - 1))
+        with C.CorpusStore(B.corpus_path(ws, project)) as store:
+            rep = C.ingest_file_to_store(
+                src, store, up.id, mapping=Mapping(**m) if m else None, redact=B.make_redactor(project),
+                workers=workers,
+                on_progress=lambda p: progress({"stage": "redacting", "bytes": p.bytes_read,
+                                                "total": p.bytes_total, "conversations": p.conversations}),
+            )  # fmt: skip
+            progress({"stage": "deduplicating", "conversations": rep.conversations}, force=True)
+            dedupe = C.dedupe_near(store)
+            progress({"stage": "clustering", "conversations": rep.conversations}, force=True)
+            clusters = C.cluster(store)
+            sample = store.get(C.stratified_sample(store, 200, seed=0))
+            report = build_redaction_report(
+                sample, profile=project.privacy_profile if project.privacy_profile != "off" else "standard",
+                counts=rep.pii_counts, ner_requested=project.privacy_ner, n_input=rep.conversations,
+            )  # fmt: skip
+        up.detected_format = {"format": rep.format, "confidence": rep.confidence, "reasons": rep.reasons,
+                              "mapping": rep.mapping, "skipped_rows": rep.skipped_rows,
+                              "truncated": rep.truncated, "warnings": []}  # fmt: skip
+        up.n_conversations = rep.conversations
+        up.redactions = rep.pii_counts
+        up.profile = {"ingest": rep.to_dict(), "dedupe": dedupe.to_dict(),
+                      "clusters": len(clusters), "redaction_report": report}  # fmt: skip
+        up.path = None  # the data now lives (redacted) in the corpus store
+        up.status = "ready" if rep.conversations else "failed"
+        up.error = None if rep.conversations else "no conversations found — check the format"
+        up.progress = None
+        # new data: the last human review no longer covers it
+        if project.privacy_review:
+            project.privacy_review = {**project.privacy_review, "status": "outdated"}
+        project.privacy_signed_off_at = project.privacy_signed_off_by = None
     except Exception as e:  # noqa: BLE001
-        up.status, up.error = "failed", _user_error(e)
+        up.status, up.error, up.progress = "failed", _user_error(e), None
         raise
     finally:
         raw.unlink(missing_ok=True)  # never keep the unredacted original
+        if src != raw:
+            src.unlink(missing_ok=True)
         db.commit()
+
+
+def recluster(db: Session, job) -> None:
+    """After an upload is deleted: refresh duplicates and clusters for what's left."""
+    from envforge.builder import corpus as C
+    from envforge.web import builder as B
+    from envforge.web.models import EnvProject
+
+    project = db.get(EnvProject, job.project_id)
+    ws = db.get(Workspace, project.workspace_id)
+    path = B.corpus_path(ws, project)
+    if not path.exists():
+        return
+    with C.CorpusStore(path) as store:
+        if uid := (job.payload or {}).get("delete_upload"):
+            store.delete_upload(uid)
+            store.db.commit()
+        if store.count():
+            C.dedupe_near(store)
+            C.cluster(store)
 
 
 def process_job(db: Session, job) -> None:
@@ -283,6 +388,8 @@ def process_job(db: Session, job) -> None:
             builder_agent.run_turn(db, job)
         elif job.kind == "ingest":
             process_upload(db, job)
+        elif job.kind == "recluster":
+            recluster(db, job)
         else:
             raise ValueError(f"unknown job kind {job.kind}")
         job.status = "done"
@@ -343,7 +450,7 @@ def run_forever(poll_s: float = 2.0, once: bool = False, kind: str = "all") -> i
                     if kind in ("builder", "all") and (n := reap_stale_jobs(db)):
                         print(f"[worker] failed {n} stale job(s)", flush=True)
                 if kind in ("builder", "all") and (
-                    job := B.claim_job(db, ("builder_turn", "ingest"))
+                    job := B.claim_job(db, ("builder_turn", "ingest", "recluster"))
                 ):
                     process_job(db, job)
                     handled += 1

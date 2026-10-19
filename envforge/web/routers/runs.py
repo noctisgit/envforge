@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from envforge.core.trajectory import TrajectoryStore
 from envforge.train.filter import dataset_lines, filter_trajectories, tool_schemas
+from envforge.web import builder as B
 from envforge.web import services as svc
 from envforge.web.auth import current_user
 from envforge.web.builder import resolve_pack
@@ -97,8 +98,13 @@ def export_dataset(
     packs = {r.pack for r in rows}
     tools = tools_by_pack.get(next(iter(packs))) if len(packs) == 1 else None
     name = f"envforge-{fmt}-{len(kept)}ep.jsonl"
+    lines = dataset_lines(kept, fmt=fmt, tools=tools)
+    # environments built from customer data get re-sanitised on the way out
+    clean = B.export_sanitizer(db, ws, packs)
+    if clean is not None:
+        lines = (clean(line) for line in lines)
     return StreamingResponse(
-        dataset_lines(kept, fmt=fmt, tools=tools),
+        lines,
         media_type="application/x-ndjson",
         headers={
             "Content-Disposition": f'attachment; filename="{name}"',

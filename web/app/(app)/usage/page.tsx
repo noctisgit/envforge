@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { BarChart } from "@/components/BarChart";
+import { Empty, Page, PageHeader, Panel } from "@/components/Page";
 import { Api, fmtCost, fmtTokens, type Usage, type UsageBucket } from "@/lib/api";
 import { useWorkspace } from "@/lib/workspace";
 
@@ -23,33 +24,37 @@ export default function UsagePage() {
   if (!ws) return null;
 
   return (
-    <div className="space-y-6">
+    <Page>
       {/* filters: one row above the charts */}
-      <div className="flex flex-wrap items-center gap-3">
-        <h1 className="text-lg font-semibold">Usage</h1>
-        <div className="flex gap-1 text-sm">
-          <Toggle on={scope === "workspace"} onClick={() => setScope("workspace")}>
-            {ws.name}
-          </Toggle>
-          <Toggle on={scope === "me"} onClick={() => setScope("me")}>
-            Me, all workspaces
-          </Toggle>
-        </div>
-        <div className="ml-auto flex gap-1 text-sm">
-          {RANGES.map((d) => (
-            <Toggle key={d} on={days === d} onClick={() => setDays(d)}>
-              {d}d
+      <PageHeader
+        title="Usage"
+        meta={
+          <div className="flex gap-1 text-sm">
+            <Toggle on={scope === "workspace"} onClick={() => setScope("workspace")}>
+              {ws.name}
             </Toggle>
-          ))}
-        </div>
-      </div>
+            <Toggle on={scope === "me"} onClick={() => setScope("me")}>
+              Me, all workspaces
+            </Toggle>
+          </div>
+        }
+        actions={
+          <div className="flex gap-1 text-sm">
+            {RANGES.map((d) => (
+              <Toggle key={d} on={days === d} onClick={() => setDays(d)}>
+                {d}d
+              </Toggle>
+            ))}
+          </div>
+        }
+      />
 
       {err && <div style={{ color: "var(--bad)" }}>{err}</div>}
       {!usage ? (
         <div style={{ color: "var(--muted)" }}>Loading…</div>
       ) : (
         <>
-          <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
+          <div className="grid grid-cols-2 gap-4 md:grid-cols-3 xl:grid-cols-5">
             <Tile label="runs" value={usage.totals.runs.toLocaleString()} />
             <Tile label="episodes" value={usage.totals.episodes.toLocaleString()} />
             <Tile
@@ -70,7 +75,7 @@ export default function UsagePage() {
           </div>
 
           {usage.builder && usage.builder.jobs > 0 && (
-            <div className="panel flex flex-wrap items-center gap-x-6 gap-y-1 p-4 text-sm">
+            <div className="panel flex flex-wrap items-center gap-x-6 gap-y-1 px-5 py-3 text-sm">
               <span className="font-semibold">Environment builder</span>
               <span>{usage.builder.jobs} chat turn(s)</span>
               <span>
@@ -83,9 +88,8 @@ export default function UsagePage() {
             </div>
           )}
 
-          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-            <div className="panel p-4">
-              <div className="mb-2 text-sm font-semibold">Tokens per day</div>
+          <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+            <Panel title="Tokens per day">
               <BarChart
                 data={usage.by_day.map((d) => ({
                   label: d.date,
@@ -94,40 +98,39 @@ export default function UsagePage() {
                 }))}
                 format={fmtTokens}
               />
-            </div>
-            <div className="panel p-4">
-              <div className="mb-2 text-sm font-semibold">Estimated cost per day</div>
+            </Panel>
+            <Panel title="Estimated cost per day">
               <BarChart
                 data={usage.by_day.map((d) => ({ label: d.date, value: d.cost_usd, detail: `${d.episodes} episode(s)` }))}
                 format={(v) => fmtCost(v)}
                 color="var(--warn)"
               />
-            </div>
+            </Panel>
           </div>
 
-          <div className="panel overflow-x-auto p-2">
-            <div className="px-2 pt-2 text-sm font-semibold">By model</div>
-            <BucketTable rows={usage.by_model.map((r) => ({ key: r.model, label: <span className="mono">{r.model}</span>, ...r }))} />
-          </div>
+          <div className="grid grid-cols-1 items-start gap-6 2xl:grid-cols-2">
+            <Panel title="By model" flush>
+              <BucketTable rows={usage.by_model.map((r) => ({ key: r.model, label: <span className="mono">{r.model}</span>, ...r }))} />
+            </Panel>
 
-          <div className="panel overflow-x-auto p-2">
-            <div className="px-2 pt-2 text-sm font-semibold">{scope === "workspace" ? "By member" : "By workspace"}</div>
-            <BucketTable
-              rows={usage.groups.map((r) => ({
-                key: r.user_id ?? r.workspace_id ?? "?",
-                label: scope === "workspace" ? r.email : r.name,
-                ...r,
-              }))}
-            />
+            <Panel title={scope === "workspace" ? "By member" : "By workspace"} flush>
+              <BucketTable
+                rows={usage.groups.map((r) => ({
+                  key: r.user_id ?? r.workspace_id ?? "?",
+                  label: scope === "workspace" ? r.email : r.name,
+                  ...r,
+                }))}
+              />
+            </Panel>
           </div>
 
           <p className="text-xs" style={{ color: "var(--muted)" }}>
-            Cost is estimated from token counts at the Vercel AI Gateway&apos;s list prices (also used for native Anthropic/OpenAI
-            ids); prompt-caching discounts are ignored. Self-hosted vLLM and the scripted model count as $0.
+            Cost is estimated from token counts at the Vercel AI Gateway&apos;s list prices (also used for native Anthropic/OpenAI ids); prompt-caching
+            discounts are ignored. Self-hosted vLLM and the scripted model count as $0.
           </p>
         </>
       )}
-    </div>
+    </Page>
   );
 }
 
@@ -146,7 +149,7 @@ function Toggle({ on, onClick, children }: { on: boolean; onClick: () => void; c
 
 function Tile({ label, value, note }: { label: string; value: string; note?: string }) {
   return (
-    <div className="panel p-4">
+    <div className="panel p-5">
       <div className="label">{label}</div>
       <div className="mt-1 text-2xl font-semibold tabular-nums">{value}</div>
       {note && (
@@ -159,12 +162,7 @@ function Tile({ label, value, note }: { label: string; value: string; note?: str
 }
 
 function BucketTable({ rows }: { rows: (UsageBucket & { key: string; label: React.ReactNode })[] }) {
-  if (rows.length === 0)
-    return (
-      <div className="p-3 text-sm" style={{ color: "var(--muted)" }}>
-        No runs in this period.
-      </div>
-    );
+  if (rows.length === 0) return <Empty>No runs in this period.</Empty>;
   return (
     <table className="data">
       <thead>

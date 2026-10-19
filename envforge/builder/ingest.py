@@ -6,10 +6,12 @@ Everything downstream (redaction, profiling, LLM extraction) works on:
 
 where `role` is one of "customer" | "agent" | "system" | "unknown".
 
-Two entry points:
+Three entry points:
 
     guess = detect_format(path)              # what we think the file is, and why
     result = parse_file(path)                # or parse_file(path, mapping=guess.mapping)
+    stream = iter_conversations(path)        # the same, one conversation at a time
+    for conv in stream: ...                  # (bounded memory, for multi-GB files)
 
 `detect_format` returns a `FormatGuess` with a confidence and the `Mapping` it chose
 (which column holds the conversation id, which holds the text, ...). If the guess is
@@ -31,6 +33,9 @@ Supported shapes (best effort, auto-detected):
 
 Large files are read as a stream (line by line, or item by item for JSON arrays), and
 each conversation is capped (`max_turns`, `max_turn_chars`); truncation is reported.
+`parse_file` still returns every conversation as one list; `iter_conversations` hands
+them out as soon as they are complete, so memory stays flat however big the file is
+(see `ConversationStream` for how "complete" is decided).
 Parsing never sends anything anywhere — the text may contain personal data, so run
 `envforge.builder.redact` before showing it to a model or a person.
 """
@@ -45,7 +50,7 @@ import json
 import re
 import statistics
 import sys
-from collections import Counter
+from collections import Counter, deque
 from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -60,6 +65,12 @@ SAMPLE_BYTES = 64 * 1024  # how much of the file detect_format looks at
 DEFAULT_MAX_TURNS = 200  # per conversation; longer threads are cut (and reported)
 DEFAULT_MAX_TURN_CHARS = 4000  # per message
 JSON_OBJECT_WARN_BYTES = 256 * 1024 * 1024  # a top-level JSON *object* must be loaded whole
+# Streaming (iter_conversations): how many conversations may be "open" (still collecting
+# messages) at once, and how much text they may hold in total, before the least
+# recently touched one is considered complete and handed out.
+DEFAULT_STREAM_WINDOW = 2000
+DEFAULT_STREAM_OPEN_CHARS = 20_000_000
+MAX_KEPT_WARNINGS = 200  # per parse; further warnings are only counted
 
 
 # ---- the common shape ----------------------------------------------------------------
@@ -154,7 +165,7 @@ AGENT_WORDS = {
     "team", "employee", "specialist", "associate", "gpt", "ai", "chatbot", "outbound",
     "care", "success",
 }  # fmt: skip
-SYSTEM_WORDS = {"system", "note", "internal", "automated", "event", "notification"}
+SYSTEM_WORDS = {"system", "note", "internal", "automated", "event", "notification", "action"}
 
 # phrases that give away the support side of a conversation
 AGENT_GREETING = re.compile(
@@ -299,6 +310,7 @@ TRANSCRIPT_NAMES = [
 ]  # fmt: skip
 MESSAGE_LIST_KEYS = [
     "messages", "turns", "conversation", "dialog", "dialogue", "utterances", "comments",
+    "original",  # ABCD (ASAPP): "original": [["customer", "text"], ...]
     "conversation_parts", "parts", "chat", "thread", "events", "transcript", "entries",
 ]  # fmt: skip
 WRAPPER_KEYS = [
@@ -464,10 +476,21 @@ class _Draft:
     turns: list[Turn] = field(default_factory=list)
     meta: dict[str, Any] = field(default_factory=dict)
     truncated: bool = False
+    chars: int = 0  # text held so far (for the streaming memory cap)
 
 
 class _Collector:
-    """Accumulates turns per conversation id while enforcing the size caps."""
+    """Accumulates turns per conversation id while enforcing the size caps.
+
+    Two modes:
+
+    - collect everything (`window=None`, used by `parse_file`): every draft stays open
+      until `results()`, so messages of one conversation may be anywhere in the file;
+    - streaming (`window=N`, used by `iter_conversations`): at most N drafts (and
+      `max_open_chars` of text) stay open. When a new one would exceed that, the least
+      recently touched draft is finished and queued in `ready`; the parser hands those
+      out via `drain()` after every row. Memory is bounded by the window, not the file.
+    """
 
     def __init__(
         self,
@@ -476,25 +499,47 @@ class _Collector:
         max_turns: int,
         max_turn_chars: int,
         max_conversations: int | None,
+        *,
+        window: int | None = None,
+        max_open_chars: int | None = None,
     ) -> None:
         self.mapping = mapping
         self.source = source
         self.max_turns = max_turns
         self.max_turn_chars = max_turn_chars
         self.max_conversations = max_conversations
-        self.drafts: dict[str, _Draft] = {}
+        self.window = window
+        self.max_open_chars = max_open_chars
+        self.drafts: dict[str, _Draft] = {}  # open drafts; LRU order when streaming
+        self.ready: deque[Conversation] = deque()  # finished, waiting for drain()
+        self.created = 0  # drafts ever opened (ids "conv-N" and max_conversations use it)
+        self.open_chars = 0
         self.skipped = 0
+        self.truncated = 0  # finished conversations that were cut by the caps
+        self.empty = 0  # finished drafts with no usable message (dropped)
         self.full = False  # max_conversations reached
-        self.warnings: list[str] = []
+        self.warnings: list[str] = []  # the first MAX_KEPT_WARNINGS
+        self.n_warnings = 0
+
+    def warn(self, message: str) -> None:
+        """Record a warning; only the first MAX_KEPT_WARNINGS are kept (a multi-GB file
+        with a bad row every few lines must not fill memory with warnings)."""
+        self.n_warnings += 1
+        if len(self.warnings) < MAX_KEPT_WARNINGS:
+            self.warnings.append(message)
 
     def draft(self, conv_id: Any) -> _Draft | None:
-        cid = str(conv_id).strip() or f"conv-{len(self.drafts) + 1}"
-        if cid not in self.drafts:
-            if self.max_conversations is not None and len(self.drafts) >= self.max_conversations:
+        cid = str(conv_id).strip() or f"conv-{self.created + 1}"
+        d = self.drafts.get(cid)
+        if d is None:
+            if self.max_conversations is not None and self.created >= self.max_conversations:
                 self.full = True
                 return None
-            self.drafts[cid] = _Draft(id=cid)
-        return self.drafts[cid]
+            d = self.drafts[cid] = _Draft(id=cid)
+            self.created += 1
+        elif self.window is not None:  # streaming: mark as most recently used
+            self.drafts[cid] = self.drafts.pop(cid)
+        return d
 
     def add(
         self,
@@ -528,26 +573,58 @@ class _Collector:
                 speaker=label,
             )
         )
+        d.chars += len(body)
+        self.open_chars += len(body)
+        if self.window is not None:
+            self._evict()
+
+    def _evict(self) -> None:
+        """Streaming: finish least-recently-touched drafts until within the limits.
+
+        The newest draft (the one just touched, last in LRU order) is never evicted.
+        """
+        while len(self.drafts) > 1 and (
+            len(self.drafts) > (self.window or 0)
+            or (self.max_open_chars is not None and self.open_chars > self.max_open_chars)
+        ):
+            oldest = next(iter(self.drafts))
+            self._ready(self.drafts.pop(oldest))
+
+    def _ready(self, d: _Draft) -> None:
+        self.open_chars -= d.chars
+        conv = self._finish(d)
+        if conv is not None:
+            self.ready.append(conv)
+
+    def _finish(self, d: _Draft) -> Conversation | None:
+        """Turn a draft into a Conversation (guess roles, add meta); None if empty."""
+        if not d.turns:
+            self.empty += 1
+            return None
+        guessed = assign_unknown_roles(d.turns)
+        meta = {"source_file": self.source, "n_turns": len(d.turns), **d.meta}
+        if guessed:
+            meta["roles_guessed"] = guessed
+        if d.truncated:
+            meta["truncated"] = True
+            self.truncated += 1
+        return Conversation(id=d.id, turns=d.turns, meta=meta)
+
+    def drain(self) -> Iterator[Conversation]:
+        """Hand out (and forget) the conversations finished so far."""
+        while self.ready:
+            yield self.ready.popleft()
+
+    def flush_all(self) -> None:
+        """End of file: every open draft is complete."""
+        for d in list(self.drafts.values()):
+            self._ready(d)
+        self.drafts.clear()
 
     def results(self) -> tuple[list[Conversation], int]:
-        convs: list[Conversation] = []
-        truncated = 0
-        empty = 0
-        for d in self.drafts.values():
-            if not d.turns:
-                empty += 1
-                continue
-            guessed = assign_unknown_roles(d.turns)
-            meta = {"source_file": self.source, "n_turns": len(d.turns), **d.meta}
-            if guessed:
-                meta["roles_guessed"] = guessed
-            if d.truncated:
-                meta["truncated"] = True
-                truncated += 1
-            convs.append(Conversation(id=d.id, turns=d.turns, meta=meta))
-        if empty:
-            self.warnings.append(f"{empty} conversation(s) had no usable messages and were dropped")
-        return convs, truncated
+        """Collect-everything mode: finish all drafts, in first-seen order."""
+        self.flush_all()
+        return list(self.drain()), self.truncated
 
 
 # ---- CSV ---------------------------------------------------------------------------------
@@ -632,7 +709,8 @@ def _sniff_delimiter(sample: str, path: Path) -> str:
         return ","
 
 
-def _parse_csv(f: TextIO, mapping: Mapping, col: _Collector) -> None:
+def _parse_csv(f: TextIO, mapping: Mapping, col: _Collector) -> Iterator[Conversation]:
+    """Read CSV rows into `col`, yielding conversations as the collector finishes them."""
     csv.field_size_limit(min(sys.maxsize, 2**31 - 1))  # transcripts can be long
     reader = csv.reader(f, delimiter=mapping.delimiter)
     header = next(reader, None)
@@ -657,6 +735,7 @@ def _parse_csv(f: TextIO, mapping: Mapping, col: _Collector) -> None:
         return row[i] if i is not None and i < len(row) else None
 
     for rownum, row in enumerate(reader, start=2):
+        yield from col.drain()
         if col.full:
             break
         if not any(c.strip() for c in row):
@@ -668,7 +747,7 @@ def _parse_csv(f: TextIO, mapping: Mapping, col: _Collector) -> None:
             if not turns:
                 if transcript.strip():
                     col.add(cid, None, transcript, cell(row, tsi))
-                    col.warnings.append(f"row {rownum}: no speaker prefixes found in transcript")
+                    col.warn(f"row {rownum}: no speaker prefixes found in transcript")
                 else:
                     col.skipped += 1
                 continue
@@ -684,7 +763,16 @@ def _parse_csv(f: TextIO, mapping: Mapping, col: _Collector) -> None:
 
 # ---- JSON / JSONL ------------------------------------------------------------------------
 
-ID_KEYS = ["id", "conversation_id", "ticket_id", "chat_id", "thread_id", "session_id", "uuid"]
+ID_KEYS = [
+    "id",
+    "conversation_id",
+    "convo_id",
+    "ticket_id",
+    "chat_id",
+    "thread_id",
+    "session_id",
+    "uuid",
+]
 
 
 def _first_key(d: dict[str, Any], keys: list[str]) -> str | None:
@@ -711,6 +799,8 @@ def _message_fields(msg: Any, mapping: Mapping) -> tuple[Any, Any, Any]:
     """(role label, text, timestamp) of one JSON message, whatever its shape."""
     if isinstance(msg, str):
         return None, msg, None
+    if isinstance(msg, (list, tuple)) and len(msg) == 2 and all(isinstance(x, str) for x in msg):
+        return msg[0], msg[1], None  # a [speaker, text] pair (ABCD and similar corpora)
     if not isinstance(msg, dict):
         return None, None, None
     rk = mapping.role if mapping.role in msg else _first_key(msg, ROLE_NAMES)
@@ -825,6 +915,17 @@ def _unwrap_json_object(obj: dict[str, Any]) -> list[Any]:
         return obj[key]
     if _messages_value(obj, None) is not None:  # the object is itself one conversation
         return [obj]
+    # dataset splits: {"train": [conv, ...], "dev": [...], "test": [...]} -> all of them
+    lists = [v for v in obj.values() if isinstance(v, list) and v]
+    if lists and all(
+        isinstance(v[0], dict) and _messages_value(v[0], None) is not None for v in lists
+    ):
+        return [
+            {**c, "split": k} if isinstance(c, dict) else c
+            for k, v in obj.items()
+            if isinstance(v, list)
+            for c in v
+        ]
     # dict of id -> conversation / message list
     items: list[Any] = []
     for k, v in obj.items():
@@ -942,8 +1043,12 @@ def _sample_jsonl_items(sample: str) -> list[Any]:
     return items
 
 
-def _parse_json_items(items: Iterator[Any], mapping: Mapping, col: _Collector) -> None:
+def _parse_json_items(
+    items: Iterator[Any], mapping: Mapping, col: _Collector
+) -> Iterator[Conversation]:
+    """Read JSON items into `col`, yielding conversations as the collector finishes them."""
     for index, item in enumerate(items, start=1):
+        yield from col.drain()
         if col.full:
             break
         if mapping.layout == "message_rows":
@@ -968,6 +1073,131 @@ def _iter_jsonl(f: TextIO, col: _Collector) -> Iterator[Any]:
             yield json.loads(line)
         except json.JSONDecodeError:
             col.skipped += 1
+
+
+class _PrefixedReader:
+    """A `.read(n)` source that returns `prefix` first, then continues from `f`.
+
+    Lets `_iter_json_array` start in the middle of text we have already read.
+    """
+
+    def __init__(self, prefix: str, f: TextIO) -> None:
+        self.prefix = prefix
+        self.f = f
+
+    def read(self, n: int = -1) -> str:
+        if self.prefix:
+            out, self.prefix = self.prefix, ""
+            return out
+        return self.f.read(n)
+
+
+def _wrapped_array_start(head: str) -> int | None:
+    """Where the conversation list starts in `{"conversations": [ ...`, if we can tell.
+
+    Walks the top-level keys of a JSON object at the start of `head`, decoding (small)
+    values that come before the list. Returns the offset of the "[" of the first key
+    that is a wrapper key ("conversations", "tickets", ...), or None when the object
+    has another shape or the list does not start within `head`. This is what lets a
+    multi-GB `{"conversations": [...]}` file stream instead of being loaded whole.
+    """
+    decoder = json.JSONDecoder()
+    ws = " \t\r\n"
+    pos = len(head) - len(head.lstrip(ws))
+    if head[pos : pos + 1] != "{":
+        return None
+    pos += 1
+    while True:
+        while pos < len(head) and head[pos] in ws + ",":
+            pos += 1
+        if head[pos : pos + 1] != '"':
+            return None
+        try:
+            key, pos = decoder.raw_decode(head, pos)
+        except json.JSONDecodeError:
+            return None
+        while pos < len(head) and head[pos] in ws:
+            pos += 1
+        if head[pos : pos + 1] != ":":
+            return None
+        pos += 1
+        while pos < len(head) and head[pos] in ws:
+            pos += 1
+        if str(key).lower() in WRAPPER_KEYS:
+            return pos if head[pos : pos + 1] == "[" else None
+        try:
+            _, pos = decoder.raw_decode(head, pos)
+        except json.JSONDecodeError:
+            return None
+
+
+def _iter_parsed(
+    f: TextIO, path: Path, fmt: FileFormat, mapping: Mapping, col: _Collector, warnings: list[str]
+) -> Iterator[Conversation]:
+    """Dispatch on the format and feed the whole file through `col`.
+
+    Yields conversations as the collector finishes them (nothing until the end in
+    collect-everything mode). Shared by `parse_file` and `iter_conversations`.
+    """
+    if fmt == "csv":
+        yield from _parse_csv(f, mapping, col)
+    elif fmt == "jsonl":
+        yield from _parse_json_items(_iter_jsonl(f, col), mapping, col)
+    elif fmt == "json":
+        head = f.read(1)
+        while head and head.isspace():
+            head = f.read(1)
+        f.seek(0)
+        if head == "[":
+            yield from _parse_json_items(_iter_json_array(f), mapping, col)
+            return
+        sample = f.read(SAMPLE_BYTES)
+        start = _wrapped_array_start(sample)
+        if start is not None:  # {"conversations": [ ... ]}: stream the list
+            items = _iter_json_array(_PrefixedReader(sample[start:], f))  # type: ignore[arg-type]
+            yield from _parse_json_items(items, mapping, col)
+            return
+        f.seek(0)
+        if path.stat().st_size > JSON_OBJECT_WARN_BYTES:
+            warnings.append(
+                "large JSON object loaded into memory; a top-level array or JSONL streams instead"
+            )
+        obj = json.load(f)
+        items_list = _unwrap_json_object(obj) if isinstance(obj, dict) else [obj]
+        yield from _parse_json_items(iter(items_list), mapping, col)
+    else:
+        blocks = iter_transcript_blocks(iter(f), mapping.txt_split)
+        for n, (header_id, turns, skipped) in enumerate(blocks, start=1):
+            yield from col.drain()
+            col.skipped += skipped
+            cid = header_id or f"conv-{n}"
+            while cid in col.drafts:  # repeated header ids
+                cid = f"{cid}-{n}"
+            for speaker, text, ts in turns:
+                col.add(cid, speaker, text, ts)
+            if col.full:
+                break
+
+
+def _summary_warnings(
+    col: _Collector, max_turns: int, max_turn_chars: int, max_conversations: int | None
+) -> list[str]:
+    """The end-of-parse warnings (shared by `parse_file` and `ConversationStream`)."""
+    warnings = list(col.warnings[:20])
+    if col.n_warnings > 20:
+        warnings.append(f"... and {col.n_warnings - 20} more warnings")
+    if col.empty:
+        warnings.append(f"{col.empty} conversation(s) had no usable messages and were dropped")
+    if col.truncated:
+        warnings.append(
+            f"{col.truncated} conversation(s) truncated (max {max_turns} turns, "
+            f"{max_turn_chars} chars per turn)"
+        )
+    if col.full:
+        warnings.append(f"stopped after {max_conversations} conversations (max_conversations)")
+    if col.skipped:
+        warnings.append(f"{col.skipped} row(s)/item(s) skipped (empty or unrecognised)")
+    return warnings
 
 
 # ---- detection -----------------------------------------------------------------------------
@@ -1049,6 +1279,9 @@ def parse_file(
     `mapping` overrides the detected layout/columns (start from
     `detect_format(path).mapping` and change what is wrong). `max_conversations` stops
     early, which is handy for a quick preview of a huge file.
+
+    Every conversation is held in memory at once; for files bigger than a few hundred
+    MB use `iter_conversations`, which yields them one at a time.
     """
     path = Path(path)
     guess = detect_format(path)
@@ -1061,51 +1294,11 @@ def parse_file(
         warnings.append("file is not valid UTF-8; decoded as latin-1")
 
     with _open_text(path, guess.encoding) as f:
-        if fmt == "csv":
-            _parse_csv(f, mapping, col)
-        elif fmt == "jsonl":
-            _parse_json_items(_iter_jsonl(f, col), mapping, col)
-        elif fmt == "json":
-            head = f.read(1)
-            while head and head.isspace():
-                head = f.read(1)
-            f.seek(0)
-            if head == "[":
-                _parse_json_items(_iter_json_array(f), mapping, col)
-            else:
-                if path.stat().st_size > JSON_OBJECT_WARN_BYTES:
-                    warnings.append(
-                        "large JSON object loaded into memory; a top-level array or JSONL "
-                        "streams instead"
-                    )
-                obj = json.load(f)
-                items = _unwrap_json_object(obj) if isinstance(obj, dict) else [obj]
-                _parse_json_items(iter(items), mapping, col)
-        else:
-            blocks = iter_transcript_blocks(iter(f), mapping.txt_split)
-            for n, (header_id, turns, skipped) in enumerate(blocks, start=1):
-                col.skipped += skipped
-                cid = header_id or f"conv-{n}"
-                while cid in col.drafts:  # repeated header ids
-                    cid = f"{cid}-{n}"
-                for speaker, text, ts in turns:
-                    col.add(cid, speaker, text, ts)
-                if col.full:
-                    break
+        for _ in _iter_parsed(f, path, fmt, mapping, col, warnings):
+            pass  # collect-everything mode: nothing is yielded before the end
 
     conversations, truncated = col.results()
-    warnings.extend(col.warnings[:20])
-    if len(col.warnings) > 20:
-        warnings.append(f"... and {len(col.warnings) - 20} more warnings")
-    if truncated:
-        warnings.append(
-            f"{truncated} conversation(s) truncated (max {max_turns} turns, "
-            f"{max_turn_chars} chars per turn)"
-        )
-    if col.full:
-        warnings.append(f"stopped after {max_conversations} conversations (max_conversations)")
-    if col.skipped:
-        warnings.append(f"{col.skipped} row(s)/item(s) skipped (empty or unrecognised)")
+    warnings.extend(_summary_warnings(col, max_turns, max_turn_chars, max_conversations))
     if not conversations:
         warnings.append("no conversations found; check the mapping")
     return ParseResult(
@@ -1115,6 +1308,137 @@ def parse_file(
         warnings=warnings,
         skipped_rows=col.skipped,
         truncated=truncated,
+    )
+
+
+class ConversationStream:
+    """The conversations of a file, parsed lazily: iterate over it once.
+
+        stream = iter_conversations("chats.jsonl")
+        for conv in stream:
+            ...                              # stream.bytes_read / stream.bytes_total
+        stream.warnings, stream.skipped_rows, stream.truncated   # final once done
+
+    Same parser and mapping as `parse_file`, but a conversation is yielded as soon as
+    it is complete instead of collected into a list, so memory does not grow with the
+    file. "Complete" is easy when each item is a whole conversation (a JSON object, a
+    transcript row, a TXT block). For one-message-per-row files it is a guess: a
+    conversation is finished once `window` newer conversations have been touched since
+    its last message (or the open ones hold more than `max_open_chars` of text). Rows
+    are almost always grouped or time-ordered, so this rarely matters; if messages of
+    one conversation are spread further apart, it is yielded in several parts that
+    share an id (callers that need unique ids must handle that — `CorpusStore` renames
+    the later parts to "<id>#2", ...). Conversation ids generated by the parser
+    ("conv-12") and the `max_conversations` limit behave as in `parse_file`.
+
+    Limits: a top-level JSON *array* streams, and so does an object whose first wrapper
+    key holds the list (`{"conversations": [...]}`, possibly after small keys such as
+    "version"). Any other top-level JSON object is loaded whole (a warning says so).
+    """
+
+    def __init__(
+        self,
+        path: str | Path,
+        mapping: Mapping | None = None,
+        *,
+        max_turns: int = DEFAULT_MAX_TURNS,
+        max_turn_chars: int = DEFAULT_MAX_TURN_CHARS,
+        max_conversations: int | None = None,
+        window: int = DEFAULT_STREAM_WINDOW,
+        max_open_chars: int = DEFAULT_STREAM_OPEN_CHARS,
+    ) -> None:
+        self.path = Path(path)
+        self.format = detect_format(self.path)
+        self.mapping = mapping or self.format.mapping
+        self.max_turns = max_turns
+        self.max_turn_chars = max_turn_chars
+        self.max_conversations = max_conversations
+        self.bytes_total = self.path.stat().st_size
+        self.conversations = 0  # yielded so far
+        self.warnings: list[str] = []  # complete once iteration has finished
+        self.done = False
+        self._col = _Collector(
+            self.mapping,
+            self.path.name,
+            max_turns,
+            max_turn_chars,
+            max_conversations,
+            window=max(1, window),
+            max_open_chars=max_open_chars,
+        )
+        self._file: TextIO | None = None
+        self._started = False
+
+    @property
+    def bytes_read(self) -> int:
+        """How far into the file the parser has read (approximate: reads are buffered)."""
+        if self.done:
+            return self.bytes_total
+        if self._file is None:
+            return 0
+        try:
+            return min(self.bytes_total, self._file.buffer.tell())  # type: ignore[attr-defined]
+        except (AttributeError, OSError, ValueError):
+            return 0
+
+    @property
+    def skipped_rows(self) -> int:
+        return self._col.skipped
+
+    @property
+    def truncated(self) -> int:
+        return self._col.truncated
+
+    def __iter__(self) -> Iterator[Conversation]:
+        if self._started:
+            raise RuntimeError("a ConversationStream can only be iterated once")
+        self._started = True
+        warnings: list[str] = []
+        if self.format.encoding == "latin-1":
+            warnings.append("file is not valid UTF-8; decoded as latin-1")
+        fmt: FileFormat = self.mapping.format or self.format.format
+        col = self._col
+        with _open_text(self.path, self.format.encoding) as f:
+            self._file = f
+            for conv in _iter_parsed(f, self.path, fmt, self.mapping, col, warnings):
+                self.conversations += 1
+                yield conv
+            col.flush_all()
+            for conv in col.drain():
+                self.conversations += 1
+                yield conv
+        self._file = None
+        self.done = True
+        warnings.extend(
+            _summary_warnings(col, self.max_turns, self.max_turn_chars, self.max_conversations)
+        )
+        if not self.conversations:
+            warnings.append("no conversations found; check the mapping")
+        self.warnings = warnings
+
+
+def iter_conversations(
+    path: str | Path,
+    mapping: Mapping | None = None,
+    *,
+    max_turns: int = DEFAULT_MAX_TURNS,
+    max_turn_chars: int = DEFAULT_MAX_TURN_CHARS,
+    max_conversations: int | None = None,
+    window: int = DEFAULT_STREAM_WINDOW,
+    max_open_chars: int = DEFAULT_STREAM_OPEN_CHARS,
+) -> ConversationStream:
+    """Parse a file lazily: returns a `ConversationStream` to iterate over once.
+
+    The streaming twin of `parse_file`, for files too big to hold in memory.
+    """
+    return ConversationStream(
+        path,
+        mapping,
+        max_turns=max_turns,
+        max_turn_chars=max_turn_chars,
+        max_conversations=max_conversations,
+        window=window,
+        max_open_chars=max_open_chars,
     )
 
 

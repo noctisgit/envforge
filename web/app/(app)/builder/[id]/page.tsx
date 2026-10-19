@@ -10,9 +10,11 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { DiagramView } from "@/components/DiagramView";
 import { Markdown } from "@/components/Markdown";
+import { CorpusPanel, PrivacyPanel } from "@/components/PrivacyPanel";
 import {
   Api,
   ApiError,
+  importBuilderUrl,
   uploadBuilderFile,
   type BuilderMessage,
   type BuilderProject,
@@ -181,7 +183,9 @@ function Chat({ wsId, project, onChange, onOpenRevisions }: { wsId: string; proj
     for (const f of Array.from(files)) {
       setUploading(f.name);
       try {
-        await uploadBuilderFile(wsId, project.id, f);
+        await uploadBuilderFile(wsId, project.id, f, (sent, total) =>
+          setUploading(`${f.name} — ${Math.floor((100 * sent) / Math.max(1, total))}% of ${(total / 2 ** 20).toFixed(total > 2 ** 30 ? 0 : 1)} MB`),
+        );
       } catch (e) {
         setSendErr(`${f.name}: ${msgOf(e)}`);
       }
@@ -217,7 +221,7 @@ function Chat({ wsId, project, onChange, onOpenRevisions }: { wsId: string; proj
         )}
         {uploading && (
           <div className="text-xs" style={{ color: "var(--muted)" }}>
-            Uploading {uploading}…
+            Uploading {uploading}… (you can leave and re-pick the same file later to resume)
           </div>
         )}
         <div className="flex items-end gap-2">
@@ -229,7 +233,7 @@ function Chat({ wsId, project, onChange, onOpenRevisions }: { wsId: string; proj
           >
             📎
           </button>
-          <input ref={fileInput} type="file" multiple accept=".csv,.txt,.json,.jsonl,.log" className="hidden" onChange={(e) => upload(e.target.files)} />
+          <input ref={fileInput} type="file" multiple accept=".csv,.txt,.json,.jsonl,.log,.gz" className="hidden" onChange={(e) => upload(e.target.files)} />
           <textarea
             className="input max-h-40 min-h-[44px] flex-1 resize-y"
             placeholder={busy ? "The builder is working…" : "Message the builder (Enter to send, Shift+Enter for a new line)"}
@@ -559,20 +563,48 @@ function TasksTab({ wsId, project }: { wsId: string; project: BuilderProject }) 
 
 function DataTab({ wsId, project, onChange }: { wsId: string; project: BuilderProject; onChange: () => void }) {
   const confirm = useConfirm();
-  const processing = project.uploads.some((u) => u.status === "uploaded" || u.status === "processing");
+  const [url, setUrl] = useState("");
+  const [msg, setMsg] = useState<string | null>(null);
+  const processing = project.uploads.some((u) => ["receiving", "uploaded", "processing"].includes(u.status));
   useEffect(() => {
     if (!processing) return;
     const t = setInterval(onChange, 2500);
     return () => clearInterval(t);
   }, [processing, onChange]);
-
   return (
     <div className="space-y-3 text-sm">
+      <PrivacyPanel wsId={wsId} project={project} onChange={onChange} />
+      <CorpusPanel wsId={wsId} project={project} />
+
+      <div className="flex flex-wrap items-end gap-2">
+        <div className="min-w-[16rem] flex-1">
+          <label className="label">Import from a URL (large archives — e.g. a presigned S3/R2 https link)</label>
+          <input className="input mono" placeholder="https://…/helpdesk-2025.jsonl" value={url} onChange={(e) => setUrl(e.target.value)} />
+        </div>
+        <button
+          className="btn-ghost"
+          disabled={!url.trim().startsWith("https://")}
+          onClick={async () => {
+            setMsg(null);
+            try {
+              await importBuilderUrl(wsId, project.id, url.trim());
+              setUrl("");
+              onChange();
+            } catch (e) {
+              setMsg(msgOf(e));
+            }
+          }}
+        >
+          Import
+        </button>
+      </div>
+      {msg && <div className="text-xs" style={{ color: "var(--bad)" }}>{msg}</div>}
+
       <p style={{ color: "var(--muted)" }}>
         Uploaded files are parsed and <strong>redacted</strong> (emails, phone numbers, card numbers, addresses, names after
         cues like “my name is”…) by the builder worker, then the original file is deleted. Only redacted text is stored or shown
-        to the builder model. Redaction is best-effort: review samples before extracting at scale. Attach files with 📎 in the
-        chat (CSV, TXT, JSON; up to 95 MB each).
+        to the builder model. Redaction is best-effort: run a privacy review before extracting at scale. Attach files with 📎 in
+        the chat (CSV, TXT, JSON/JSONL, optionally .gz; large files upload in resumable chunks).
       </p>
       {project.uploads.length === 0 && <div style={{ color: "var(--muted)" }}>No uploads yet.</div>}
       {project.uploads.map((u) => (
@@ -604,6 +636,16 @@ function DataTab({ wsId, project, onChange }: { wsId: string; project: BuilderPr
               delete
             </button>
           </div>
+          {u.status === "receiving" && (
+            <Progress value={u.bytes_received} total={u.size_bytes} label="receiving (resume by re-picking the same file)" />
+          )}
+          {(u.status === "processing" || u.status === "uploaded") && u.progress && (
+            <Progress
+              value={u.progress.bytes ?? 0}
+              total={u.progress.total ?? u.size_bytes}
+              label={`${u.progress.stage ?? "processing"}${u.progress.conversations ? ` · ${u.progress.conversations.toLocaleString()} conversations` : ""}`}
+            />
+          )}
           {u.error && <div className="mt-1 text-xs" style={{ color: "var(--bad)" }}>{u.error}</div>}
           {u.redactions && Object.keys(u.redactions).length > 0 && (
             <div className="mt-2 flex flex-wrap gap-1 text-xs">
@@ -629,6 +671,21 @@ function DataTab({ wsId, project, onChange }: { wsId: string; project: BuilderPr
           )}
         </div>
       ))}
+    </div>
+  );
+}
+
+function Progress({ value, total, label }: { value: number; total: number; label: string }) {
+  const pct = total ? Math.min(100, Math.floor((100 * value) / total)) : null;
+  return (
+    <div className="mt-2 space-y-1">
+      <div className="h-1.5 w-full overflow-hidden rounded-full" style={{ background: "var(--line)" }}>
+        <div className="h-full rounded-full transition-all" style={{ width: `${pct ?? 30}%`, background: "var(--accent)" }} />
+      </div>
+      <div className="text-[11px]" style={{ color: "var(--muted)" }}>
+        {label}
+        {pct !== null && ` · ${pct}%`}
+      </div>
     </div>
   );
 }

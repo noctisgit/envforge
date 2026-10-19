@@ -12,6 +12,7 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useEffect, useState } from "react";
 import { DiagramView } from "@/components/DiagramView";
+import { Page, PageHeader, Panel } from "@/components/Page";
 import { Tabs, tabPanelProps, useHashTab, type TabItem } from "@/components/Tabs";
 import { Api, ApiError, type Pack, type PackDetail, type TaskPreview, type ToolSpec } from "@/lib/api";
 import { useWorkspace } from "@/lib/workspace";
@@ -55,16 +56,18 @@ export default function EnvironmentPage() {
   const panel = (id: string) => ({ ...tabPanelProps(P, id), hidden: tab !== id, className: "outline-none" });
 
   return (
-    <div className="space-y-5">
-      <div className="space-y-2">
-        <Link href="/environments" className="text-sm" style={{ color: "var(--muted)" }}>
-          ← Environments
-        </Link>
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-          <h1 className="text-xl font-semibold">{pack.name}</h1>
-          <span className="pill pill-queued">{pack.kind === "sim" ? "simulation" : "container sandbox"}</span>
-          {listing?.custom && <span className="pill pill-running">built in this workspace</span>}
-          <div className="ml-auto flex items-center gap-2">
+    <Page>
+      <PageHeader
+        back={{ href: "/environments", label: "Environments" }}
+        title={pack.name}
+        meta={
+          <>
+            <span className="pill pill-queued">{pack.kind === "sim" ? "simulation" : "container sandbox"}</span>
+            {listing?.custom && <span className="pill pill-running">built in this workspace</span>}
+          </>
+        }
+        actions={
+          <>
             {listing?.project_id && (
               <Link href={`/builder/${listing.project_id}`} className="btn-ghost">
                 Open in Builder
@@ -73,16 +76,17 @@ export default function EnvironmentPage() {
             <Link href={`/runs?pack=${encodeURIComponent(pack.name)}`} className="btn">
               Run it
             </Link>
-          </div>
-        </div>
-        <p className="max-w-4xl text-sm">{pack.description}</p>
+          </>
+        }
+        description={<span style={{ color: "var(--fg)" }}>{pack.description}</span>}
+      >
         <div className="text-xs" style={{ color: "var(--muted)" }}>
           tiers {pack.tiers.join(", ")} · up to {pack.max_steps} turns · {pack.tools.length} tools + finish
           {pack.replayable && " · replayable"}
         </div>
-      </div>
+      </PageHeader>
 
-      <div className="space-y-5">
+      <div className="space-y-6">
         <Tabs idPrefix={P} label={`${pack.name} sections`} tabs={tabs} active={tab} onChange={setTab} />
 
         <div {...panel("overview")}>
@@ -93,26 +97,7 @@ export default function EnvironmentPage() {
         <div {...panel("rules")}>{visited.has("rules") && <RulesTab pack={pack} />}</div>
         <div {...panel("preview")}>{visited.has("preview") && ws && <Preview pack={pack} wsId={ws.id} />}</div>
       </div>
-    </div>
-  );
-}
-
-function Section({ title, hint, aside, children }: { title: string; hint?: React.ReactNode; aside?: React.ReactNode; children: React.ReactNode }) {
-  return (
-    <section className="panel min-w-0 space-y-3 p-5">
-      <div className="flex flex-wrap items-start gap-x-4 gap-y-2">
-        <div className="min-w-0 flex-1">
-          <h2 className="text-sm font-semibold">{title}</h2>
-          {hint && (
-            <p className="text-xs" style={{ color: "var(--muted)" }}>
-              {hint}
-            </p>
-          )}
-        </div>
-        {aside}
-      </div>
-      {children}
-    </section>
+    </Page>
   );
 }
 
@@ -127,14 +112,14 @@ const Muted = ({ children }: { children: React.ReactNode }) => (
 function OverviewTab({ pack }: { pack: PackDetail }) {
   const overview = pack.overview && pack.overview !== pack.description ? pack.overview : "";
   return (
-    <div className="space-y-4">
-      <Section title="How an episode works">
+    <div className="space-y-6">
+      <Panel title="How an episode works">
         {overview && <p className="max-w-4xl text-sm leading-relaxed">{overview}</p>}
         <EpisodeFlow pack={pack} />
-      </Section>
+      </Panel>
 
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        <Section title="Dimensions" hint="LLM-agent environments have no tensors: observations and actions are text. This is what can be counted.">
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+        <Panel title="Dimensions" hint="LLM-agent environments have no tensors: observations and actions are text. This is what can be counted.">
           <table className="data">
             <tbody>
               {pack.dimensions.map(([k, v]) => (
@@ -147,8 +132,8 @@ function OverviewTab({ pack }: { pack: PackDetail }) {
               ))}
             </tbody>
           </table>
-        </Section>
-        <Section title="The world">
+        </Panel>
+        <Panel title="The world">
           {pack.world.length ? (
             <ul className="list-disc space-y-1 pl-5 text-sm">
               {pack.world.map((w, i) => (
@@ -174,7 +159,7 @@ function OverviewTab({ pack }: { pack: PackDetail }) {
               )}
             </dl>
           )}
-        </Section>
+        </Panel>
       </div>
     </div>
   );
@@ -219,15 +204,14 @@ function EpisodeFlow({ pack }: { pack: PackDetail }) {
 function WorldTab({ pack, onPreview }: { pack: PackDetail; onPreview: () => void }) {
   if (!pack.world_diagram)
     return (
-      <Section title="World">
+      <Panel title="World">
         <Muted>
-          This pack doesn&apos;t draw a diagram yet. Packs can add one by implementing <span className="mono">diagram()</span> (see
-          docs/PACKS.md).
+          This pack doesn&apos;t draw a diagram yet. Packs can add one by implementing <span className="mono">diagram()</span> (see docs/PACKS.md).
         </Muted>
-      </Section>
+      </Panel>
     );
   return (
-    <Section
+    <Panel
       title="World"
       hint="A sample task: seed 0, lowest tier. Click a node for its details."
       aside={
@@ -237,7 +221,7 @@ function WorldTab({ pack, onPreview }: { pack: PackDetail; onPreview: () => void
       }
     >
       <DiagramView diagram={pack.world_diagram} height={520} />
-    </Section>
+    </Panel>
   );
 }
 
@@ -248,20 +232,20 @@ function paramText(t: ToolSpec): React.ReactNode {
   const req = new Set(t.parameters.required ?? []);
   const names = Object.keys(props);
   if (!names.length) return <span style={{ color: "var(--muted)" }}>—</span>;
+  // one parameter per line; enums get spaces around "|" so long value lists wrap
   return (
-    <span className="mono text-xs">
-      {names.map((n, i) => {
+    <ul className="mono space-y-0.5 text-xs [overflow-wrap:anywhere]">
+      {names.map((n) => {
         const p = props[n];
-        const type = p.enum ? p.enum.map(String).join("|") : p.type ?? "any";
+        const type = p.enum ? p.enum.map(String).join(" | ") : (p.type ?? "any");
         return (
-          <span key={n}>
-            {i > 0 && ", "}
+          <li key={n}>
             {n}
             {req.has(n) ? "" : "?"}: <span style={{ color: "var(--muted)" }}>{type}</span>
-          </span>
+          </li>
         );
       })}
-    </span>
+    </ul>
   );
 }
 
@@ -286,7 +270,11 @@ function ToolsTab({ pack }: { pack: PackDetail }) {
   const total = pack.tools.length + 1;
   const cats: TabItem[] = [
     { id: "all", label: "All", count: total },
-    ...groups.map((g) => ({ id: g.id, label: { observe: "Observe", act: "Act", other: "Uncategorised", builtin: "Built-in" }[g.id] ?? g.id, count: g.tools.length })),
+    ...groups.map((g) => ({
+      id: g.id,
+      label: { observe: "Observe", act: "Act", other: "Uncategorised", builtin: "Built-in" }[g.id] ?? g.id,
+      count: g.tools.length,
+    })),
   ];
   const shown = groups
     .filter((g) => cat === "all" || g.id === cat)
@@ -295,10 +283,7 @@ function ToolsTab({ pack }: { pack: PackDetail }) {
   const nShown = shown.reduce((n, g) => n + g.tools.length, 0);
 
   return (
-    <Section
-      title={`Tools (${pack.tools.length} + finish)`}
-      hint="What the model may call, with the JSON-schema parameters it sees (? = optional)."
-    >
+    <Panel title={`Tools (${pack.tools.length} + finish)`} hint="What the model may call, with the JSON-schema parameters it sees (? = optional).">
       <div className="flex flex-wrap items-center gap-3">
         <Tabs idPrefix="tools" label="Tool category" variant="pills" tabs={cats} active={cat} onChange={setCat} />
         <div className="ml-auto flex w-full items-center gap-2 sm:w-auto">
@@ -323,29 +308,30 @@ function ToolsTab({ pack }: { pack: PackDetail }) {
         ))}
         {nShown === 0 && <Muted>No tools match “{q}”.</Muted>}
       </div>
-    </Section>
+    </Panel>
   );
 }
 
 function ToolTable({ title, tools }: { title: string; tools: ToolSpec[] }) {
   return (
-    <div className="overflow-x-auto">
+    <div>
       <div className="label mb-1">
         {title} · {tools.length}
       </div>
-      <table className="data">
+      {/* fixed layout: column widths hold no matter how long an enum or description is */}
+      <table className="data sm:table-fixed">
         <thead>
           <tr>
-            <th className="sm:w-48">tool</th>
-            <th className="hidden w-[30%] sm:table-cell">parameters</th>
+            <th className="sm:w-[22%]">tool</th>
+            <th className="hidden sm:table-cell sm:w-[33%]">parameters</th>
             <th className="hidden sm:table-cell">description</th>
           </tr>
         </thead>
         <tbody>
           {tools.map((t) => (
             <tr key={t.name}>
-              <td>
-                <div className="mono font-medium sm:whitespace-nowrap">{t.name}</div>
+              <td className="[overflow-wrap:anywhere]">
+                <div className="mono text-xs font-medium">{t.name}</div>
                 {/* narrow screens: one stacked cell instead of three cramped columns */}
                 <div className="mt-1 space-y-1 sm:hidden">
                   {Object.keys(t.parameters.properties ?? {}).length > 0 && <div>{paramText(t)}</div>}
@@ -353,7 +339,7 @@ function ToolTable({ title, tools }: { title: string; tools: ToolSpec[] }) {
                 </div>
               </td>
               <td className="hidden sm:table-cell">{paramText(t)}</td>
-              <td className="hidden sm:table-cell" style={{ color: "var(--muted)" }}>
+              <td className="hidden leading-snug sm:table-cell" style={{ color: "var(--muted)" }}>
                 {t.description}
               </td>
             </tr>
@@ -371,9 +357,9 @@ function RulesTab({ pack }: { pack: PackDetail }) {
   const tables = pack.tables;
   const t = tables[Math.min(sel, tables.length - 1)];
   return (
-    <div className="space-y-4">
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        <Section title="Difficulty tiers">
+    <div className="space-y-6">
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+        <Panel title="Difficulty tiers">
           <table className="data">
             <tbody>
               {pack.tiers.map((t) => (
@@ -384,8 +370,8 @@ function RulesTab({ pack }: { pack: PackDetail }) {
               ))}
             </tbody>
           </table>
-        </Section>
-        <Section title="Reward" hint="Computed by code at the end of the episode.">
+        </Panel>
+        <Panel title="Reward" hint="Computed by code at the end of the episode.">
           {pack.reward_rules.length ? (
             <table className="data">
               <tbody>
@@ -405,11 +391,11 @@ function RulesTab({ pack }: { pack: PackDetail }) {
           ) : (
             <Muted>Defined by the pack&apos;s verify().</Muted>
           )}
-        </Section>
+        </Panel>
       </div>
 
       {t && (
-        <Section title="Reference tables" hint="What the task generator draws from and the verifier checks against.">
+        <Panel title="Reference tables" hint="What the task generator draws from and the verifier checks against.">
           {tables.length > 1 && (
             <Tabs
               idPrefix="tables"
@@ -452,7 +438,7 @@ function RulesTab({ pack }: { pack: PackDetail }) {
               </table>
             </div>
           </div>
-        </Section>
+        </Panel>
       )}
     </div>
   );
@@ -488,8 +474,8 @@ function Preview({ pack, wsId }: { pack: PackDetail; wsId: string }) {
   const diagram = view === "after" && p?.diagram_after ? p.diagram_after : p?.diagram_before;
 
   return (
-    <div className="space-y-4">
-      <Section
+    <div className="space-y-6">
+      <Panel
         title="Task preview"
         hint="Generate any task the way a run would. No model is called and nothing is billed. Hidden facts are what the verifier knows and the agent doesn't."
       >
@@ -548,10 +534,10 @@ function Preview({ pack, wsId }: { pack: PackDetail; wsId: string }) {
             </div>
           </div>
         )}
-      </Section>
+      </Panel>
 
       {p && diagram && (
-        <Section
+        <Panel
           title={p.diagram_after ? "Before and after" : "Starting state"}
           aside={
             p.diagram_after && (
@@ -572,13 +558,13 @@ function Preview({ pack, wsId }: { pack: PackDetail; wsId: string }) {
           }
         >
           <DiagramView diagram={diagram} />
-        </Section>
+        </Panel>
       )}
 
       {p && (
-        <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
+        <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
           {p.solution.length > 0 ? (
-            <Section
+            <Panel
               title={`Reference solution (${p.solution.length} call${p.solution.length === 1 ? "" : "s"})`}
               hint={p.verdict ? `Scored by the verifier: reward ${p.verdict.reward.toFixed(1)}${p.verdict.success ? " (solved)" : ""}.` : undefined}
             >
@@ -590,7 +576,11 @@ function Preview({ pack, wsId }: { pack: PackDetail; wsId: string }) {
                     </span>
                     <div className="min-w-0">
                       <span className="mono break-all" style={{ color: "var(--accent)" }}>
-                        {c.name}({Object.entries(c.args).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(", ")})
+                        {c.name}(
+                        {Object.entries(c.args)
+                          .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
+                          .join(", ")}
+                        )
                       </span>
                       {c.observation && (
                         <pre className="mono whitespace-pre-wrap text-xs" style={{ color: "var(--muted)" }}>
@@ -601,13 +591,13 @@ function Preview({ pack, wsId }: { pack: PackDetail; wsId: string }) {
                   </li>
                 ))}
               </ol>
-            </Section>
+            </Panel>
           ) : (
-            <Section title="Reference solution">
+            <Panel title="Reference solution">
               <Muted>This pack&apos;s reference solver made no calls for this task.</Muted>
-            </Section>
+            </Panel>
           )}
-          <Section title="What the model receives" hint="The system prompt and first observation, exactly as sent.">
+          <Panel title="What the model receives" hint="The system prompt and first observation, exactly as sent.">
             <details>
               <summary className="label cursor-pointer">system prompt</summary>
               <pre className="mono mt-2 max-h-[28rem] overflow-y-auto whitespace-pre-wrap text-xs" style={{ color: "var(--muted)" }}>
@@ -622,7 +612,7 @@ function Preview({ pack, wsId }: { pack: PackDetail; wsId: string }) {
                 </pre>
               </details>
             )}
-          </Section>
+          </Panel>
         </div>
       )}
     </div>
@@ -631,7 +621,12 @@ function Preview({ pack, wsId }: { pack: PackDetail; wsId: string }) {
 
 function HiddenView({ hidden }: { hidden: Record<string, unknown> }) {
   const entries = Object.entries(hidden);
-  if (!entries.length) return <div className="text-sm" style={{ color: "var(--muted)" }}>—</div>;
+  if (!entries.length)
+    return (
+      <div className="text-sm" style={{ color: "var(--muted)" }}>
+        —
+      </div>
+    );
   return (
     <dl className="space-y-1 text-sm">
       {entries.map(([k, v]) => (

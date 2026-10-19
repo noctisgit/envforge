@@ -17,6 +17,12 @@ student baseline (seeds 0–99) ───────┴── check-overlap ─
                                                      compare: the gain is the learning
 ```
 
+**Where the GPU work runs.** Steps 3–5 need a GPU box. On a VM or bare metal, envforge runs
+vLLM and training in Docker (the default). On **RunPod or Vast**, run the envforge GPU image
+as the pod and add `--runtime pod` to every `compute` / `train` command that takes `--host`,
+or set `ENVFORGE_GPU_RUNTIME=pod` once. Setup is in docs/COMPUTE.md, section 6. The
+commands below are otherwise identical.
+
 ## 1. Collect teacher episodes — on *training* seeds
 
 Every seed is a different generated task. Keep two disjoint ranges: **train on seeds
@@ -60,6 +66,10 @@ VLLM_BASE_URL=http://gpu-1:8000/v1 uv run envforge run netops \
 uv run envforge train check-overlap netops-sonnet-v1 data/workspaces/default/runs/<baseline-run>
 ```
 
+On a RunPod/Vast pod reached over Tailscale, use
+`envforge compute vllm-up Qwen/Qwen2.5-7B-Instruct --host gpu-1 --runtime pod --bind 127.0.0.1`.
+The endpoint is then reachable only over the tailnet, at the same `http://gpu-1:8000/v1`.
+
 `check-overlap` exits non-zero if the eval run contains any training task.
 
 ## 4. Fine-tune with LoRA on the GPU box
@@ -71,13 +81,17 @@ uv run envforge train sft netops-sonnet-v1 --base Qwen/Qwen2.5-7B-Instruct --hos
 What happens:
 - the dataset and `envforge/train/sft.py` are copied to `/root/envforge/jobs/<name>/` on the box;
 - a detached container `envforge-train-<name>` (the pinned vLLM image, which already has
-  CUDA PyTorch + transformers, plus peft/datasets/accelerate) trains a **LoRA adapter**:
+  CUDA PyTorch + transformers, plus peft/datasets/accelerate) trains a **LoRA adapter**
+  (with `--runtime pod`: a detached process `train-<name>` inside the pod, which already has
+  those libraries, logging to `/root/envforge/logs/train-<name>.log`):
   small low-rank matrices added to the frozen base model, so a 7B model trains on one GPU
   and the result is a few hundred MB instead of a full copy of the weights;
 - **the loss is computed only on the assistant's tokens** — the student learns what to
   think and which tool to call next; it is never trained to predict the environment's output;
 - progress (loss per step, eval loss per epoch) streams back; `--detach` and later
-  `envforge train follow <name> --host gpu-1` if you'd rather not keep the terminal open.
+  `envforge train follow <name> --host gpu-1` if you'd rather not keep the terminal open
+  (add `--runtime pod` on a pod). `envforge train logs <name>` shows the raw output,
+  including tracebacks.
 
 Defaults: 2 epochs, lr 2e-4, LoRA r=16/α=32 on all linear layers, max length 8192 tokens
 (longer episodes are dropped, not truncated), effective batch 8, gradient checkpointing.
@@ -96,6 +110,9 @@ Then copy the adapter home (it also stays on the box for serving):
 uv run envforge train fetch netops-sonnet-v1 --host gpu-1     # -> data/workspaces/default/adapters/netops-sonnet-v1/
 ```
 
+On a pod this matters more: `/root/envforge/adapters/` is on the container disk, which is
+wiped when the pod stops. Fetch before you stop it.
+
 `envforge_manifest.json` in the adapter records the base model, dataset hash, example
 counts, hyper-parameters, final train/eval loss and library versions.
 
@@ -107,6 +124,9 @@ VLLM_BASE_URL=http://gpu-1:8000/v1 uv run envforge run netops \
     --model vllm:netops-sonnet-v1 --episodes 100 --seed-start 0
 uv run envforge compare data/workspaces/default/runs/<baseline-run> data/workspaces/default/runs/<adapter-run>
 ```
+
+(On a pod: the same command with `--runtime pod`; the adapter is read straight from
+`/root/envforge/adapters/<name>`.)
 
 vLLM serves the base model and each adapter under its own name, so `vllm:<base>` and
 `vllm:<adapter>` can be compared side by side (in the web UI: add the vLLM provider on your

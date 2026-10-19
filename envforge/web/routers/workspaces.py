@@ -73,6 +73,20 @@ def _pack_or_404(name: str):
     return packs[name]
 
 
+@router.get("/hub/models")
+def hub_models(
+    q: str = Query("", max_length=100),
+    sort: str = Query("downloads", pattern="^(downloads|likes|lastModified|trendingScore)$"),
+    _: User = Depends(current_user),
+) -> dict:
+    """Open-weight models on the Hugging Face Hub (live, cached), for the training base
+    model picker: size, a LoRA GPU-memory estimate, licence, gated, vLLM tool parser."""
+    from envforge.models import hub
+
+    models, live = hub.search(q, sort=sort)
+    return {"live": live, "models": [m.to_dict() for m in models]}
+
+
 @router.get("/packs/{name}")
 def pack_detail(name: str, _: User = Depends(current_user)) -> dict:
     """Everything the Environments page shows: description, dimensions, tools, tiers,
@@ -134,6 +148,15 @@ def update_settings(
         setattr(ws, field, value)
     db.commit()
     return _ws_out(db, ws, user)
+
+
+@router.delete("/workspaces/{ws_id}", status_code=204)
+def delete_workspace(
+    ws_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)
+) -> None:
+    """Delete the workspace with all its runs, builder projects and files (owner only)."""
+    ws = svc.require_workspace(db, user, ws_id, owner=True)
+    svc.delete_workspace(db, ws, user)
 
 
 @router.get("/workspaces/{ws_id}/models", response_model=ModelsOut)

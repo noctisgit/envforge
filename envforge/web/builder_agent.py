@@ -55,9 +55,14 @@ resolutions*, never around the wording of replies.
 happen (policies), what systems/records exist, what actions agents take, how difficulty \
 should vary. Ask at most two questions per message; propose sensible defaults the user \
 can accept rather than interrogating.
-2. Look at the data (`sample_conversations`) early: it tells you the real record types, \
-actions, resolution categories and policies. Data is already redacted: placeholders like \
-<EMAIL_1> or <NAME_2> stand for removed personal data — never try to recover it.
+2. Look at the data early. `get_state` shows the corpus: size, duplicates and topic \
+clusters (similar conversations grouped, labelled by their top terms) — one cluster is \
+often one kind of ticket. Read a spread with `sample_conversations`, then examples of the \
+big or interesting clusters (`cluster=`): they tell you the real record types, actions, \
+resolution categories and policies, and which topics the environment should cover. Data \
+is already redacted: placeholders like <EMAIL_1> or <NAME_2> (or, if the project uses \
+surrogates, realistic stand-in names and numbers) replace personal data — never try to \
+recover it. Extraction picks conversations across clusters automatically.
 3. Draft the spec with `update_spec` as soon as you know enough, then refine. Every \
 update creates a revision the user can review and roll back. Keep the spec valid; fix \
 any problems `update_spec` reports.
@@ -125,9 +130,12 @@ TOOLS: list[ToolSpec] = [
     ),
     ToolSpec(
         name="sample_conversations",
-        description="Read redacted conversations from the uploads (text, with roles).",
+        description="Read redacted conversations (text, with roles). By default a representative "
+        "spread over the corpus's topic clusters (see corpus.clusters in get_state); pass `cluster` "
+        "to read examples of one topic, or `upload_id` to read one upload in order.",
         parameters=_obj(
             {
+                "cluster": {"type": "integer", "description": "a topic cluster id from get_state"},
                 "upload_id": {"type": "string", "description": "default: all uploads"},
                 "n": {"type": "integer", "minimum": 1, "maximum": 10},
                 "offset": {"type": "integer", "minimum": 0},
@@ -232,30 +240,67 @@ def readiness(ctx: Ctx) -> list[dict[str, Any]]:
     ]
 
 
-def _conversations(ctx: Ctx, upload_id: str | None = None) -> list[dict[str, Any]]:
-    """All redacted conversations of the project (or one upload), in upload order."""
-    rows = []
-    for up in B.list_uploads(ctx.db, ctx.project):
-        if up.status != "ready" or not up.path or (upload_id and up.id != upload_id):
-            continue
-        for line in Path(up.path).read_text().splitlines():
-            if line.strip():
-                conv = json.loads(line)
-                conv.setdefault("meta", {})["upload_id"] = up.id
-                rows.append(conv)
-    return rows
+def _store(ctx: Ctx):
+    """The project's corpus store (redacted conversations), or None before any upload.
+
+    Uploads processed before the store existed left one redacted JSONL file each; they
+    are moved into the store the first time it is opened, then deleted.
+    """
+    from envforge.builder import corpus as C
+
+    path = B.corpus_path(ctx.ws, ctx.project)
+    legacy = [u for u in B.list_uploads(ctx.db, ctx.project) if u.status == "ready" and u.path]
+    if not path.exists() and not legacy:
+        return None
+    store = C.CorpusStore(path)
+    if legacy:
+        from envforge.builder.ingest import Conversation
+
+        for up in legacy:
+            f = Path(up.path)
+            if f.exists():
+                convs = [Conversation.from_dict(json.loads(line))
+                         for line in f.read_text().splitlines() if line.strip()]  # fmt: skip
+                for c in convs:
+                    c.meta["redacted"] = True  # these files only ever held redacted text
+                store.add_conversations(up.id, convs)
+                store.db.commit()
+                f.unlink()
+            up.path = None
+        ctx.db.commit()
+        C.dedupe_near(store)
+        C.cluster(store)
+    return store
 
 
-def _render_conversation(conv: dict[str, Any], limit: int = 3000) -> str:
-    lines = [f"[conversation {conv.get('id')}]"]
-    for t in conv.get("turns", []):
+def _render_conversation(conv: Any, limit: int = 3000) -> str:
+    d = conv if isinstance(conv, dict) else conv.to_dict()
+    cluster = (d.get("meta") or {}).get("cluster")
+    head = f"[conversation {d.get('id')}" + (
+        f" · topic cluster {cluster}]" if cluster is not None else "]"
+    )
+    lines = [head]
+    for t in d.get("turns", []):
         lines.append(f"{t.get('role', '?')}: {t.get('text', '')}")
     text = "\n".join(lines)
     return text if len(text) <= limit else text[:limit] + "\n…[truncated]"
 
 
 def _extracted_ids(ctx: Ctx) -> set[str]:
-    return {str((t.get("source") or {}).get("conversation")) for t in ctx.tasks()}
+    """Store ids ("<upload>:<conversation>") of conversations already turned into tasks."""
+    out = set()
+    for t in ctx.tasks():
+        src = t.get("source") or {}
+        if src.get("corpus_id"):
+            out.add(str(src["corpus_id"]))
+            continue
+        cid, upload = src.get("conversation"), src.get("upload")
+        if cid is None:
+            continue
+        cid = str(cid)
+        # tasks extracted before the corpus store recorded the bare conversation id
+        out.add(cid if ":" in cid or not upload else f"{upload}:{cid}")
+    return out
 
 
 # ---- tool implementations --------------------------------------------------------------
@@ -288,9 +333,25 @@ def t_get_state(ctx: Ctx, args: dict[str, Any]) -> dict[str, Any]:
             }  # fmt: skip
             for u in uploads
         ],
-        "conversations_extracted": len(_extracted_ids(ctx) - {"None"}),
+        "corpus": _corpus_overview(ctx),
+        "conversations_extracted": len(_extracted_ids(ctx)),
         "readiness": readiness(ctx),
     }
+
+
+def _corpus_overview(ctx: Ctx) -> dict[str, Any] | None:
+    """Corpus stats + topic clusters (compact): how to pick what to read and extract."""
+    from envforge.builder import corpus as C
+
+    store = _store(ctx)
+    if store is None:
+        return None
+    with store:
+        if not store.count():
+            return None
+        ov = C.overview(store)
+    ov.pop("uploads", None)  # already listed under "uploads"
+    return ov
 
 
 def t_update_spec(ctx: Ctx, args: dict[str, Any]) -> dict[str, Any]:
@@ -323,20 +384,44 @@ def t_update_spec(ctx: Ctx, args: dict[str, Any]) -> dict[str, Any]:
 
 
 def t_sample_conversations(ctx: Ctx, args: dict[str, Any]) -> dict[str, Any]:
-    convs = _conversations(ctx, args.get("upload_id"))
-    if not convs:
+    from envforge.builder import corpus as C
+
+    store = _store(ctx)
+    if store is None:
         return {
             "error": "no processed uploads yet — ask the user to upload chat logs (CSV, TXT or JSON)"
         }
     off = int(args.get("offset", 0))
     n = min(int(args.get("n", 3)), 10)
-    chosen = convs[off : off + n]
-    return {"total": len(convs), "conversations": [_render_conversation(c) for c in chosen]}
+    with store:
+        total = store.count(unique_only=True)
+        if not total:
+            return {"error": "the uploads contain no conversations"}
+        if args.get("cluster") is not None:
+            convs = store.examples(int(args["cluster"]), off + n)[off:]
+        elif args.get("upload_id"):
+            ids = [r[0] for r in store.db.execute(
+                "SELECT id FROM conversations WHERE upload_id = ? AND near_dup_of IS NULL "
+                "ORDER BY seq LIMIT ? OFFSET ?", (args["upload_id"], n, off))]  # fmt: skip
+            convs = store.get(ids)
+        else:
+            # a representative spread over the topic clusters; offset pages through it
+            ids = C.stratified_sample(store, off + n, per_cluster_cap=max(2, (off + n) // 3))
+            convs = store.get(ids[off:])
+    return {"total": total, "conversations": [_render_conversation(c) for c in convs]}
 
 
-def _next_unextracted(ctx: Ctx, n: int) -> list[dict[str, Any]]:
-    done = _extracted_ids(ctx)
-    return [c for c in _conversations(ctx) if str(c.get("id")) not in done][:n]
+def _next_unextracted(ctx: Ctx, n: int) -> list[Any]:
+    """The next n conversations to extract: a stratified sample of the ones not yet
+    extracted, so even a small batch covers the corpus's topics."""
+    from envforge.builder import corpus as C
+
+    store = _store(ctx)
+    if store is None:
+        return []
+    with store:
+        ids = C.stratified_sample(store, n, exclude_ids=_extracted_ids(ctx))
+        return store.get(ids)
 
 
 def t_estimate_extraction(ctx: Ctx, args: dict[str, Any]) -> dict[str, Any]:
@@ -346,19 +431,29 @@ def t_estimate_extraction(ctx: Ctx, args: dict[str, Any]) -> dict[str, Any]:
     h = ctx.head
     if not h or not h.spec:
         return {"error": "draft a spec first"}
-    todo = _next_unextracted(ctx, int(args["n"]))
-    if not todo:
+    want = int(args["n"])
+    store = _store(ctx)
+    if store is None:
+        return {"error": "no processed uploads yet"}
+    with store:
+        left = max(0, store.count(unique_only=True) - len(_extracted_ids(ctx)))
+    n = min(want, left)
+    if not n:
         return {"error": "every uploaded conversation has been extracted"}
-    est = estimate_cost(
-        EnvSpec.model_validate(h.spec), [_as_conversation(c) for c in todo], ctx.model.model_id
-    )
-    return {"conversations": len(todo), "model": ctx.model.model_id, "estimate": est}
-
-
-def _as_conversation(c: dict[str, Any]):
-    from envforge.builder.ingest import Conversation
-
-    return Conversation.from_dict(c)
+    # price a stratified sample of up to 500 and scale it: reading 100k conversations
+    # just to count characters would be slow and tell us little more
+    sample = _next_unextracted(ctx, min(n, 500))
+    est = estimate_cost(EnvSpec.model_validate(h.spec), sample, ctx.model.model_id, max_listed=5)
+    if len(sample) < n:
+        scale = n / len(sample)
+        for k in ("input_tokens", "output_tokens", "cost_usd", "cost_usd_with_retries"):
+            if isinstance(est.get(k), (int, float)):
+                est[k] = (
+                    round(est[k] * scale, 4) if isinstance(est[k], float) else round(est[k] * scale)
+                )
+        est["conversations"] = n
+        est.setdefault("notes", []).append(f"scaled from a stratified sample of {len(sample)}")
+    return {"conversations": n, "model": ctx.model.model_id, "estimate": est}
 
 
 def t_extract_tasks(ctx: Ctx, args: dict[str, Any]) -> dict[str, Any]:
@@ -367,6 +462,15 @@ def t_extract_tasks(ctx: Ctx, args: dict[str, Any]) -> dict[str, Any]:
     from envforge.declarative.validate import validate_task
 
     n = min(int(args.get("n", 1)), MAX_EXTRACTION)
+    review = ctx.project.privacy_review or {}
+    if review.get("status") == "failed":
+        return {"error": "the last privacy review found too much personal data left in the "
+                "redacted conversations: tighten the privacy settings (Data tab), re-upload, "
+                "and pass a new review before extracting"}  # fmt: skip
+    if ctx.project.privacy_profile == "strict" and ctx.project.privacy_signed_off_at is None:
+        return {"error": "this project uses the strict privacy profile: a person must pass a "
+                "privacy review (Data tab: check a sample of redacted conversations) before "
+                "any extraction"}  # fmt: skip
     if n > FREE_EXTRACTION and not args.get("confirmed"):
         return {"error": f"extracting more than {FREE_EXTRACTION} needs the user's explicit OK: call "
                 "estimate_extraction, tell the user the cost, and wait for their yes"}  # fmt: skip
@@ -378,21 +482,23 @@ def t_extract_tasks(ctx: Ctx, args: dict[str, Any]) -> dict[str, Any]:
     if not todo:
         return {"error": "every uploaded conversation has been extracted"}
 
-    batch = extract_batch(ctx.model, spec, [_as_conversation(c) for c in todo])
+    batch = extract_batch(ctx.model, spec, todo)
     ctx.add_usage(batch.usage)
     existing = ctx.tasks()
     ids = {t.get("id") for t in existing}
     added, invalid, skipped = [], {}, {}
     for conv, res in zip(todo, batch.results, strict=False):
-        cid = str(conv.get("id"))
+        cid = conv.id
         if res.record is None:
             skipped[cid] = res.skipped_reason or res.error or "no record"
             continue
         rec: TaskRecord = res.record
         if rec.id in ids:
             rec = rec.model_copy(update={"id": f"{rec.id}-{cid}"[:80]})
-        rec = rec.model_copy(update={"source": {**rec.source, "conversation": cid,
-                                                 "upload": conv["meta"].get("upload_id")}})  # fmt: skip
+        # "conversation" stays the id from the user's file; "corpus_id" is the store's
+        rec = rec.model_copy(update={"source": {
+            **rec.source, "conversation": str(conv.meta.get("ext_id") or cid),
+            "upload": conv.meta.get("upload_id"), "corpus_id": cid}})  # fmt: skip
         problems = validate_task(spec, rec)
         if problems:
             invalid[cid] = problems[:5]

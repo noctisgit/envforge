@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -10,6 +11,7 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 from fastapi import HTTPException, status
+from sqlalchemy import delete as sql_delete
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -93,6 +95,74 @@ def require_workspace(
     return db.get(Workspace, workspace_id)  # type: ignore[return-value]
 
 
+def delete_workspace(db: Session, ws: Workspace, user: User) -> None:
+    """Delete a workspace and everything in it: runs, builder projects, members, files.
+
+    The caller must already have checked ownership (``require_workspace(owner=True)``).
+    Refused (409) when it is the user's last workspace, or while a run or a builder job
+    in it is queued or running (the worker would be writing into it). Unlike deleting a
+    single run, this also removes the run rows, so the workspace's usage history goes
+    with it. There are no ON DELETE cascades in the schema, so children are deleted
+    explicitly, leaves first.
+    """
+    from envforge import config
+    from envforge.web.models import (
+        BuilderMessage,
+        EnvProject,
+        EnvRevision,
+        EnvUpload,
+        EnvVersion,
+        Job,
+    )
+
+    n_mine = db.scalar(
+        select(func.count()).select_from(WorkspaceMember).where(WorkspaceMember.user_id == user.id)
+    )
+    if (n_mine or 0) <= 1:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "you can't delete your only workspace; create another one first",
+        )
+
+    active = ("queued", "running")
+    busy_runs = db.scalar(
+        select(func.count()).select_from(Run).where(
+            Run.workspace_id == ws.id, Run.status.in_(active)
+        )
+    )  # fmt: skip
+    project_ids = select(EnvProject.id).where(EnvProject.workspace_id == ws.id)
+    busy_jobs = db.scalar(
+        select(func.count()).select_from(Job).where(
+            Job.project_id.in_(project_ids), Job.status.in_(active)
+        )
+    )  # fmt: skip
+    if busy_runs or busy_jobs:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "this workspace has queued or running work; cancel it (or wait for it to "
+            "finish) before deleting the workspace",
+        )
+
+    # rows, leaves first (env_versions points at env_revisions, everything at env_projects)
+    for model in (Job, BuilderMessage, EnvUpload, EnvVersion):
+        db.execute(sql_delete(model).where(model.project_id.in_(project_ids)))
+    db.execute(sql_delete(EnvRevision).where(EnvRevision.project_id.in_(project_ids)))
+    db.execute(sql_delete(EnvVersion).where(EnvVersion.workspace_id == ws.id))
+    db.execute(sql_delete(EnvProject).where(EnvProject.workspace_id == ws.id))
+    db.execute(sql_delete(Run).where(Run.workspace_id == ws.id))
+    db.execute(sql_delete(WorkspaceMember).where(WorkspaceMember.workspace_id == ws.id))
+    slug = ws.slug
+    db.delete(ws)
+    db.commit()
+
+    # files: runs/, builder/, environments/, sft/ all live under the workspace's own
+    # directory. Never remove anything outside data/workspaces/, nor that root itself.
+    root = (config.DATA_DIR / "workspaces").resolve()
+    target = config.workspace_dir(slug).resolve()
+    if target.is_relative_to(root) and target != root:
+        shutil.rmtree(target, ignore_errors=True)
+
+
 # ---- provider keys ----------------------------------------------------------
 
 
@@ -100,7 +170,9 @@ class KeyRejected(Exception):
     """The provider says this key is invalid (401/403)."""
 
 
-def list_provider_models(provider: str, secret: str) -> list[str] | None:
+def list_provider_models(
+    provider: str, secret: str, base_url: str | None = None
+) -> list[str] | None:
     """Ask the provider which models this key can use. Doubles as the key check.
 
     Runs only while a key is being saved, on the plaintext the user just sent, so the
@@ -124,17 +196,35 @@ def list_provider_models(provider: str, secret: str) -> list[str] | None:
             return sorted(m.id for m in client.models.list())
         except (openai.AuthenticationError, openai.PermissionDeniedError) as e:
             raise KeyRejected(f"OpenAI rejected this key ({e.status_code})") from e
+    if provider == "vllm" and base_url:
+        # what the box serves right now (base model + any LoRA adapters); the URL was
+        # already checked against the private-network rules by the caller
+        import urllib.request
+
+        headers = {"User-Agent": "envforge"}
+        if secret and secret != "not-needed":
+            headers["Authorization"] = f"Bearer {secret}"
+        req = urllib.request.Request(f"{base_url}/models", headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:  # noqa: S310 - checked URL
+                return sorted(m["id"] for m in json.loads(r.read()).get("data", []))
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403):
+                raise KeyRejected(f"the vLLM server rejected this key ({e.code})") from e
+            raise
     return None
 
 
-def _verify(provider: str, secret: str) -> tuple[list[str] | None, str | None]:
+def _verify(
+    provider: str, secret: str, base_url: str | None = None
+) -> tuple[list[str] | None, str | None]:
     """(model ids or None, note for the user). Raises HTTP 400 for a rejected key."""
-    if provider not in ("anthropic", "openai"):
+    if provider not in ("anthropic", "openai", "vllm"):
         return None, None
     if os.getenv("ENVFORGE_OFFLINE", "").lower() in ("1", "true", "yes"):
         return None, "not checked (offline mode)"
     try:
-        return list_provider_models(provider, secret), None
+        return list_provider_models(provider, secret, base_url), None
     except KeyRejected as e:
         raise HTTPException(400, str(e)) from e
     except Exception as e:  # noqa: BLE001 - save anyway; the first run will tell
@@ -161,7 +251,7 @@ def set_key(
             raise HTTPException(400, str(e)) from e
     else:
         base_url = None
-    models, note = _verify(provider, secret)
+    models, note = _verify(provider, secret, base_url)
     row = _key_row(db, user.id, provider)
     if row is None:
         row = ProviderKey(

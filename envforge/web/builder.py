@@ -41,7 +41,9 @@ from envforge.web.models import (
 )
 from envforge.web.services import slugify
 
-MAX_UPLOAD_BYTES = 95 * 1024 * 1024  # Cloudflare's free plan caps requests at 100 MB
+MAX_UPLOAD_BYTES = 95 * 1024 * 1024  # one request: Cloudflare's free plan caps them at 100 MB
+CHUNK_BYTES = 32 * 1024 * 1024  # chunked uploads: each piece is one request well under that
+SUPPORTED_SUFFIXES = (".csv", ".txt", ".json", ".jsonl", ".log")
 
 
 # ---- paths -------------------------------------------------------------------------
@@ -269,8 +271,12 @@ def diff(
 def publish(
     db: Session, ws: Workspace, project: EnvProject, revision: EnvRevision, user: User
 ) -> EnvVersion:
-    """Freeze a valid revision as `<project>@v<n>`, runnable in this workspace."""
-    from envforge.declarative.spec import EnvSpec, TaskRecord
+    """Freeze a valid revision as `<project>@v<n>`, runnable in this workspace.
+
+    The task records pass a privacy re-scan with the project's profile on the way out
+    (`sanitize_tasks`); the report is attached to the returned row as `privacy_report`.
+    """
+    from envforge.declarative.spec import EnvSpec
     from envforge.declarative.store import save_env_dir
 
     v = revision.validation or {}
@@ -279,8 +285,21 @@ def publish(
             400, "only a revision with a valid spec and at least one valid task can be published"
         )
     problems = v.get("task_problems") or {}
-    tasks = [TaskRecord.model_validate(t) for t in load_tasks(ws, project, revision.tasks_sha)
-             if str(t.get("id")) not in problems]  # fmt: skip
+    spec_obj = EnvSpec.model_validate(revision.spec)
+    tasks, report = sanitize_tasks(
+        spec_obj,
+        [
+            t
+            for t in load_tasks(ws, project, revision.tasks_sha)
+            if str(t.get("id")) not in problems
+        ],
+        profile=project.privacy_profile,
+        ner=project.privacy_ner,
+    )
+    if not tasks:
+        raise HTTPException(
+            400, "no task survived the privacy re-scan: " + json.dumps(report["dropped"])[:500]
+        )
     version = (
         db.scalar(select(func.max(EnvVersion.version)).where(EnvVersion.project_id == project.id))
         or 0
@@ -289,15 +308,75 @@ def publish(
     out = environments_dir(ws) / project.name / f"v{version}"
     if out.exists():
         shutil.rmtree(out)
-    spec = EnvSpec.model_validate(revision.spec).model_copy(update={"name": pack_name})
-    save_env_dir(out, spec, tasks)
+    save_env_dir(out, spec_obj.model_copy(update={"name": pack_name}), tasks)
     ver = EnvVersion(
         project_id=project.id, workspace_id=ws.id, version=version, revision_id=revision.id,
         pack_name=pack_name, env_dir=str(out), created_by=user.id,
     )  # fmt: skip
     db.add(ver)
     db.commit()
+    ver.privacy_report = report  # transient: returned to the caller, not stored
     return ver
+
+
+# Fields that are structure, not content: never touched by the re-scan (record keys like
+# "C-1001" are additionally protected by redact.py's keep patterns).
+STRUCTURAL_KEYS = ("id", "tier", "customer_id", "check", "collection", "key", "field", "tool",
+                   "op", "category", "source")  # fmt: skip
+
+
+def sanitize_tasks(spec, tasks: list[dict[str, Any]], *, profile: str, ner: bool):
+    """The exit check for publishing: re-redact every task's text with the project's
+    privacy profile, then re-validate. A task whose reference solution stops earning
+    1.0 after sanitising (e.g. a check depended on a redacted value) is left out and
+    reported, so privacy never silently produces broken tasks."""
+    from envforge.builder.redact import sanitize_json_strings
+    from envforge.declarative.spec import TaskRecord
+    from envforge.declarative.validate import validate_task
+
+    kept: list[TaskRecord] = []
+    report: dict[str, Any] = {"profile": profile, "redactions": {}, "dropped": {}}
+    for t in tasks:
+        clean, counts = sanitize_json_strings(t, profile, skip_keys=STRUCTURAL_KEYS, ner=ner)
+        for k, n in counts.items():
+            report["redactions"][k] = report["redactions"].get(k, 0) + n
+        try:
+            rec = TaskRecord.model_validate(clean)
+            problems = validate_task(spec, rec)
+        except Exception as e:  # noqa: BLE001
+            problems = [str(e)]
+        if problems:
+            report["dropped"][str(t.get("id"))] = problems[:3]
+        else:
+            kept.append(rec)
+    return kept, report
+
+
+def export_sanitizer(db: Session, ws: Workspace, pack_names: set[str]):
+    """For training-data exports: if any run comes from a builder-published environment,
+    return a function that re-sanitises each exported example with that project's
+    profile (the strictest one wins when runs are mixed); None for built-in packs."""
+    from envforge.builder.redact import sanitize_json_strings
+
+    projects = list(
+        db.scalars(
+            select(EnvProject)
+            .join(EnvVersion, EnvVersion.project_id == EnvProject.id)
+            .where(EnvVersion.workspace_id == ws.id, EnvVersion.pack_name.in_(pack_names))
+        )
+    )
+    if not projects:
+        return None
+    profile = "strict" if any(p.privacy_profile == "strict" for p in projects) else "standard"
+    ner = any(p.privacy_ner for p in projects)
+
+    def clean(line: str) -> str:
+        obj, _ = sanitize_json_strings(
+            json.loads(line), profile, skip_keys=("meta", "tools"), ner=ner
+        )
+        return json.dumps(obj) + "\n"
+
+    return clean
 
 
 @lru_cache(maxsize=64)
@@ -383,6 +462,44 @@ def new_upload(
     return up, raw
 
 
+def check_disk_for(ws: Workspace, size_bytes: int) -> None:
+    """Refuse an upload that the disk can't hold: the raw file, its redacted copy and the
+    index all exist for a while, so ask for ~3x the size (plus 1 GiB headroom)."""
+    root = config.workspace_dir(ws.slug)
+    root.mkdir(parents=True, exist_ok=True)
+    free = shutil.disk_usage(root).free
+    if free < size_bytes * 3 + 2**30:
+        raise HTTPException(507, f"not enough disk space for a {size_bytes / 2**30:.1f} GiB upload "
+                                 f"({free / 2**30:.1f} GiB free)")  # fmt: skip
+
+
+def corpus_path(ws: Workspace, project: EnvProject) -> Path:
+    """The project's conversation store (SQLite): every upload, redacted, deduplicated,
+    clustered. Builder tools sample from here instead of reading files."""
+    return project_dir(ws, project) / "corpus.sqlite"
+
+
+def make_redactor(project: EnvProject):
+    """The per-conversation redaction function for this project's privacy settings, as
+    a picklable partial (the corpus ingest may run it in a process pool). Options the
+    installed redactor doesn't know yet are left out rather than failing."""
+    import functools
+    import inspect
+
+    from envforge.builder.redact import redact_conversation
+
+    wanted = {
+        "profile": project.privacy_profile,
+        "ner": project.privacy_ner,
+        "surrogates": project.privacy_surrogates,
+        "tier2": project.privacy_tier2,
+    }
+    accepted = inspect.signature(redact_conversation).parameters
+    return functools.partial(
+        redact_conversation, **{k: v for k, v in wanted.items() if k in accepted}
+    )
+
+
 def list_uploads(db: Session, project: EnvProject) -> list[EnvUpload]:
     return list(
         db.scalars(
@@ -391,6 +508,176 @@ def list_uploads(db: Session, project: EnvProject) -> list[EnvUpload]:
             .order_by(EnvUpload.created_at)
         )
     )
+
+
+def delete_upload(db: Session, project: EnvProject, up: EnvUpload, user: User) -> None:
+    """Delete an upload: its row and any file now; its conversations leave the corpus
+    store in the builder worker (which owns the store), followed by a re-cluster."""
+    if up.path:  # a raw file still waiting to be processed, or a pre-store redacted file
+        Path(up.path).unlink(missing_ok=True)
+    had_data = up.status == "ready"
+    uid = up.id
+    db.delete(up)
+    db.commit()
+    if had_data:
+        enqueue_job(db, "recluster", project, user, {"delete_upload": uid})
+
+
+# ---- corpus + privacy review -----------------------------------------------------------------
+
+
+def _conv_out(conv: Any) -> dict[str, Any]:
+    """A redacted conversation for the UI (redacted text only ever reaches this point)."""
+    return {
+        "id": conv.id,
+        "source_id": conv.meta.get("ext_id"),
+        "upload_id": conv.meta.get("upload_id"),
+        "cluster": conv.meta.get("cluster"),
+        "turns": [{"role": t.role, "text": t.text} for t in conv.turns],
+    }
+
+
+def corpus_overview(ws: Workspace, project: EnvProject) -> dict[str, Any] | None:
+    """Stats + topic clusters of the project's redacted corpus, or None before any data."""
+    from envforge.builder import corpus as C
+
+    path = corpus_path(ws, project)
+    if not path.exists():
+        return None
+    with C.CorpusStore(path) as store:
+        if not store.count():
+            return None
+        ov = C.overview(store, max_clusters=200, n_terms=5)
+        ov["stale"] = store.stale()
+    return ov
+
+
+def cluster_examples(ws: Workspace, project: EnvProject, cluster: int, n: int = 3) -> list[dict]:
+    from envforge.builder import corpus as C
+
+    path = corpus_path(ws, project)
+    if not path.exists():
+        return []
+    with C.CorpusStore(path) as store:
+        return [_conv_out(c) for c in store.examples(cluster, n)]
+
+
+def privacy_settings(project: EnvProject, changes: dict[str, Any]) -> None:
+    """Apply privacy settings. Redaction settings apply to future uploads; any change to
+    them, or to the threshold, means the last review no longer stands."""
+    if changes.get("profile") == "off" and not changes.get("confirm_off"):
+        raise HTTPException(
+            400, "turning redaction off needs confirm_off: only for public or synthetic data"
+        )
+    redaction = ("profile", "ner", "surrogates", "tier2")
+    changed = False
+    for key in (*redaction, "threshold"):
+        value = changes.get(key)
+        if value is not None and value != getattr(project, f"privacy_{key}"):
+            setattr(project, f"privacy_{key}", value)
+            changed = True
+    if changed:
+        project.privacy_signed_off_at = project.privacy_signed_off_by = None
+        if project.privacy_review and project.privacy_review.get("status") != "open":
+            project.privacy_review = {**project.privacy_review, "status": "outdated"}
+
+
+def start_review(
+    db: Session, ws: Workspace, project: EnvProject, user: User, n: int | None = None
+) -> tuple[dict[str, Any], list[dict]]:
+    """Draw a random, topic-stratified sample of redacted conversations for a person to
+    check. Returns (review, conversations). Starting a new review replaces an open one."""
+    from envforge.builder import corpus as C
+    from envforge.builder import review as R
+
+    path = corpus_path(ws, project)
+    if not path.exists():
+        raise HTTPException(400, "nothing to review yet: no processed uploads")
+    n = n or R.sample_size_for(project.privacy_threshold)
+    with C.CorpusStore(path) as store:
+        population = store.count(unique_only=True)
+        if not population:
+            raise HTTPException(400, "nothing to review yet: no processed uploads")
+        ids = C.stratified_sample(
+            store, min(n, population), seed=int(datetime.now(UTC).timestamp())
+        )
+        convs = [_conv_out(c) for c in store.get(ids)]
+    review = {
+        "id": hashlib.sha1(f"{project.id}{datetime.now(UTC).isoformat()}".encode()).hexdigest()[
+            :12
+        ],
+        "status": "open",
+        "ids": ids,
+        "population": population,
+        "threshold": project.privacy_threshold,
+        "profile": project.privacy_profile,
+        "created_at": datetime.now(UTC).isoformat(),
+        "created_by": user.id,
+    }
+    project.privacy_review = review
+    db.commit()
+    return review, convs
+
+
+def open_review_conversations(ws: Workspace, project: EnvProject) -> list[dict]:
+    from envforge.builder import corpus as C
+
+    rv = project.privacy_review or {}
+    if rv.get("status") != "open":
+        return []
+    with C.CorpusStore(corpus_path(ws, project)) as store:
+        return [_conv_out(c) for c in store.get(rv["ids"])]
+
+
+def submit_review(
+    db: Session, project: EnvProject, user: User, review_id: str, flagged: list[str],
+    notes: dict[str, str] | None = None,
+) -> dict[str, Any]:  # fmt: skip
+    """Record which sampled conversations still contain personal data; compute the leak
+    rate and pass/fail. A pass counts as the privacy sign-off."""
+    from envforge.builder import review as R
+
+    rv = project.privacy_review or {}
+    if rv.get("id") != review_id or rv.get("status") != "open":
+        raise HTTPException(409, "this review is no longer open — start a new one")
+    sampled = set(rv["ids"])
+    bad = sorted(set(flagged) - sampled)
+    if bad:
+        raise HTTPException(400, f"not in this review's sample: {bad[:3]}")
+    result = R.evaluate(
+        len(set(flagged)), len(sampled), threshold=rv["threshold"], population=rv["population"]
+    )
+    now = datetime.now(UTC)
+    project.privacy_review = {
+        **rv,
+        "status": "passed" if result.passed else "failed",
+        "flagged": sorted(set(flagged)),
+        "notes": {k: v[:500] for k, v in (notes or {}).items() if k in sampled},
+        "result": result.to_dict(),
+        "reviewed_by": user.id,
+        "reviewed_at": now.isoformat(),
+    }
+    if result.passed:
+        project.privacy_signed_off_at, project.privacy_signed_off_by = now, user.id
+    else:
+        project.privacy_signed_off_at = project.privacy_signed_off_by = None
+    pct = lambda x: f"{x * 100:.1f}%"  # noqa: E731
+    add_message(db, project, "user",
+        f"(Privacy review: {result.flagged} of {result.reviewed} sampled conversations still had "
+        f"personal data — leak rate {pct(result.leak_rate)}, 95% CI up to {pct(result.ci_high)}; "
+        f"threshold {pct(result.threshold)}: {'passed' if result.passed else 'FAILED'}.)")  # fmt: skip
+    db.commit()
+    return project.privacy_review
+
+
+def review_summary(project: EnvProject) -> dict[str, Any] | None:
+    """The review without the sampled ids (for listing in the project)."""
+    rv = project.privacy_review
+    if not rv:
+        return None
+    return {k: v for k, v in rv.items() if k not in ("ids", "notes")} | {
+        "n": len(rv.get("ids", []))
+    }
 
 
 # ---- jobs (run by `envforge-worker --kind builder`) ------------------------------------

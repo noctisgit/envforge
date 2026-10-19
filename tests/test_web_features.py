@@ -434,7 +434,7 @@ def test_key_is_verified_on_save_and_limits_native_models(client, monkeypatch): 
     monkeypatch.setenv("ENVFORGE_OFFLINE", "0")  # let services._verify run (provider mocked)
     calls = []
 
-    def fake_list(provider, secret):
+    def fake_list(provider, secret, base_url=None):
         calls.append((provider, secret))
         if secret == "sk-ant-revoked-0001":
             raise services.KeyRejected("Anthropic rejected this key (401)")

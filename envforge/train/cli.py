@@ -8,6 +8,9 @@
     envforge compute vllm-up Qwen/Qwen2.5-7B-Instruct --host gpu-1 --lora netops-v1
     envforge run netops --model vllm:netops-v1 --episodes 100 --seed-start 0
 
+On a RunPod/Vast pod running the envforge GPU image, add `--runtime pod` (or set
+ENVFORGE_GPU_RUNTIME=pod) to sft / follow / logs / fetch and to `compute vllm-up`.
+
 Datasets live in data/workspaces/<ws>/sft/<name>/, adapters in .../adapters/<name>/.
 See docs/TRAINING.md for the whole loop and how to read the before/after numbers.
 """
@@ -25,8 +28,18 @@ from rich.console import Console
 from rich.table import Table
 
 from envforge import config
-from envforge.compute.base import ComputeError
-from envforge.compute.cli import HostOpt, KeyOpt, PortOpt, UserOpt, _box
+from envforge.compute.base import ComputeBox, ComputeError
+from envforge.compute.cli import (
+    HostOpt,
+    KeyOpt,
+    PortOpt,
+    RuntimeOpt,
+    UserOpt,
+    _box,
+    _runtime,
+    runtime_flag,
+)
+from envforge.compute.runtime import DEFAULT_RUNTIME, Runtime
 from envforge.train import dataset as ds
 from envforge.train import remote
 
@@ -136,6 +149,7 @@ def sft_cmd(
         bool, typer.Option(help="Local only: tokenise and report, no training.")
     ] = False,
     workspace: WorkspaceOpt = config.DEFAULT_WORKSPACE,
+    runtime: RuntimeOpt = DEFAULT_RUNTIME,
 ) -> None:
     """LoRA supervised fine-tuning of BASE on the dataset, on a GPU box (or locally)."""
     d = _dataset_dir(dataset, workspace)
@@ -156,34 +170,35 @@ def sft_cmd(
         raise typer.Exit(code=subprocess.call(argv))
 
     box = _box(host, user, port, key)
+    rt = _runtime(box, runtime)
     try:
-        cname = remote.start_training(
-            box, d, base=base, name=name, args=args, hf_token=hf_token, replace=replace
+        job = remote.start_training(
+            box, d, base=base, name=name, args=args, hf_token=hf_token, replace=replace, runtime=rt
         )
     except (ComputeError, ValueError, FileNotFoundError) as e:
         console.print(f"[red]error:[/red] {e}")
         raise typer.Exit(code=1) from e
-    console.print(
-        f"started [bold]{cname}[/bold] on {box} (first run installs deps and downloads {base})"
-    )
+    first_run = "installs deps and downloads" if rt == "docker" else "downloads"
+    console.print(f"started [bold]{job}[/bold] on {box} (first run {first_run} {base})")
     if follow_logs:
-        _follow(box, name)
+        _follow(box, name, rt)
     else:
-        console.print(f"follow with: envforge train follow {name} --host {host}")
+        console.print(f"follow with: envforge train follow {name} --host {host}{runtime_flag(rt)}")
 
 
-def _follow(box, name: str) -> None:
-    for ev in remote.follow(box, name):
+def _follow(box: ComputeBox, name: str, runtime: Runtime) -> None:
+    flags = f"--host {box.host}{runtime_flag(runtime)}"
+    for ev in remote.follow(box, name, runtime=runtime):
         kind = ev.get("event")
         if kind == "exit":
             code = ev.get("code")
             if code == 0:
                 console.print(
-                    f"[green]training finished[/green] — fetch with: envforge train fetch {name} --host {box.host}"
+                    f"[green]training finished[/green] — fetch with: envforge train fetch {name} {flags}"
                 )
             else:
                 console.print(
-                    f"[red]training exited with code {code}[/red]; see: envforge train logs {name} --host {box.host}"
+                    f"[red]training exited with code {code}[/red]; see: envforge train logs {name} {flags}"
                 )
                 raise typer.Exit(code=1)
             return
@@ -192,17 +207,24 @@ def _follow(box, name: str) -> None:
 
 @train_app.command("follow")
 def follow_cmd(
-    name: str, host: HostOpt, user: UserOpt = "root", port: PortOpt = 22, key: KeyOpt = None
+    name: str,
+    host: HostOpt,
+    user: UserOpt = "root",
+    port: PortOpt = 22,
+    key: KeyOpt = None,
+    runtime: RuntimeOpt = DEFAULT_RUNTIME,
 ) -> None:
     """Stream a training job's progress until it finishes."""
-    _follow(_box(host, user, port, key), remote.check_name(name))
+    box = _box(host, user, port, key)
+    _follow(box, remote.check_name(name), _runtime(box, runtime))
 
 
 @train_app.command("logs")
 def logs_cmd(name: str, host: HostOpt, user: UserOpt = "root", port: PortOpt = 22, key: KeyOpt = None,
-             tail: int = 200) -> None:  # fmt: skip
-    """Raw container output (pip install, warnings, tracebacks) for a training job."""
-    print(remote.logs(_box(host, user, port, key), remote.check_name(name), tail))
+             tail: int = 200, runtime: RuntimeOpt = DEFAULT_RUNTIME) -> None:  # fmt: skip
+    """Raw output (pip install, warnings, tracebacks) of a training job."""
+    box = _box(host, user, port, key)
+    print(remote.logs(box, remote.check_name(name), tail, runtime=_runtime(box, runtime)))
 
 
 @train_app.command("fetch")
@@ -212,13 +234,17 @@ def fetch_cmd(
     user: UserOpt = "root",
     port: PortOpt = 22,
     key: KeyOpt = None,
-    cleanup: Annotated[bool, typer.Option(help="Remove the finished training container.")] = True,
+    cleanup: Annotated[
+        bool, typer.Option(help="Remove the finished training container / process record.")
+    ] = True,
     workspace: WorkspaceOpt = config.DEFAULT_WORKSPACE,
+    runtime: RuntimeOpt = DEFAULT_RUNTIME,
 ) -> None:
     """Copy a finished adapter to data/workspaces/<ws>/adapters/<name>/ (it also stays on the box for vLLM)."""
     box = _box(host, user, port, key)
+    rt = _runtime(box, runtime)
     name = remote.check_name(name)
-    st = remote.status(box, name)
+    st = remote.status(box, name, runtime=rt)
     if st.running:
         raise typer.BadParameter(f"{name} is still training")
     try:
@@ -227,7 +253,7 @@ def fetch_cmd(
         console.print(f"[red]error:[/red] {e}")
         raise typer.Exit(code=1) from e
     if cleanup and st.exists:
-        remote.remove_container(box, name)
+        remote.remove_container(box, name, runtime=rt)
     manifest = path / "envforge_manifest.json"
     if manifest.exists():
         m = json.loads(manifest.read_text())
@@ -236,4 +262,6 @@ def fetch_cmd(
             f"final train loss {m.get('final_train_loss')} · eval loss {m.get('final_eval_loss')}"
         )
     console.print(f"adapter at [bold]{path}[/bold]")
-    console.print(f"serve it: envforge compute vllm-up <base> --host {host} --lora {name}")
+    console.print(
+        f"serve it: envforge compute vllm-up <base> --host {host} --lora {name}{runtime_flag(rt)}"
+    )

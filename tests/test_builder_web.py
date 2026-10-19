@@ -103,18 +103,43 @@ def test_upload_is_parsed_redacted_and_raw_file_deleted(builder):
     u = proj["uploads"][0]
     assert u["status"] == "ready" and u["n_conversations"] == 2
     assert u["redactions"].get("EMAIL") and u["redactions"].get("PHONE")
+    from envforge.builder.corpus import CorpusStore
+    from envforge.web import builder as B
     from envforge.web import db as dbmod
-    from envforge.web.models import EnvUpload
+    from envforge.web.models import EnvProject, EnvUpload, Workspace
 
     with dbmod.session_factory()() as db:
         row = db.get(EnvUpload, up["id"])
-        stored = Path(row.path).read_text()
-    assert row.path.endswith(".jsonl") and not Path(row.path).with_suffix(".raw").exists()
+        project = db.get(EnvProject, p)
+        path = B.corpus_path(db.get(Workspace, ws), project)
+    assert row.path is None  # nothing left on disk but the redacted store
+    assert not list(path.parent.glob("*.raw"))
+    with CorpusStore(path) as store:
+        assert store.count(upload_id=up["id"]) == 2
+        stored = "\n".join(c.render() if hasattr(c, "render") else str(c.to_dict())
+                           for c in store.get(store.iter_ids(unique_only=False)))
     assert (
         "jane.doe@example.com" not in stored
         and "555 0101" not in stored
         and "Jane Doe" not in stored
+        and "<EMAIL_1>" in stored
     )
+
+
+def test_deleting_an_upload_removes_it_from_the_corpus(builder):
+    c, ws, p, _ = builder
+    up = _upload(c, ws, p)
+    assert c.delete(f"{_base(ws, p)}/uploads/{up['id']}").status_code == 204
+    assert _work() == 1  # the recluster job
+    from envforge.builder.corpus import CorpusStore
+    from envforge.web import builder as B
+    from envforge.web import db as dbmod
+    from envforge.web.models import EnvProject, Workspace
+
+    with dbmod.session_factory()() as db:
+        path = B.corpus_path(db.get(Workspace, ws), db.get(EnvProject, p))
+    with CorpusStore(path) as store:
+        assert store.count() == 0
 
 
 def test_bad_uploads_rejected(builder):
@@ -258,3 +283,160 @@ def test_builder_history_is_append_only(builder):
         stored = [m.content for m in builder_agent.B.messages(db, proj)]
         sent = [m.content for m in builder_agent._history(db, proj)]
     assert sent == stored and sum(1 for m in sent if m.startswith("{")) >= 14
+
+
+def test_chunked_upload_resumes_and_completes(builder, monkeypatch):
+    c, ws, p, _ = builder
+    from envforge.web import builder as B
+
+    monkeypatch.setattr(B, "CHUNK_BYTES", 64)  # tiny pieces so the test exercises several
+    data = CSV.encode()
+    up = c.post(
+        f"{_base(ws, p)}/uploads/init", json={"filename": "big.csv", "size_bytes": len(data)}
+    ).json()
+    assert up["status"] == "receiving" and up["bytes_received"] == 0
+    url = f"{_base(ws, p)}/uploads/{up['id']}"
+    r = c.put(f"{url}/chunk?offset=0", content=data[:64])
+    assert r.json()["bytes_received"] == 64
+    # a client that lost track sends the wrong offset: the server says where it is
+    r = c.put(f"{url}/chunk?offset=0", content=data[:64])
+    assert r.status_code == 409 and r.json()["detail"]["bytes_received"] == 64
+    assert c.post(f"{url}/complete").status_code == 409  # not all bytes yet
+    off = 64
+    while off < len(data):
+        off = c.put(f"{url}/chunk?offset={off}", content=data[off : off + 64]).json()[
+            "bytes_received"
+        ]
+    assert c.put(f"{url}/chunk?offset={off}", content=b"x").status_code == 413  # past declared size
+    assert c.post(f"{url}/complete").status_code == 202
+    assert _work() == 1
+    u = next(x for x in c.get(_base(ws, p)).json()["uploads"] if x["id"] == up["id"])
+    assert u["status"] == "ready" and u["n_conversations"] == 2
+
+
+def test_chunked_upload_limits(builder):
+    c, ws, p, _ = builder
+    r = c.post(f"{_base(ws, p)}/uploads/init", json={"filename": "x.exe", "size_bytes": 10})
+    assert r.status_code == 400
+    r = c.post(f"{_base(ws, p)}/uploads/init", json={"filename": "x.csv", "size_bytes": 10**15})
+    assert r.status_code == 413
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://example.com/a.csv",
+        "https://127.0.0.1/a.csv",
+        "https://10.0.0.5/a.csv",
+        "https://localhost/a.csv",
+    ],
+)
+def test_import_url_refuses_insecure_or_internal_targets(builder, url):
+    c, ws, p, _ = builder
+    assert c.post(f"{_base(ws, p)}/uploads/import", json={"url": url}).status_code == 400
+
+
+def _extract_once(c, ws, p, set_script) -> str:
+    """Ask the builder to extract one task; returns the extract tool's reply."""
+    set_script(
+        [[("update_spec", {"spec": SPEC, "message": "spec"})], [("extract_tasks", {"n": 1})], []]
+    )
+    c.post(f"{_base(ws, p)}/messages", json={"content": "extract"})
+    _work()
+    msgs = c.get(f"{_base(ws, p)}/messages").json()["messages"]
+    return [m for m in msgs if m["role"] == "tool"][-1]["content"]
+
+
+def test_strict_privacy_requires_a_passed_review_before_extraction(builder):
+    c, ws, p, set_script = builder
+    r = c.patch(f"{_base(ws, p)}/privacy", json={"profile": "strict", "ner": False})
+    priv = r.json()["privacy"]
+    assert priv["profile"] == "strict" and priv["needs_signoff"] and priv["review"] is None
+    assert c.post(f"{_base(ws, p)}/privacy/review", json={}).status_code == 400  # no data yet
+    _upload(c, ws, p)
+    assert "privacy review" in _extract_once(c, ws, p, set_script)
+
+    rv = c.post(f"{_base(ws, p)}/privacy/review", json={}).json()
+    convs = rv["conversations"]
+    assert len(convs) == 2  # the whole (tiny) corpus
+    text = str(convs)
+    assert "jane.doe@example.com" not in text and "<EMAIL_1>" in text
+    assert c.get(f"{_base(ws, p)}/privacy/review").json()["conversations"] == convs
+
+    rid = rv["review"]["id"]
+    proj = c.post(f"{_base(ws, p)}/privacy/review/submit",
+                  json={"review_id": rid, "flagged": []}).json()  # fmt: skip
+    res = proj["privacy"]["review"]["result"]
+    assert res["exact"] and res["passed"] and res["leak_rate"] == 0
+    assert proj["privacy"]["needs_signoff"] is False
+    # a submitted review can't be submitted again
+    r = c.post(f"{_base(ws, p)}/privacy/review/submit", json={"review_id": rid, "flagged": []})
+    assert r.status_code == 409
+    # changing a redaction setting makes the review outdated
+    proj = c.patch(f"{_base(ws, p)}/privacy", json={"surrogates": True}).json()
+    assert proj["privacy"]["needs_signoff"] is True
+    assert proj["privacy"]["review"]["status"] == "outdated"
+
+
+def test_failed_review_blocks_extraction_on_any_profile(builder):
+    c, ws, p, set_script = builder
+    _upload(c, ws, p)
+    rv = c.post(f"{_base(ws, p)}/privacy/review", json={}).json()
+    one = rv["conversations"][0]["id"]
+    proj = c.post(f"{_base(ws, p)}/privacy/review/submit",
+                  json={"review_id": rv["review"]["id"], "flagged": [one]}).json()  # fmt: skip
+    assert proj["privacy"]["review"]["status"] == "failed" and proj["privacy"]["blocked"]
+    assert "too much personal data" in _extract_once(c, ws, p, set_script)
+    bad = c.post(f"{_base(ws, p)}/privacy/review/submit",
+                 json={"review_id": "nope", "flagged": []})  # fmt: skip
+    assert bad.status_code == 409
+
+
+def test_privacy_off_needs_confirmation(builder):
+    c, ws, p, _ = builder
+    assert c.patch(f"{_base(ws, p)}/privacy", json={"profile": "off"}).status_code == 400
+    r = c.patch(f"{_base(ws, p)}/privacy", json={"profile": "off", "confirm_off": True})
+    assert r.json()["privacy"]["profile"] == "off"
+    assert c.patch(f"{_base(ws, p)}/privacy", json={"tier2": "bogus"}).status_code == 422
+
+
+def test_corpus_overview_and_cluster_examples(builder):
+    c, ws, p, _ = builder
+    assert c.get(f"{_base(ws, p)}/corpus").json()["corpus"] is None
+    _upload(c, ws, p)
+    ov = c.get(f"{_base(ws, p)}/corpus").json()["corpus"]
+    assert ov["conversations"] == 2 and ov["clusters"]
+    cid = ov["clusters"][0]["id"]
+    ex = c.get(f"{_base(ws, p)}/corpus/clusters/{cid}?n=2").json()["conversations"]
+    assert ex and "jane.doe@example.com" not in str(ex)
+
+
+def test_publish_and_export_resanitize_planted_pii(builder):
+    c, ws, p, set_script = builder
+    tasks = [dict(t) for t in TASKS[:3]]
+    tasks[0] = {
+        **tasks[0],
+        "goal": tasks[0]["goal"] + " You can email me at leaky.person@example.com.",
+    }
+    set_script([[("update_spec", {"spec": SPEC, "message": "spec"})],
+                [("edit_tasks", {"upsert": tasks, "message": "tasks"})], []])  # fmt: skip
+    c.post(f"{_base(ws, p)}/messages", json={"content": "go"})
+    _work()
+    pub = c.post(f"{_base(ws, p)}/publish", json={}).json()
+    assert pub["privacy"]["redactions"].get("EMAIL", 0) >= 1
+    from envforge.web import db as dbmod
+    from envforge.web.models import EnvVersion
+
+    with dbmod.session_factory()() as db:
+        env_dir = Path(db.query(EnvVersion).one().env_dir)
+    assert "leaky.person@example.com" not in (env_dir / "tasks.jsonl").read_text()
+
+    r = c.post(
+        f"/api/workspaces/{ws}/runs",
+        json={"pack": pub["pack_name"], "model": "scripted", "episodes": 3},
+    )
+    from envforge.web.worker import run_forever
+
+    run_forever(once=True, kind="runs")
+    out = c.get(f"/api/workspaces/{ws}/runs/export?runs={r.json()['id']}&format=chat").text
+    assert out and "leaky.person@example.com" not in out and "@example.com" not in out

@@ -7,6 +7,7 @@ import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useState } from "react";
 import { ExportButton } from "@/components/ExportButton";
+import { Page, PageHeader, Panel } from "@/components/Page";
 import { Api, fmtCost, fmtTokens, type Metrics, type Run } from "@/lib/api";
 import { useWorkspace } from "@/lib/workspace";
 
@@ -88,16 +89,8 @@ function CompareInner() {
   };
 
   return (
-    <div className="space-y-6">
-      <div className="flex flex-wrap items-center gap-3">
-        <Link href="/runs" style={{ color: "var(--muted)" }}>
-          ← Runs
-        </Link>
-        <h1 className="text-lg font-semibold">Compare {runs.length} runs</h1>
-        <div className="ml-auto">
-          <ExportButton wsId={ws.id} runIds={ids} />
-        </div>
-      </div>
+    <Page>
+      <PageHeader back={{ href: "/runs", label: "Runs" }} title={`Compare ${runs.length} runs`} actions={<ExportButton wsId={ws.id} runIds={ids} />} />
       {runs.length > withMetrics.length && (
         <div className="text-sm" style={{ color: "var(--warn)" }}>
           {runs.length - withMetrics.length} run(s) have no metrics yet and are hidden.
@@ -108,17 +101,17 @@ function CompareInner() {
           These runs use different environments; the numbers aren&apos;t directly comparable.
         </div>
       )}
-      <div className="panel overflow-x-auto p-2">
-        <div className="px-2 pt-2 text-sm font-semibold">Overall</div>
+      <Panel title="Overall" flush>
         {table((r) => r.metrics?.overall)}
+      </Panel>
+      <div className="grid grid-cols-1 items-start gap-6 2xl:grid-cols-2">
+        {tiers.map((t) => (
+          <Panel key={t} title={`Tier ${t}`} flush>
+            {table((r) => r.metrics?.by_tier[t])}
+          </Panel>
+        ))}
       </div>
-      {tiers.map((t) => (
-        <div key={t} className="panel overflow-x-auto p-2">
-          <div className="px-2 pt-2 text-sm font-semibold">Tier {t}</div>
-          {table((r) => r.metrics?.by_tier[t])}
-        </div>
-      ))}
-    </div>
+    </Page>
   );
 }
 

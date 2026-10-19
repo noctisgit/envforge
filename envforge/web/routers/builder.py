@@ -44,6 +44,35 @@ class PublishIn(BaseModel):
     revision_id: str | None = None  # default: head
 
 
+class UploadInit(BaseModel):
+    filename: str = Field(min_length=1, max_length=255)
+    size_bytes: int = Field(gt=0)
+
+
+class ImportIn(BaseModel):
+    url: str = Field(min_length=8, max_length=2000)
+    filename: str | None = Field(default=None, max_length=255)
+
+
+class PrivacyIn(BaseModel):
+    profile: str | None = Field(default=None, pattern="^(off|standard|strict)$")
+    confirm_off: bool = False  # "off" is only for public or synthetic data
+    ner: bool | None = None
+    surrogates: bool | None = None
+    tier2: str | None = Field(default=None, pattern="^(off|auto|all)$")
+    threshold: float | None = Field(default=None, ge=0.005, le=0.5)
+
+
+class ReviewIn(BaseModel):
+    n: int | None = Field(default=None, ge=5, le=400)
+
+
+class ReviewSubmit(BaseModel):
+    review_id: str = Field(max_length=32)
+    flagged: list[str] = Field(default_factory=list, max_length=400)
+    notes: dict[str, str] | None = None
+
+
 # ---- shaping ---------------------------------------------------------------------------
 
 
@@ -82,6 +111,10 @@ def _upload_out(u: EnvUpload) -> dict:
         "id": u.id,
         "filename": u.filename,
         "size_bytes": u.size_bytes,
+        "bytes_received": u.bytes_received,
+        "source": u.source,
+        "progress": u.progress,
+        "chunk_bytes": B.CHUNK_BYTES,
         "status": u.status,
         "format": u.detected_format,
         "n_conversations": u.n_conversations,
@@ -128,6 +161,26 @@ def _project_out(db: Session, ws, p: EnvProject, user: User) -> dict:
         else None,
         "uploads": [_upload_out(u) for u in B.list_uploads(db, p)],
         "builder_model": ws.builder_model,
+        "privacy": _privacy_out(p),
+    }
+
+
+def _privacy_out(p: EnvProject) -> dict[str, Any]:
+    from envforge.builder.review import sample_size_for
+
+    review = B.review_summary(p)
+    return {
+        "profile": p.privacy_profile,
+        "ner": p.privacy_ner,
+        "surrogates": p.privacy_surrogates,
+        "tier2": p.privacy_tier2,
+        "threshold": p.privacy_threshold,
+        "review_size": sample_size_for(p.privacy_threshold),
+        "signed_off_at": p.privacy_signed_off_at,
+        "review": review,
+        # strict: extraction waits for a passed review; any profile: a failed one blocks
+        "needs_signoff": p.privacy_profile == "strict" and p.privacy_signed_off_at is None,
+        "blocked": bool(review and review.get("status") == "failed"),
     }
 
 
@@ -396,8 +449,7 @@ async def upload(
     builder worker, then the original is deleted."""
     ws = svc.require_workspace(db, user, ws_id)
     p = B.get_project(db, ws, pid)
-    if not filename.lower().endswith((".csv", ".txt", ".json", ".jsonl", ".log")):
-        raise HTTPException(400, "supported files: .csv, .txt, .json, .jsonl, .log")
+    _check_name(filename)
     up, raw = B.new_upload(db, ws, p, user, filename)
     size = 0
     try:
@@ -424,6 +476,195 @@ async def upload(
     return _upload_out(up)
 
 
+def _check_name(filename: str) -> None:
+    name = filename.lower().removesuffix(".gz")  # gzip of any supported file is fine
+    if not name.endswith(B.SUPPORTED_SUFFIXES):
+        raise HTTPException(
+            400, "supported files: " + ", ".join(B.SUPPORTED_SUFFIXES) + " (optionally .gz)"
+        )
+
+
+@router.post("/builder/projects/{pid}/uploads/init", status_code=201)
+def init_upload(
+    ws_id: str,
+    pid: str,
+    body: UploadInit,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    """Start a chunked upload: the browser then PUTs CHUNK_BYTES pieces in order. Files of
+    any size (up to MAX_CORPUS_BYTES) get through proxies that cap request sizes, and an
+    interrupted upload resumes from `bytes_received`."""
+    ws = svc.require_workspace(db, user, ws_id)
+    p = B.get_project(db, ws, pid)
+    _check_name(body.filename)
+    limit = svc.get_settings().MAX_CORPUS_BYTES
+    if body.size_bytes > limit:
+        raise HTTPException(
+            413,
+            f"file too large (limit {limit / 2**30:.0f} GiB) — import it from a URL or split it",
+        )
+    B.check_disk_for(ws, body.size_bytes)
+    up, raw = B.new_upload(db, ws, p, user, body.filename)
+    up.size_bytes, up.status, up.path = body.size_bytes, "receiving", str(raw)
+    raw.write_bytes(b"")
+    db.commit()
+    return _upload_out(up)
+
+
+@router.put("/builder/projects/{pid}/uploads/{uid}/chunk")
+async def upload_chunk(
+    ws_id: str, pid: str, uid: str, request: Request, offset: int = Query(..., ge=0),
+    user: User = Depends(current_user), db: Session = Depends(get_db),
+):  # fmt: skip
+    """Append one piece at `offset`. A wrong offset returns 409 with the server's
+    bytes_received, so the client can resume exactly where the server is."""
+    ws = svc.require_workspace(db, user, ws_id)
+    p = B.get_project(db, ws, pid)
+    up = db.get(EnvUpload, uid)
+    if not up or up.project_id != p.id:
+        raise HTTPException(404, "upload not found")
+    if up.status != "receiving" or not up.path:
+        raise HTTPException(409, f"upload is {up.status}")
+    if offset != up.bytes_received:
+        raise HTTPException(
+            409, {"message": "offset mismatch", "bytes_received": up.bytes_received}
+        )
+    from pathlib import Path
+
+    written = 0
+    with Path(up.path).open("ab") as f:
+        async for chunk in request.stream():
+            written += len(chunk)
+            if written > B.CHUNK_BYTES + 1024 or up.bytes_received + written > up.size_bytes:
+                f.truncate(up.bytes_received)
+                raise HTTPException(413, "chunk too large or past the declared size")
+            f.write(chunk)
+    up.bytes_received += written
+    db.commit()
+    return {"bytes_received": up.bytes_received, "size_bytes": up.size_bytes}
+
+
+@router.post("/builder/projects/{pid}/uploads/{uid}/complete", status_code=202)
+def complete_upload(
+    ws_id: str,
+    pid: str,
+    uid: str,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    ws = svc.require_workspace(db, user, ws_id)
+    p = B.get_project(db, ws, pid)
+    up = db.get(EnvUpload, uid)
+    if not up or up.project_id != p.id:
+        raise HTTPException(404, "upload not found")
+    if up.status != "receiving":
+        raise HTTPException(409, f"upload is {up.status}")
+    if up.bytes_received != up.size_bytes:
+        raise HTTPException(409, {"message": "incomplete", "bytes_received": up.bytes_received})
+    up.status = "uploaded"
+    db.commit()
+    B.enqueue_job(db, "ingest", p, user, {"upload_id": up.id})
+    return _upload_out(up)
+
+
+@router.post("/builder/projects/{pid}/uploads/import", status_code=202)
+def import_url(
+    ws_id: str,
+    pid: str,
+    body: ImportIn,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    """Have the builder worker download a file from an https URL (e.g. a presigned S3/R2
+    link) — the way to bring in multi-GB archives without going through the browser."""
+    from urllib.parse import urlparse
+
+    from envforge.web.security import check_base_url
+
+    ws = svc.require_workspace(db, user, ws_id)
+    p = B.get_project(db, ws, pid)
+    url = body.url.strip()
+    if urlparse(url).scheme != "https":
+        raise HTTPException(400, "only https URLs can be imported")
+    try:
+        check_base_url(url)  # public hosts only: never the server itself or private networks
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    name = body.filename or (urlparse(url).path.rsplit("/", 1)[-1] or "import.jsonl")
+    _check_name(name)
+    up, raw = B.new_upload(db, ws, p, user, name)
+    up.source, up.source_url, up.status, up.path = "url", url, "uploaded", str(raw)
+    db.commit()
+    B.enqueue_job(db, "ingest", p, user, {"upload_id": up.id})
+    return _upload_out(up)
+
+
+@router.patch("/builder/projects/{pid}/privacy")
+def set_privacy(
+    ws_id: str,
+    pid: str,
+    body: PrivacyIn,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    """Privacy settings. Redaction settings apply to future uploads (already-processed
+    uploads keep the redaction they got; re-upload to change) and reset the review."""
+    ws = svc.require_workspace(db, user, ws_id)
+    p = B.get_project(db, ws, pid)
+    B.privacy_settings(p, body.model_dump())
+    db.commit()
+    return _project_out(db, ws, p, user)
+
+
+@router.get("/builder/projects/{pid}/corpus")
+def corpus(ws_id: str, pid: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """Corpus statistics and topic clusters (redacted data only)."""
+    ws = svc.require_workspace(db, user, ws_id)
+    return {"corpus": B.corpus_overview(ws, B.get_project(db, ws, pid))}
+
+
+@router.get("/builder/projects/{pid}/corpus/clusters/{cluster}")
+def cluster_examples(
+    ws_id: str, pid: str, cluster: int, n: int = Query(3, ge=1, le=10),
+    user: User = Depends(current_user), db: Session = Depends(get_db),
+):  # fmt: skip
+    ws = svc.require_workspace(db, user, ws_id)
+    return {"conversations": B.cluster_examples(ws, B.get_project(db, ws, pid), cluster, n)}
+
+
+@router.post("/builder/projects/{pid}/privacy/review", status_code=201)
+def start_review(
+    ws_id: str, pid: str, body: ReviewIn,
+    user: User = Depends(current_user), db: Session = Depends(get_db),
+):  # fmt: skip
+    """Draw a fresh random sample of redacted conversations for a person to check."""
+    ws = svc.require_workspace(db, user, ws_id)
+    review, convs = B.start_review(db, ws, B.get_project(db, ws, pid), user, body.n)
+    return {"review": {k: v for k, v in review.items() if k != "ids"}, "conversations": convs}
+
+
+@router.get("/builder/projects/{pid}/privacy/review")
+def get_review(
+    ws_id: str, pid: str, user: User = Depends(current_user), db: Session = Depends(get_db)
+):
+    ws = svc.require_workspace(db, user, ws_id)
+    p = B.get_project(db, ws, pid)
+    return {"review": B.review_summary(p), "conversations": B.open_review_conversations(ws, p)}
+
+
+@router.post("/builder/projects/{pid}/privacy/review/submit")
+def submit_review(
+    ws_id: str, pid: str, body: ReviewSubmit,
+    user: User = Depends(current_user), db: Session = Depends(get_db),
+):  # fmt: skip
+    """Which sampled conversations still contain personal data -> leak rate, pass/fail."""
+    ws = svc.require_workspace(db, user, ws_id)
+    p = B.get_project(db, ws, pid)
+    B.submit_review(db, p, user, body.review_id, body.flagged, body.notes)
+    return _project_out(db, ws, p, user)
+
+
 @router.delete("/builder/projects/{pid}/uploads/{uid}", status_code=204)
 def delete_upload(
     ws_id: str,
@@ -432,8 +673,6 @@ def delete_upload(
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ) -> None:
-    from pathlib import Path
-
     ws = svc.require_workspace(db, user, ws_id)
     p = B.get_project(db, ws, pid)
     up = db.get(EnvUpload, uid)
@@ -441,10 +680,7 @@ def delete_upload(
         raise HTTPException(404, "upload not found")
     if up.status == "processing":
         raise HTTPException(409, "still processing")
-    if up.path:
-        Path(up.path).unlink(missing_ok=True)
-    db.delete(up)
-    db.commit()
+    B.delete_upload(db, p, up, user)
 
 
 # ---- preview + publish ------------------------------------------------------------------------
@@ -485,8 +721,12 @@ def publish(
     if r is None:
         raise HTTPException(400, "nothing to publish yet")
     v = B.publish(db, ws, p, r, user)
-    B.add_message(db, p, "user", f"(Published revision {r.number} as {v.pack_name}.)")
-    return {"version": v.version, "pack_name": v.pack_name}
+    rep = getattr(v, "privacy_report", {}) or {}
+    dropped = rep.get("dropped") or {}
+    note = f" Privacy re-scan ({rep.get('profile')}): {sum((rep.get('redactions') or {}).values())} redaction(s)"
+    note += f", {len(dropped)} task(s) left out because sanitising broke them." if dropped else "."
+    B.add_message(db, p, "user", f"(Published revision {r.number} as {v.pack_name}.{note})")
+    return {"version": v.version, "pack_name": v.pack_name, "privacy": rep}
 
 
 # ---- workspace environments (built-in + published) ------------------------------------------

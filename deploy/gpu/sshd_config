@@ -1,0 +1,23 @@
+# envforge GPU image: sshd drop-in (/etc/ssh/sshd_config.d/envforge.conf).
+# sshd uses the FIRST value it reads for each option, and the stock sshd_config
+# includes this directory at its top, so these settings win.
+
+# Keys only. No passwords, no keyboard-interactive (PAM) prompts.
+PubkeyAuthentication yes
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitEmptyPasswords no
+PermitRootLogin prohibit-password
+AuthenticationMethods publickey
+
+# Let ~/.ssh/environment (written by the entrypoint) carry PATH, HF_TOKEN, ... into
+# sessions. Only root can log in and only the entrypoint writes that file.
+PermitUserEnvironment yes
+
+# Port forwarding is how you reach a loopback-only vLLM without Tailscale:
+#   ssh -L 8000:127.0.0.1:8000 root@<pod>
+AllowTcpForwarding yes
+X11Forwarding no
+PrintMotd no
+ClientAliveInterval 60
+ClientAliveCountMax 5

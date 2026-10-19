@@ -21,7 +21,7 @@ function Shell({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="min-h-screen">
-      <header className="flex flex-wrap items-center gap-x-6 gap-y-2 border-b px-6 py-3" style={{ borderColor: "var(--line)" }}>
+      <header className="flex flex-wrap items-center gap-x-6 gap-y-2 border-b px-4 py-3 sm:px-6 lg:px-10" style={{ borderColor: "var(--line)" }}>
         <Link href="/runs" className="font-semibold tracking-tight">
           envforge
         </Link>
@@ -40,7 +40,7 @@ function Shell({ children }: { children: React.ReactNode }) {
           <AvatarMenu />
         </div>
       </header>
-      <main className="mx-auto max-w-6xl p-6">{children}</main>
+      <main className="w-full px-4 py-6 sm:px-6 lg:px-10">{children}</main>
     </div>
   );
 }

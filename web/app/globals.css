@@ -43,6 +43,26 @@ body {
   color: var(--fg);
 }
 
+/* destructive actions: a ghost button in the "bad" colour */
+.btn-danger {
+  @apply inline-flex items-center gap-2 rounded-md border px-3 py-1.5 text-sm font-medium;
+  border-color: color-mix(in srgb, var(--bad) 50%, var(--line));
+  color: var(--bad);
+}
+.btn-danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--bad) 12%, transparent);
+}
+.btn-danger:disabled,
+.btn-ghost:disabled {
+  opacity: 0.5;
+}
+
+/* add to a button that sits in a row of .input fields so it has the same height */
+.btn-field {
+  min-height: 2.375rem;
+  justify-content: center;
+}
+
 .input {
   @apply w-full rounded-md border px-3 py-2 text-sm;
   background: #0f1317;
@@ -55,7 +75,7 @@ body {
 }
 
 .label {
-  @apply block text-xs uppercase tracking-wide;
+  @apply mb-1 block text-xs uppercase tracking-wide;
   color: var(--muted);
 }
 

@@ -20,7 +20,17 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import (
+    JSON,
+    BigInteger,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from envforge.web.db import Base
@@ -181,6 +191,23 @@ class EnvProject(Base):
     purpose: Mapped[str] = mapped_column(Text, default="")  # the user's stated intent
     created_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
     head_revision_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # privacy: "off" (public/synthetic data, an explicit choice), "standard" (best-effort
+    # PII) or "strict" (aimed at HIPAA Safe Harbor); local NER (Presidio) and a local PII
+    # span model (tier 2, GLiNER on CPU) on top of the patterns; surrogates write realistic
+    # fake values instead of <NAME_1> placeholders. Extraction waits for a human review of
+    # a random sample whose estimated leak rate (upper bound) is under the threshold.
+    privacy_profile: Mapped[str] = mapped_column(
+        String(16), default="standard", server_default="standard"
+    )
+    privacy_ner: Mapped[bool] = mapped_column(default=False, server_default="false")
+    privacy_surrogates: Mapped[bool] = mapped_column(default=False, server_default="false")
+    privacy_tier2: Mapped[str] = mapped_column(String(8), default="auto", server_default="auto")
+    privacy_threshold: Mapped[float] = mapped_column(Float, default=0.05, server_default="0.05")
+    privacy_review: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    privacy_signed_off_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    privacy_signed_off_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
@@ -223,9 +250,15 @@ class EnvUpload(Base):
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
     project_id: Mapped[str] = mapped_column(ForeignKey("env_projects.id"), index=True)
     filename: Mapped[str] = mapped_column(String(255))
-    size_bytes: Mapped[int] = mapped_column(Integer, default=0)
-    # uploaded (raw file on disk, waiting) | processing | ready | failed
+    size_bytes: Mapped[int] = mapped_column(BigInteger, default=0)  # expected total
+    bytes_received: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
+    source: Mapped[str] = mapped_column(
+        String(16), default="upload", server_default="upload"
+    )  # upload | url
+    source_url: Mapped[str | None] = mapped_column(String(2000), nullable=True)
+    # receiving (chunks arriving) | uploaded (complete, waiting) | processing | ready | failed
     status: Mapped[str] = mapped_column(String(16), default="uploaded")
+    progress: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # ingest progress
     detected_format: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # format + mapping
     n_conversations: Mapped[int] = mapped_column(Integer, default=0)
     redactions: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # counts by PII type

@@ -6,6 +6,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
+import { Empty, Page, PageHeader, Panel } from "@/components/Page";
 import { Api, ApiError, type BuilderProjectSummary } from "@/lib/api";
 import { useWorkspace } from "@/lib/workspace";
 
@@ -25,7 +26,10 @@ export default function BuilderPage() {
   const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
-    if (ws) Api.projects(ws.id).then(setProjects).catch(() => setProjects([]));
+    if (ws)
+      Api.projects(ws.id)
+        .then(setProjects)
+        .catch(() => setProjects([]));
   }, [ws]);
 
   if (!ws) return null;
@@ -50,63 +54,72 @@ export default function BuilderPage() {
   }
 
   return (
-    <div className="space-y-6">
-      <div>
-        <h1 className="text-lg font-semibold">Environment builder</h1>
-        <p className="max-w-3xl text-sm" style={{ color: "var(--muted)" }}>
-          Describe what you want an agent to learn, upload your data (CSV, TXT or JSON chat logs — personal data is redacted
-          before any model sees it), and chat with the builder. It asks questions until it can build a verifiable environment,
-          and every change it makes is a revision you can review, diff and roll back. Publish a revision to run and train on it.
-        </p>
-      </div>
+    <Page>
+      <PageHeader
+        title="Environment builder"
+        description={
+          <>
+            Describe what you want an agent to learn, upload your data (CSV, TXT or JSON chat logs — personal data is redacted before any model sees it), and
+            chat with the builder. It asks questions until it can build a verifiable environment, and every change it makes is a revision you can review, diff
+            and roll back. Publish a revision to run and train on it.
+          </>
+        }
+      />
 
-      <form onSubmit={start} className="panel space-y-4 p-5">
-        <div className="text-sm font-semibold">New environment</div>
-        <div>
-          <label className="label">What should the agent learn to do?</label>
-          <textarea
-            className="input min-h-[96px]"
-            value={purpose}
-            maxLength={4000}
-            onChange={(e) => setPurpose(e.target.value)}
-            placeholder="e.g. Resolve customer support tickets for our ISP using the chat logs I'll upload…"
-          />
-          <div className="mt-2 flex flex-wrap gap-2">
-            {EXAMPLES.map((ex) => (
-              <button key={ex} type="button" className="rounded-full border px-2.5 py-1 text-left text-xs" style={{ borderColor: "var(--line)", color: "var(--muted)" }} onClick={() => setPurpose(ex)}>
-                {ex.slice(0, 70)}…
-              </button>
-            ))}
+      <Panel title="New environment">
+        <form onSubmit={start} className="space-y-4">
+          <div>
+            <label className="label">What should the agent learn to do?</label>
+            <textarea
+              className="input min-h-[96px]"
+              value={purpose}
+              maxLength={4000}
+              onChange={(e) => setPurpose(e.target.value)}
+              placeholder="e.g. Resolve customer support tickets for our ISP using the chat logs I'll upload…"
+            />
+            <div className="mt-2 flex flex-wrap gap-2">
+              {EXAMPLES.map((ex) => (
+                <button
+                  key={ex}
+                  type="button"
+                  className="rounded-full border px-2.5 py-1 text-left text-xs"
+                  style={{ borderColor: "var(--line)", color: "var(--muted)" }}
+                  onClick={() => setPurpose(ex)}
+                >
+                  {ex.slice(0, 70)}…
+                </button>
+              ))}
+            </div>
           </div>
-        </div>
-        <div className="flex flex-wrap items-end gap-3">
-          <div className="min-w-[16rem] flex-1">
-            <label className="label">Name (optional)</label>
-            <input className="input" value={title} maxLength={200} onChange={(e) => setTitle(e.target.value)} placeholder="ISP support desk" />
+          <div className="flex flex-wrap items-end gap-3">
+            <div className="min-w-[16rem] flex-1">
+              <label className="label">Name (optional)</label>
+              <input className="input" value={title} maxLength={200} onChange={(e) => setTitle(e.target.value)} placeholder="ISP support desk" />
+            </div>
+            <button className="btn btn-field" disabled={busy || purpose.trim().length < 10}>
+              {busy ? "Starting…" : "Start building"}
+            </button>
           </div>
-          <button className="btn" disabled={busy || purpose.trim().length < 10}>
-            {busy ? "Starting…" : "Start building"}
-          </button>
-        </div>
-        <div className="text-xs" style={{ color: "var(--muted)" }}>
-          Builder model: <span className="mono">{ws.builder_model}</span> (change it in{" "}
-          <Link href="/settings" className="underline">
-            Workspace settings
-          </Link>
-          ). Each message costs a little; extraction of more than 5 conversations always asks you first.
-        </div>
-        {err && <div className="text-sm" style={{ color: "var(--bad)" }}>{err}</div>}
-      </form>
+          <div className="text-xs" style={{ color: "var(--muted)" }}>
+            Builder model: <span className="mono">{ws.builder_model}</span> (change it in{" "}
+            <Link href="/settings" className="underline">
+              Workspace settings
+            </Link>
+            ). Each message costs a little; extraction of more than 5 conversations always asks you first.
+          </div>
+          {err && (
+            <div className="text-sm" style={{ color: "var(--bad)" }}>
+              {err}
+            </div>
+          )}
+        </form>
+      </Panel>
 
-      <div className="panel overflow-x-auto p-2">
+      <Panel title="Projects" flush>
         {!projects ? (
-          <div className="p-4 text-sm" style={{ color: "var(--muted)" }}>
-            Loading…
-          </div>
+          <Empty>Loading…</Empty>
         ) : projects.length === 0 ? (
-          <div className="p-4 text-sm" style={{ color: "var(--muted)" }}>
-            No projects yet.
-          </div>
+          <Empty>No projects yet.</Empty>
         ) : (
           <table className="data">
             <thead>
@@ -142,7 +155,7 @@ export default function BuilderPage() {
             </tbody>
           </table>
         )}
-      </div>
-    </div>
+      </Panel>
+    </Page>
   );
 }

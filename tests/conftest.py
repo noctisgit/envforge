@@ -11,6 +11,9 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers", "docker: needs a reachable Docker daemon; skipped automatically without one"
     )
+    config.addinivalue_line(
+        "markers", "slow: large-scale smoke tests (minutes); skipped by default: pytest -m slow"
+    )
 
 
 def pytest_collection_modifyitems(config, items):
@@ -19,3 +22,8 @@ def pytest_collection_modifyitems(config, items):
         for item in items:
             if "network" in item.keywords:
                 item.add_marker(skip)
+    skip_slow = pytest.mark.skip(reason="slow tests are opt-in: pytest -m slow")
+    if "slow" not in (config.getoption("-m", default="") or ""):
+        for item in items:
+            if "slow" in item.keywords:
+                item.add_marker(skip_slow)

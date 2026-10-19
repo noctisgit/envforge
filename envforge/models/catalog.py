@@ -207,6 +207,11 @@ def list_models(
     if "anthropic" in wanted:
         for mid in sorted(allowed.get("anthropic", set()) - covered["anthropic"]):
             out.append(ModelInfo(id=f"anthropic:{mid}", provider="anthropic", name=mid))
+    # whatever the user's vLLM box served when its URL was saved (self-hosted: $0/token)
+    if "vllm" in wanted:
+        for mid in sorted((native_ids or {}).get("vllm", [])):
+            out.append(ModelInfo(id=f"vllm:{mid}", provider="vllm", name=mid, owned_by="self-hosted",
+                                 input_per_mtok=0.0, output_per_mtok=0.0, tags=["tool-use", "open-weights"]))  # fmt: skip
     return out
 
 

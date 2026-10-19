@@ -46,6 +46,7 @@ class WebSettings(BaseSettings):
     MAX_ACTIVE_RUNS_PER_WORKSPACE: int = 3  # queued + running
     STALE_RUN_SECONDS: int = 180  # a running run with no worker heartbeat this long is failed
     LOGIN_ATTEMPTS_PER_MINUTE: int = 10  # per client IP (and per email)
+    MAX_CORPUS_BYTES: int = 20 * 1024**3  # largest single builder upload/import (20 GiB)
     SIGNUPS_PER_HOUR: int = 5  # per client IP
 
     # --- http ---

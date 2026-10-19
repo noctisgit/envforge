@@ -1,0 +1,9 @@
+# Training libraries added on top of the vLLM image (which already ships CUDA PyTorch,
+# transformers and huggingface-hub). Pinned for reproducible adapters; chosen to be
+# compatible with vllm/vllm-openai:v0.30.0 (torch 2.13, transformers 5.17, hf-hub 1.32).
+# The Dockerfile installs these (with uv) and a constraints file that freezes everything the
+# vLLM image already has, so pip can add packages but never swap torch or vLLM.
+# (datasets caps fsspec, so fsspec is the one base package allowed to move.)
+peft==0.21.2
+datasets==5.0.1
+accelerate==1.15.0

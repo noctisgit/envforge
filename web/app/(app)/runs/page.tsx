@@ -6,6 +6,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { ExportButton } from "@/components/ExportButton";
 import { ModelPicker } from "@/components/ModelPicker";
+import { Empty, Page, PageHeader, Panel } from "@/components/Page";
 import { Api, ApiError, fmtCost, fmtTokens, type Pack, type Run } from "@/lib/api";
 import { useWorkspace } from "@/lib/workspace";
 
@@ -28,7 +29,10 @@ export default function RunsPage() {
   const confirm = useConfirm();
 
   useEffect(() => {
-    if (ws) Api.wsPacks(ws.id).then(setPacks).catch(() => {});
+    if (ws)
+      Api.wsPacks(ws.id)
+        .then(setPacks)
+        .catch(() => {});
   }, [ws]);
   useEffect(() => {
     if (!ws) return;
@@ -92,13 +96,9 @@ export default function RunsPage() {
       body: (
         <div className="space-y-2">
           <p>
-            {one ? (
-              <span className="mono">{deletable[0].label || deletable[0].id}</span>
-            ) : (
-              `${deletable.length} runs`
-            )}{" "}
-            and {one ? "its" : "their"} {deletable.reduce((n, r) => n + r.progress, 0)} recorded episodes will be permanently deleted.
-            Transcripts and training-data exports from {one ? "it" : "them"} will no longer be available.
+            {one ? <span className="mono">{deletable[0].label || deletable[0].id}</span> : `${deletable.length} runs`} and {one ? "its" : "their"}{" "}
+            {deletable.reduce((n, r) => n + r.progress, 0)} recorded episodes will be permanently deleted. Transcripts and training-data exports from{" "}
+            {one ? "it" : "them"} will no longer be available.
           </p>
           <p>Your usage history keeps their token and cost totals.</p>
           {active.length > 0 && <p style={{ color: "var(--warn)" }}>{active.length} queued/running run(s) will be skipped.</p>}
@@ -122,83 +122,97 @@ export default function RunsPage() {
   }
 
   return (
-    <div className="space-y-6">
-      <form onSubmit={submit} className="panel grid grid-cols-1 gap-4 p-5 md:grid-cols-6">
-        <div className="md:col-span-6 text-sm font-semibold">New run</div>
-        <div className="md:col-span-3">
-          <label className="label">Model</label>
-          <ModelPicker wsId={ws.id} value={model} onChange={setModel} />
-        </div>
-        <div className="md:col-span-2">
-          <label className="label">Environment</label>
-          <select
-            className="input"
-            value={pack}
-            onChange={(e) => {
-              setPack(e.target.value);
-              setTiers([]);
-            }}
-          >
-            {packs.map((p) => (
-              <option key={p.name} value={p.name}>
-                {p.name} {p.kind === "sandbox" ? "(sandbox)" : ""}
-              </option>
-            ))}
-          </select>
-        </div>
-        <div>
-          <label className="label">Episodes</label>
-          <input className="input" type="number" min={1} max={1000} value={episodes} onChange={(e) => setEpisodes(Number(e.target.value))} />
-        </div>
-        {currentPack && (
-          <div className="md:col-span-6 -mt-2 text-xs" style={{ color: "var(--muted)" }}>
-            {currentPack.description}
+    <Page>
+      <PageHeader title="Runs" description="Evaluate a model on an environment, then open, compare, export or delete the results." />
+
+      <Panel title="New run">
+        <form onSubmit={submit} className="grid grid-cols-1 gap-4 md:grid-cols-6 2xl:grid-cols-12">
+          <div className="md:col-span-3 2xl:col-span-4">
+            <label className="label">Model</label>
+            <ModelPicker wsId={ws.id} value={model} onChange={setModel} />
           </div>
-        )}
-        <div className="md:col-span-2">
-          <label className="label">Tiers (none = all)</label>
-          <div className="flex gap-3 pt-2 text-sm">
-            {packTiers.map((t) => (
-              <label key={t} className="flex items-center gap-1">
-                <input type="checkbox" checked={tiers.includes(t)} onChange={(e) => setTiers(e.target.checked ? [...tiers, t].sort() : tiers.filter((x) => x !== t))} />
-                {t}
-              </label>
-            ))}
+          <div className="md:col-span-2 2xl:col-span-2">
+            <label className="label">Environment</label>
+            <select
+              className="input"
+              value={pack}
+              onChange={(e) => {
+                setPack(e.target.value);
+                setTiers([]);
+              }}
+            >
+              {packs.map((p) => (
+                <option key={p.name} value={p.name}>
+                  {p.name} {p.kind === "sandbox" ? "(sandbox)" : ""}
+                </option>
+              ))}
+            </select>
+            {currentPack && (
+              <div className="mt-1 line-clamp-2 text-[11px]" style={{ color: "var(--muted)" }} title={currentPack.description}>
+                {currentPack.description}
+              </div>
+            )}
           </div>
-        </div>
-        <div>
-          <label className="label" title="Each seed is a different generated task. Collect training data on seeds 10000+, evaluate on 0–99, so evaluation never reuses a training task.">
-            Seed start ⓘ
-          </label>
-          <input className="input" type="number" min={0} value={seedStart} onChange={(e) => setSeedStart(Math.max(0, Number(e.target.value)))} />
-          <div className="mt-1 text-[11px]" style={{ color: "var(--muted)" }}>
-            {seedStart >= 10000 ? "training range" : seedStart < 100 ? "evaluation range" : "custom range"}
+          <div>
+            <label className="label">Episodes</label>
+            <input className="input" type="number" min={1} max={1000} value={episodes} onChange={(e) => setEpisodes(Number(e.target.value))} />
           </div>
-        </div>
-        <div className="md:col-span-2">
-          <label className="label">Label</label>
-          <input className="input" value={label} onChange={(e) => setLabel(e.target.value)} placeholder="optional" maxLength={200} />
-        </div>
-        <div className="flex items-end">
-          <button className="btn" disabled={busy || !model.trim()}>
-            Queue run
-          </button>
-        </div>
-        {msg && (
-          <div className="md:col-span-6 text-sm" style={{ color: "var(--bad)" }}>
-            {msg}
+          <div className="md:col-span-2 2xl:col-span-2">
+            <label className="label">Tiers (none = all)</label>
+            <div className="flex gap-3 pt-2 text-sm">
+              {packTiers.map((t) => (
+                <label key={t} className="flex items-center gap-1">
+                  <input
+                    type="checkbox"
+                    checked={tiers.includes(t)}
+                    onChange={(e) => setTiers(e.target.checked ? [...tiers, t].sort() : tiers.filter((x) => x !== t))}
+                  />
+                  {t}
+                </label>
+              ))}
+            </div>
           </div>
-        )}
-      </form>
+          <div>
+            <label
+              className="label"
+              title="Each seed is a different generated task. Collect training data on seeds 10000+, evaluate on 0–99, so evaluation never reuses a training task."
+            >
+              Seed start ⓘ
+            </label>
+            <input className="input" type="number" min={0} value={seedStart} onChange={(e) => setSeedStart(Math.max(0, Number(e.target.value)))} />
+            <div className="mt-1 text-[11px]" style={{ color: "var(--muted)" }}>
+              {seedStart >= 10000 ? "training range" : seedStart < 100 ? "evaluation range" : "custom range"}
+            </div>
+          </div>
+          <div className="md:col-span-2 2xl:col-span-1">
+            <label className="label">Label</label>
+            <input className="input" value={label} onChange={(e) => setLabel(e.target.value)} placeholder="optional" maxLength={200} />
+          </div>
+          <div>
+            {/* an empty label line keeps the button level with the inputs */}
+            <span className="label invisible hidden md:block" aria-hidden>
+              queue
+            </span>
+            <button className="btn btn-field w-full" disabled={busy || !model.trim()}>
+              Queue run
+            </button>
+          </div>
+          {msg && (
+            <div className="col-span-full text-sm" style={{ color: "var(--bad)" }}>
+              {msg}
+            </div>
+          )}
+        </form>
+      </Panel>
 
       {picked.length > 0 && (
-        <div className="panel flex flex-wrap items-center gap-3 p-3 text-sm">
+        <div className="panel flex flex-wrap items-center gap-3 px-5 py-3 text-sm">
           <span>{picked.length} selected</span>
           <button className="btn" disabled={picked.length < 2} onClick={() => router.push(`/compare?runs=${picked.map(encodeURIComponent).join(",")}`)}>
             Compare
           </button>
           <ExportButton wsId={ws.id} runIds={picked} />
-          <button className="btn-ghost" style={{ color: "var(--bad)" }} onClick={() => remove(picked)}>
+          <button className="btn-danger" onClick={() => remove(picked)}>
             Delete
           </button>
           <button className="btn-ghost ml-auto" onClick={() => setPicked([])}>
@@ -207,11 +221,11 @@ export default function RunsPage() {
         </div>
       )}
 
-      <div className="panel overflow-x-auto p-2">
+      <Panel title="History" flush>
         {runs.length === 0 ? (
-          <div className="p-4 text-sm" style={{ color: "var(--muted)" }}>
+          <Empty>
             No runs yet. Start with model <span className="mono">scripted</span>; it needs no key.
-          </div>
+          </Empty>
         ) : (
           <table className="data">
             <thead>
@@ -266,7 +280,7 @@ export default function RunsPage() {
             </tbody>
           </table>
         )}
-      </div>
-    </div>
+      </Panel>
+    </Page>
   );
 }

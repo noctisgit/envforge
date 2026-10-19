@@ -755,3 +755,50 @@ def test_delivery_location_is_not_an_address_but_a_street_is():
     assert "4th floor mailroom" in r.text and not r.counts_by_type.get("ADDRESS")
     r = redact_text("Please ship it to 221 Baker Street, London.")
     assert "Baker Street" not in r.text and r.counts_by_type.get("ADDRESS") == 1
+
+
+def test_name_cues_tolerate_repeated_whitespace():
+    from envforge.builder.redact import redact_text
+
+    for text in (
+        "my  name  is Bartholomew Quackenbush",
+        "Thank  you,  Ana Souza",
+        "this   is Priya Raman",
+    ):
+        r = redact_text(text)
+        assert not any(
+            n in r.text for n in ("Bartholomew", "Quackenbush", "Ana", "Souza", "Priya", "Raman")
+        ), r.text
+
+
+def test_name_given_in_reply_to_a_name_question_is_redacted():
+    from envforge.builder.ingest import Conversation, Turn
+    from envforge.builder.redact import redact_conversation
+
+    conv = Conversation(id="abcd", turns=[
+        Turn(role="agent", text="sure, may I have your name please?"),
+        Turn(role="customer", text="Crystal Minh"),
+        Turn(role="agent", text="Thanks Crystal, I've pulled up the account for crystal minh."),
+        Turn(role="customer", text="Great"),
+    ])  # fmt: skip
+    out, counts = redact_conversation(conv)
+    text = " ".join(t.text for t in out.turns).lower()
+    assert "crystal" not in text and "minh" not in text and counts["NAME"] >= 2
+    assert out.turns[3].text == "Great"  # a one-word reply to a non-name question is left alone
+
+
+def test_usernames_and_name_led_replies_are_redacted():
+    from envforge.builder.ingest import Conversation, Turn
+    from envforge.builder.redact import redact_conversation
+
+    conv = Conversation(id="abcd2", turns=[
+        Turn(role="agent", text="Can I have your full name or account ID?"),
+        Turn(role="customer", text="Joseph Banter, I don't have my account number but my username is josephb9"),
+        Turn(role="agent", text="Thanks Joseph. And your username again?"),
+        Turn(role="customer", text="josephb9"),
+        Turn(role="agent", text="Username: josephb9 verified for joseph banter."),
+    ])  # fmt: skip
+    out, counts = redact_conversation(conv)
+    text = " ".join(t.text for t in out.turns).lower()
+    assert "joseph" not in text and "banter" not in text and "josephb9" not in text
+    assert counts.get("USERNAME", 0) >= 3

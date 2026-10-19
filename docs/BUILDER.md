@@ -40,13 +40,70 @@ with environment directories from the CLI.
 
 - Uploads: CSV, TXT, JSON/JSONL (up to 95 MB each). Formats are detected (per-message
   rows, transcript columns, speaker-prefixed text, common helpdesk exports).
-- **Redaction happens first**, in the builder worker: emails, phone numbers, card numbers
-  (Luhn-checked), IBANs, SSNs, public IPs, MAC addresses, secret-bearing URLs, addresses,
-  labelled dates of birth, names after cues ("my name is …") and in speaker labels —
-  replaced by consistent placeholders (`<EMAIL_1>`, `<NAME_2>`). The original file is then
-  deleted; only redacted text is stored or ever sent to the builder model.
+- **Redaction happens first**, in the builder worker (`envforge/builder/redact.py`):
+  emails, phone numbers, card numbers (Luhn-checked), IBANs, SSNs, public IPs, MAC
+  addresses, secret-bearing URLs, addresses, labelled dates of birth, names after cues
+  ("my name is …") and in speaker labels — replaced by consistent placeholders
+  (`<EMAIL_1>`, `<NAME_2>`). The original file is then deleted; only redacted text is
+  stored or ever sent to the builder model.
 - Redaction is best-effort (names without a cue or free-form addresses can slip through):
   review samples in the Data tab before extracting at scale.
+
+### Profiles
+
+Every redaction function takes `profile="standard"` (the default, described above) or
+`profile="strict"`. Strict aims at the 18 identifier categories of HIPAA's **Safe
+Harbor** method and is always a superset of standard:
+
+| Safe Harbor category | strict rule | coverage |
+|---|---|---|
+| Names | cues, speaker labels, titles ("Dr Lee", "Patient Smith"), NER `PERSON` | partial; good with NER |
+| Geography below state | street addresses, UK postcodes, "City, ST", NER `LOCATION`; ZIP after a state or "zip" cue → `021XX` (`000XX` for the 17 low-population prefixes HHS lists) | partial |
+| Dates (except year), ages > 89 | numeric / ISO / month-name dates → `<DATE_1> 2024`; DOB → `<DOB_1>`; years ≥ 90 years ago dropped; ages over 89 → `90+` | common formats; relative dates ("last Tuesday") kept |
+| Phone, fax, email, SSN | as standard | good |
+| Medical record, health plan, account, certificate/licence numbers | after cues (MRN, member id, policy number, account #, license, DEA, NPI…) + any token with 6+ digits | cue-based |
+| Vehicle identifiers | 17-character VINs, plates after a cue | partial |
+| Device identifiers / serials | after cues (serial, S/N, IMEI, service tag), MAC addresses, 6+ digit tokens | cue-based |
+| URLs, IP addresses | all of them (private IPs too) | good |
+| Biometrics, full-face photos | cannot be detected in text; attachments are not processed | none |
+| Any other unique number or characteristic | 6+ digit tokens, `extra_patterns` | partial |
+
+**keep_patterns.** Strict would otherwise destroy the record keys an environment needs,
+so values matching `keep_patterns` are never touched. The strict default keeps an
+upper-case prefix + dash + digits (`HD-1001`, `PRN-302`, `C-1101`) except health-ID
+prefixes (`MRN-`, `SSN-`, `MBI-`, `NPI-`, `MD-` …). Pass your own list, or `()` to
+keep nothing. Known strict false positives: error codes and KB numbers with 6+ digits
+become `<ID_n>` (add a keep pattern), and dates the environment checks exactly become
+`<DATE_n> YYYY` (use `skip_keys` when sanitizing task records).
+
+### Optional NER layer
+
+`ner=True` adds a local named-entity recogniser (Microsoft Presidio + a spaCy model; no
+LLM, nothing leaves the machine) that finds names and places without cues — and, in
+strict, dates. Its findings share the regex layer's placeholders. Setup:
+`uv sync --extra privacy`, then install a spaCy model wheel matching the installed
+spaCy into the venv (e.g. `en_core_web_sm-3.8.0`). The model is chosen with
+`ENVFORGE_NER_MODEL` (default `en_core_web_sm`; `en_core_web_lg` is more accurate,
+`en_core_web_trf` more accurate still but much slower). If Presidio or the model is
+missing, `ner_available()` is falsy with a `reason`, redaction runs regex-only, and
+`meta["redaction_ner"]` is `False` — it never crashes.
+
+### Audit and exports
+
+- `build_redaction_report(redacted, profile=…)` / `audit(conversations, …)` return a
+  JSON-able report for a human sign-off: counts by type, profile, NER status, keep
+  patterns, a sample of redacted snippets, and "suspicious remnants" from `scan_text`
+  (a detector-only pass that lists what still looks like PII). It is built from
+  redacted text only — never the originals — but remnants may themselves be missed
+  personal data, so handle the report like the dataset.
+- `sanitize_json_strings(obj, profile, keep_patterns=…, skip_keys=…)` re-redacts every
+  string in a JSON-like structure (task records, chat-format training examples) with one
+  consistent session, keeping keys and kept values. Apply it when publishing an
+  environment and when exporting training data.
+
+This is a technical safeguard, **not** a HIPAA or GDPR certification: Safe Harbor also
+requires that you have no actual knowledge that what remains could identify someone,
+which only a person reviewing the data can judge.
 
 ## Cost control
 

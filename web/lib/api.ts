@@ -70,7 +70,11 @@ export interface BuilderUpload {
   id: string;
   filename: string;
   size_bytes: number;
-  status: "uploaded" | "processing" | "ready" | "failed";
+  bytes_received: number;
+  source: "upload" | "url";
+  progress: { stage?: string; bytes?: number; total?: number | null; conversations?: number } | null;
+  chunk_bytes: number;
+  status: "receiving" | "uploaded" | "processing" | "ready" | "failed";
   format: { format?: string; mapping?: unknown; warnings?: string[]; skipped_rows?: number } | null;
   n_conversations: number;
   redactions: Record<string, number> | null;
@@ -90,6 +94,59 @@ export interface BuilderProject {
   job: { id: string; kind: string; status: string; progress: string } | null;
   uploads: BuilderUpload[];
   builder_model: string;
+  privacy: BuilderPrivacy;
+}
+export type PrivacyProfile = "off" | "standard" | "strict";
+export interface ReviewResult {
+  reviewed: number;
+  flagged: number;
+  population: number;
+  leak_rate: number;
+  ci_low: number;
+  ci_high: number;
+  threshold: number;
+  passed: boolean;
+  exact: boolean;
+}
+export interface PrivacyReview {
+  id: string;
+  status: "open" | "passed" | "failed" | "outdated";
+  n: number;
+  population: number;
+  threshold: number;
+  profile: PrivacyProfile;
+  created_at: string;
+  flagged?: string[];
+  result?: ReviewResult;
+  reviewed_at?: string;
+}
+export interface BuilderPrivacy {
+  profile: PrivacyProfile;
+  ner: boolean;
+  surrogates: boolean;
+  tier2: "off" | "auto" | "all";
+  threshold: number;
+  review_size: number;
+  signed_off_at: string | null;
+  review: PrivacyReview | null;
+  needs_signoff: boolean;
+  blocked: boolean;
+}
+export interface CorpusConversation {
+  id: string;
+  source_id: string | null;
+  upload_id: string | null;
+  cluster: number | null;
+  turns: { role: string; text: string }[];
+}
+export interface CorpusOverview {
+  conversations: number;
+  unique: number;
+  exact_duplicates: number;
+  near_duplicates: number;
+  clusters: { id: number; label: string; size: number; share: number; terms: string[]; example: string | null }[];
+  stale?: string[];
+  [k: string]: unknown;
 }
 export interface BuilderProjectSummary {
   id: string;
@@ -424,23 +481,103 @@ export const Api = {
   logoutAll: () => api<void>("/api/auth/logout-all", { method: "POST" }),
 };
 
-/** Upload a chat-log file to a builder project (streamed as the raw request body). */
-export async function uploadBuilderFile(ws: string, project: string, file: File): Promise<BuilderUpload> {
-  const headers: Record<string, string> = { "Content-Type": "application/octet-stream" };
+async function authHeaders(extra: Record<string, string> = {}): Promise<Record<string, string>> {
+  const headers: Record<string, string> = { ...extra };
   if (tokenGetter) {
     const t = await tokenGetter();
     if (t) headers.Authorization = `Bearer ${t}`;
   }
-  const res = await fetch(`/api/workspaces/${ws}/builder/projects/${project}/uploads?filename=${encodeURIComponent(file.name)}`, {
-    method: "POST",
-    credentials: "include",
-    headers,
-    body: file,
-  });
-  const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new ApiError(res.status, body?.detail ?? res.statusText);
-  return body as BuilderUpload;
+  return headers;
 }
+
+/**
+ * Upload a chat-log file of any size to a builder project in CHUNK-sized pieces.
+ * Resumable: the upload id is remembered per file (name + size + mtime), and the server
+ * says how many bytes it already has, so re-picking the same file after an interruption
+ * continues where it stopped. `onProgress(sent, total)` fires after every piece.
+ */
+export async function uploadBuilderFile(
+  ws: string,
+  project: string,
+  file: File,
+  onProgress?: (sent: number, total: number) => void,
+): Promise<BuilderUpload> {
+  const base = `/api/workspaces/${ws}/builder/projects/${project}/uploads`;
+  const resumeKey = `envforge.upload.${project}.${file.name}.${file.size}.${file.lastModified}`;
+  let up: BuilderUpload | null = null;
+  try {
+    const saved = localStorage.getItem(resumeKey);
+    if (saved) {
+      const proj = await Api.project(ws, project);
+      up = proj.uploads.find((u) => u.id === saved && u.status === "receiving") ?? null;
+    }
+  } catch {}
+  if (!up) {
+    up = await api<BuilderUpload>(`${base}/init`, { method: "POST", body: JSON.stringify({ filename: file.name, size_bytes: file.size }) });
+    try {
+      localStorage.setItem(resumeKey, up.id);
+    } catch {}
+  }
+  const chunk = up.chunk_bytes || 32 * 1024 * 1024;
+  let offset = up.bytes_received;
+  onProgress?.(offset, file.size);
+  while (offset < file.size) {
+    const res = await fetch(`${base}/${up.id}/chunk?offset=${offset}`, {
+      method: "PUT",
+      credentials: "include",
+      headers: await authHeaders({ "Content-Type": "application/octet-stream" }),
+      body: file.slice(offset, Math.min(offset + chunk, file.size)),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (res.status === 409 && typeof body?.detail?.bytes_received === "number") {
+      offset = body.detail.bytes_received; // the server is elsewhere: resume from its position
+      continue;
+    }
+    if (!res.ok) throw new ApiError(res.status, typeof body?.detail === "string" ? body.detail : res.statusText);
+    offset = body.bytes_received;
+    onProgress?.(offset, file.size);
+  }
+  const done = await api<BuilderUpload>(`${base}/${up.id}/complete`, { method: "POST" });
+  try {
+    localStorage.removeItem(resumeKey);
+  } catch {}
+  return done;
+}
+
+export const importBuilderUrl = (ws: string, project: string, url: string) =>
+  api<BuilderUpload>(`/api/workspaces/${ws}/builder/projects/${project}/uploads/import`, { method: "POST", body: JSON.stringify({ url }) });
+
+export interface PrivacyPatch {
+  profile?: PrivacyProfile;
+  confirm_off?: boolean;
+  ner?: boolean;
+  surrogates?: boolean;
+  tier2?: "off" | "auto" | "all";
+  threshold?: number;
+}
+export const setBuilderPrivacy = (ws: string, project: string, patch: PrivacyPatch) =>
+  api<BuilderProject>(`/api/workspaces/${ws}/builder/projects/${project}/privacy`, { method: "PATCH", body: JSON.stringify(patch) });
+
+export const builderCorpus = (ws: string, project: string) =>
+  api<{ corpus: CorpusOverview | null }>(`/api/workspaces/${ws}/builder/projects/${project}/corpus`);
+
+export const clusterExamples = (ws: string, project: string, cluster: number, n = 3) =>
+  api<{ conversations: CorpusConversation[] }>(`/api/workspaces/${ws}/builder/projects/${project}/corpus/clusters/${cluster}?n=${n}`);
+
+export const startPrivacyReview = (ws: string, project: string, n?: number) =>
+  api<{ review: PrivacyReview; conversations: CorpusConversation[] }>(`/api/workspaces/${ws}/builder/projects/${project}/privacy/review`, {
+    method: "POST",
+    body: JSON.stringify(n ? { n } : {}),
+  });
+
+export const getPrivacyReview = (ws: string, project: string) =>
+  api<{ review: PrivacyReview | null; conversations: CorpusConversation[] }>(`/api/workspaces/${ws}/builder/projects/${project}/privacy/review`);
+
+export const submitPrivacyReview = (ws: string, project: string, reviewId: string, flagged: string[], notes?: Record<string, string>) =>
+  api<BuilderProject>(`/api/workspaces/${ws}/builder/projects/${project}/privacy/review/submit`, {
+    method: "POST",
+    body: JSON.stringify({ review_id: reviewId, flagged, notes }),
+  });
 
 /** Download filtered episodes as JSONL (rejection sampling → training data). */
 export async function downloadExport(ws: string, runIds: string[], minReward: number, format: "chat" | "trajectory"): Promise<number> {
@@ -471,3 +608,6 @@ export const fmtCost = (usd: number | null | undefined) =>
 
 export const fmtTokens = (n: number) =>
   n >= 1_000_000 ? `${(n / 1_000_000).toFixed(2)}M` : n >= 10_000 ? `${Math.round(n / 1000)}k` : n.toLocaleString();
+
+/** Delete a workspace with all its runs, builder projects and files (owner only). */
+export const deleteWorkspace = (id: string) => api<void>(`/api/workspaces/${id}`, { method: "DELETE" });

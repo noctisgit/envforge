@@ -7,6 +7,7 @@ import { useEffect, useState } from "react";
 import { Avatar } from "@/components/AvatarMenu";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { invalidateModelCache } from "@/components/ModelPicker";
+import { Page, PageHeader, Panel } from "@/components/Page";
 import { Api, ApiError, type KeyOut, type Provider } from "@/lib/api";
 import { useAuthState } from "@/lib/auth";
 
@@ -14,7 +15,12 @@ const PROVIDERS: { id: Provider; label: string; hint: string; needsUrl?: boolean
   { id: "anthropic", label: "Anthropic", hint: "sk-ant-… · checked with Anthropic when saved; models like claude-sonnet-5-5" },
   { id: "openai", label: "OpenAI", hint: "sk-… · checked with OpenAI when saved; models like gpt-5-mini" },
   { id: "vercel", label: "Vercel AI Gateway", hint: "AI Gateway key · 400+ models, ids like anthropic/claude-sonnet-4.5" },
-  { id: "vllm", label: "vLLM (self-hosted)", hint: "your GPU box (public host or Tailscale 100.x), e.g. http://100.x.y.z:8000/v1 · key optional · docs/COMPUTE.md", needsUrl: true },
+  {
+    id: "vllm",
+    label: "vLLM (self-hosted)",
+    hint: "your GPU box (public host or Tailscale 100.x), e.g. http://100.x.y.z:8000/v1 · key optional · docs/COMPUTE.md",
+    needsUrl: true,
+  },
 ];
 
 const msgOf = (e: unknown) => (e instanceof ApiError ? e.message : String(e));
@@ -95,130 +101,14 @@ export default function AccountPage() {
     setKeyMsg({ ok: true, text: `${p} key removed.` });
   }
 
-  return (
-    <div className="space-y-6">
-      <div className="flex items-center gap-4">
-        <Avatar name={user.display_name} email={user.email} size={56} />
-        <div>
-          <h1 className="text-lg font-semibold">{user.display_name || user.email}</h1>
-          <div className="text-sm" style={{ color: "var(--muted)" }}>
-            {user.email} · {user.is_admin ? "admin · " : ""}signed in with {local ? "email & password" : "Clerk"}
-          </div>
-        </div>
-      </div>
-
-      <form onSubmit={saveProfile} className="panel grid grid-cols-1 gap-4 p-5 md:grid-cols-3">
-        <div className="md:col-span-3 text-sm font-semibold">Profile</div>
-        <div>
-          <label className="label" htmlFor="name">
-            Display name
-          </label>
-          <input id="name" className="input" value={name} maxLength={120} onChange={(e) => setName(e.target.value)} />
-        </div>
-        <div>
-          <label className="label">Email</label>
-          <input className="input" value={user.email} disabled />
-        </div>
-        <div className="flex items-end gap-3">
-          <button className="btn">Save</button>
-          {profileMsg && <span className="text-sm" style={{ color: "var(--muted)" }}>{profileMsg}</span>}
-        </div>
-      </form>
-
-      <div className="panel space-y-5 p-5">
-        <div>
-          <div className="text-sm font-semibold">Provider keys</div>
-          <p className="mt-1 text-sm" style={{ color: "var(--muted)" }}>
-            Your keys, used by every workspace you run in. They&apos;re encrypted at rest, never shown again after saving, and
-            only decrypted by the worker that executes your runs. Anthropic and OpenAI keys are checked with the provider when
-            you save them, and the model picker then lists exactly the models your key can use.
-          </p>
-        </div>
-        {keyMsg && (
-          <div className="text-sm" style={{ color: keyMsg.ok ? "var(--accent)" : "var(--bad)" }}>
-            {keyMsg.text}
-          </div>
-        )}
-        {PROVIDERS.map((p) => {
-          const existing = keys.find((k) => k.provider === p.id);
-          return (
-            <div key={p.id} className="grid grid-cols-1 gap-3 border-t pt-4 md:grid-cols-6" style={{ borderColor: "var(--line)" }}>
-              <div className="md:col-span-2">
-                <div className="font-medium">{p.label}</div>
-                <div className="text-xs" style={{ color: "var(--muted)" }}>
-                  {p.hint}
-                </div>
-                {existing && (
-                  <div className="mt-1 text-xs">
-                    saved <span className="mono">{existing.masked}</span> · {new Date(existing.updated_at).toLocaleDateString()}
-                    {existing.verified_at && (
-                      <span style={{ color: "var(--good)" }}>
-                        {" "}
-                        · ✓ verified{existing.n_models !== null && ` · ${existing.n_models} models`}
-                      </span>
-                    )}
-                    {existing.verify_note && <div style={{ color: "var(--warn)" }}>{existing.verify_note}</div>}
-                    {!existing.verified_at && !existing.verify_note && (p.id === "vercel" || p.id === "vllm") && (
-                      <span style={{ color: "var(--muted)" }}> · checked on first run</span>
-                    )}
-                  </div>
-                )}
-              </div>
-              {p.needsUrl && (
-                <div className="md:col-span-2">
-                  <label className="label">Base URL</label>
-                  <input className="input mono" value={urls[p.id] ?? ""} onChange={(e) => setUrls({ ...urls, [p.id]: e.target.value })} />
-                </div>
-              )}
-              <div className={p.needsUrl ? "md:col-span-1" : "md:col-span-3"}>
-                <label className="label">{existing ? "Replace key" : "API key"}</label>
-                <input
-                  className="input mono"
-                  type="password"
-                  autoComplete="off"
-                  value={secrets[p.id] ?? ""}
-                  onChange={(e) => setSecrets({ ...secrets, [p.id]: e.target.value })}
-                />
-              </div>
-              <div className="flex items-end gap-2">
-                <button className="btn" type="button" onClick={() => saveKey(p.id)} disabled={busy === p.id || !(secrets[p.id] || (p.needsUrl && urls[p.id]))}>
-                  {busy === p.id ? "Checking…" : "Save"}
-                </button>
-                {existing && (
-                  <button className="btn-ghost" type="button" onClick={() => removeKey(p.id, p.label)}>
-                    Remove
-                  </button>
-                )}
-              </div>
-            </div>
-          );
-        })}
-      </div>
-
-      {local && (
-        <form onSubmit={savePassword} className="panel grid grid-cols-1 gap-4 p-5 md:grid-cols-4">
-          <div className="md:col-span-4 text-sm font-semibold">Change password</div>
-          <input className="input" type="password" placeholder="current password" autoComplete="current-password" value={pw.current} onChange={(e) => setPw({ ...pw, current: e.target.value })} />
-          <input className="input" type="password" placeholder="new password (10+ characters)" autoComplete="new-password" minLength={10} value={pw.next} onChange={(e) => setPw({ ...pw, next: e.target.value })} />
-          <input className="input" type="password" placeholder="repeat new password" autoComplete="new-password" value={pw.again} onChange={(e) => setPw({ ...pw, again: e.target.value })} />
-          <button className="btn justify-center" disabled={!pw.current || pw.next.length < 10}>
-            Change password
-          </button>
-          {pwMsg && (
-            <div className="md:col-span-4 text-sm" style={{ color: pwMsg.ok ? "var(--accent)" : "var(--bad)" }}>
-              {pwMsg.text}
-            </div>
-          )}
-        </form>
-      )}
-
-      <div className="panel flex flex-wrap items-center gap-3 p-5 text-sm">
-        <div className="flex-1">
-          <div className="font-semibold">Sessions</div>
-          <div style={{ color: "var(--muted)" }}>Sign out of envforge on every device and browser, including this one.</div>
+  const sessions = (
+    <Panel title="Sessions">
+      <div className="flex flex-wrap items-center gap-4">
+        <div className="min-w-0 flex-1 text-sm" style={{ color: "var(--muted)" }}>
+          Sign out of envforge on every device and browser, including this one.
         </div>
         <button
-          className="btn-ghost"
+          className="btn-danger"
           onClick={async () => {
             const ok = await confirm({
               title: "Sign out everywhere?",
@@ -234,6 +124,206 @@ export default function AccountPage() {
           Sign out everywhere
         </button>
       </div>
-    </div>
+    </Panel>
+  );
+
+  return (
+    <Page>
+      <PageHeader
+        title="Profile"
+        description="Your account: profile, password, provider keys and sessions. Provider keys live on your account, so every workspace you run in uses the same keys."
+      />
+
+      <div className="grid grid-cols-1 items-start gap-6 xl:grid-cols-2">
+        <Panel title="Profile">
+          <div className="flex items-center gap-4">
+            <Avatar name={user.display_name} email={user.email} size={48} />
+            <div className="min-w-0">
+              <div className="truncate font-medium">{user.display_name || user.email}</div>
+              <div className="truncate text-sm" style={{ color: "var(--muted)" }}>
+                {user.email} · {user.is_admin ? "admin · " : ""}signed in with {local ? "email & password" : "Clerk"}
+              </div>
+            </div>
+          </div>
+          <form onSubmit={saveProfile} className="grid grid-cols-1 items-end gap-4 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]">
+            <div>
+              <label className="label" htmlFor="name">
+                Display name
+              </label>
+              <input id="name" className="input" value={name} maxLength={120} onChange={(e) => setName(e.target.value)} />
+            </div>
+            <div>
+              <label className="label" htmlFor="email">
+                Email
+              </label>
+              <input id="email" className="input" value={user.email} disabled />
+            </div>
+            <button className="btn btn-field">Save</button>
+          </form>
+          {profileMsg && (
+            <div className="text-sm" style={{ color: profileMsg === "Saved." ? "var(--accent)" : "var(--bad)" }}>
+              {profileMsg}
+            </div>
+          )}
+        </Panel>
+
+        {local ? (
+          <Panel title="Change password" hint="Changing it signs out your other devices.">
+            <form onSubmit={savePassword} className="space-y-4">
+              <div className="grid grid-cols-1 items-end gap-4 md:grid-cols-3">
+                <div>
+                  <label className="label" htmlFor="pw-current">
+                    Current password
+                  </label>
+                  <input
+                    id="pw-current"
+                    className="input"
+                    type="password"
+                    autoComplete="current-password"
+                    value={pw.current}
+                    onChange={(e) => setPw({ ...pw, current: e.target.value })}
+                  />
+                </div>
+                <div>
+                  <label className="label" htmlFor="pw-next">
+                    New password
+                  </label>
+                  <input
+                    id="pw-next"
+                    className="input"
+                    type="password"
+                    placeholder="10+ characters"
+                    autoComplete="new-password"
+                    minLength={10}
+                    value={pw.next}
+                    onChange={(e) => setPw({ ...pw, next: e.target.value })}
+                  />
+                </div>
+                <div>
+                  <label className="label" htmlFor="pw-again">
+                    Repeat new password
+                  </label>
+                  <input
+                    id="pw-again"
+                    className="input"
+                    type="password"
+                    autoComplete="new-password"
+                    value={pw.again}
+                    onChange={(e) => setPw({ ...pw, again: e.target.value })}
+                  />
+                </div>
+              </div>
+              <div className="flex flex-wrap items-center gap-3">
+                <button className="btn" disabled={!pw.current || pw.next.length < 10}>
+                  Change password
+                </button>
+                {pwMsg && (
+                  <span className="text-sm" style={{ color: pwMsg.ok ? "var(--accent)" : "var(--bad)" }}>
+                    {pwMsg.text}
+                  </span>
+                )}
+              </div>
+            </form>
+          </Panel>
+        ) : (
+          sessions
+        )}
+      </div>
+
+      <Panel
+        title="Provider keys"
+        hint="Your keys, used by every workspace you run in. They're encrypted at rest, never shown again after saving, and only decrypted by the worker that executes your runs. Anthropic and OpenAI keys are checked with the provider when you save them, and the model picker then lists exactly the models your key can use."
+      >
+        {keyMsg && (
+          <div className="text-sm" style={{ color: keyMsg.ok ? "var(--accent)" : "var(--bad)" }}>
+            {keyMsg.text}
+          </div>
+        )}
+        <div>
+          {PROVIDERS.map((p) => {
+            const existing = keys.find((k) => k.provider === p.id);
+            return (
+              // one grid for every provider: about | inputs | actions. Each column starts
+              // with a label line, so inputs and buttons line up across rows.
+              <div
+                key={p.id}
+                className="grid grid-cols-1 items-start gap-x-6 gap-y-3 border-t py-4 first:border-t-0 first:pt-0 last:pb-0 lg:grid-cols-[minmax(14rem,2fr)_minmax(0,3fr)_12rem]"
+                style={{ borderColor: "var(--line)" }}
+              >
+                <div className="min-w-0">
+                  <div className="font-medium">{p.label}</div>
+                  <div className="text-xs" style={{ color: "var(--muted)" }}>
+                    {p.hint}
+                  </div>
+                  {existing && (
+                    <div className="mt-1 text-xs">
+                      saved <span className="mono">{existing.masked}</span> · {new Date(existing.updated_at).toLocaleDateString()}
+                      {existing.verified_at && (
+                        <span style={{ color: "var(--good)" }}> · ✓ verified{existing.n_models !== null && ` · ${existing.n_models} models`}</span>
+                      )}
+                      {existing.verify_note && <div style={{ color: "var(--warn)" }}>{existing.verify_note}</div>}
+                      {!existing.verified_at && !existing.verify_note && (p.id === "vercel" || p.id === "vllm") && (
+                        <span style={{ color: "var(--muted)" }}> · checked on first run</span>
+                      )}
+                    </div>
+                  )}
+                </div>
+                <div className={`grid grid-cols-1 gap-3 ${p.needsUrl ? "sm:grid-cols-2" : ""}`}>
+                  {p.needsUrl && (
+                    <div>
+                      <label className="label" htmlFor={`url-${p.id}`}>
+                        Base URL
+                      </label>
+                      <input
+                        id={`url-${p.id}`}
+                        className="input mono"
+                        value={urls[p.id] ?? ""}
+                        onChange={(e) => setUrls({ ...urls, [p.id]: e.target.value })}
+                      />
+                    </div>
+                  )}
+                  <div>
+                    <label className="label" htmlFor={`key-${p.id}`}>
+                      {existing ? "Replace key" : "API key"}
+                      {p.needsUrl && " (optional)"}
+                    </label>
+                    <input
+                      id={`key-${p.id}`}
+                      className="input mono"
+                      type="password"
+                      autoComplete="off"
+                      value={secrets[p.id] ?? ""}
+                      onChange={(e) => setSecrets({ ...secrets, [p.id]: e.target.value })}
+                    />
+                  </div>
+                </div>
+                <div>
+                  <span className="label invisible hidden lg:block" aria-hidden>
+                    actions
+                  </span>
+                  <div className="flex gap-2">
+                    <button
+                      className="btn btn-field min-w-[6rem]"
+                      type="button"
+                      onClick={() => saveKey(p.id)}
+                      disabled={busy === p.id || !(secrets[p.id] || (p.needsUrl && urls[p.id]))}
+                    >
+                      {busy === p.id ? "Checking…" : "Save"}
+                    </button>
+                    {existing && (
+                      <button className="btn-ghost btn-field" type="button" onClick={() => removeKey(p.id, p.label)}>
+                        Remove
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </Panel>
+
+      {local && sessions}
+    </Page>
   );
 }

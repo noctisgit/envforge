@@ -1,0 +1,7 @@
+# Build context for deploy/gpu/Dockerfile (BuildKit reads <Dockerfile>.dockerignore).
+# Allow-list: the image needs only these files, not .venv, data/ or the web app.
+*
+!envforge/train/sft.py
+!deploy/gpu/entrypoint.sh
+!deploy/gpu/sshd_config
+!deploy/gpu/requirements-train.txt
