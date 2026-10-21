@@ -159,7 +159,8 @@ function CheckFacts({ box }: { box: GpuBox }) {
   const r = box.check_result;
   if (!r) return <p className="hint">Not checked yet. A check connects over SSH and reports the GPU, driver, disk and whether vLLM is ready.</p>;
   const gpu = r.gpus[0];
-  const vllm = r.runtime === "pod" ? (r.vllm_python ? `vLLM ${r.vllm_python}` : "not importable") : r.vllm_image ? "image pulled" : "image not pulled yet";
+  const reached = r.checks[0]?.ok;  // the first check is ssh itself: without it nothing below is known
+  const vllm = !reached ? "?" : r.runtime === "pod" ? (r.vllm_python ? `vLLM ${r.vllm_python}` : "not importable") : r.vllm_image ? "image pulled" : "image not pulled yet";
   const facts = [
     { label: "GPU", value: gpu ? `${r.gpus.length > 1 ? `${r.gpus.length}× ` : ""}${gpu.name}` : "?" },
     { label: "VRAM", value: gpu ? gib(gpu.memory_total_mib) : "?" },
