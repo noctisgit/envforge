@@ -295,6 +295,33 @@ def logs(box: ComputeBox, name: str, tail: int = 200, *, runtime: Runtime = "doc
     return r.stdout + r.stderr
 
 
+def poll_once(
+    box: ComputeBox, name: str, cursor: int = 0, *, runtime: Runtime = "docker"
+) -> tuple[list[dict[str, Any]], int, TrainStatus]:
+    """One progress poll: `(new events, new cursor, status)`.
+
+    The cursor remembers what was already read, so callers that poll on their own
+    schedule (the web worker, `follow`) only get each event once. Its meaning depends
+    on the runtime: in docker mode it counts *events* (we re-read `docker logs` whole);
+    in pod mode it counts complete log *lines* consumed (we ask `tail -n +K` for the
+    rest). Status is read first, so when it says "exited" the log read is complete.
+    """
+    if check_runtime(runtime) == "pod":
+        st = status(box, name, runtime="pod")
+        chunk = process.read_log_lines(box, process_name(name), start=cursor)
+        lines = chunk.split("\n")
+        partial = lines.pop()  # text after the last newline ("" if none)
+        cursor += len(lines)
+        # a last line without a newline may still be being written: parse it at the end
+        if not st.running and partial:
+            lines.append(partial)
+        return parse_events("\n".join(lines)), cursor, st
+    st = status(box, name)
+    r = box.run(["docker", "logs", container_name(name)], timeout=300)
+    events = parse_events(r.stdout + r.stderr)
+    return events[cursor:], len(events), st
+
+
 def follow(
     box: ComputeBox,
     name: str,
@@ -305,42 +332,10 @@ def follow(
 ) -> Iterator[dict[str, Any]]:
     """Yield new progress events until the job exits, then a final
     `{"event": "exit", "code": n}`. Polls the logs (cheap; two ssh calls per poll)."""
-    if check_runtime(runtime) == "pod":
-        yield from _follow_pod(box, name, poll_s=poll_s, sleep=sleep)
-        return
-    seen = 0
+    cursor = 0
     while True:
-        st = status(box, name)
-        r = box.run(["docker", "logs", container_name(name)])
-        events = parse_events(r.stdout + r.stderr)
-        yield from events[seen:]
-        seen = len(events)
-        if not st.running:
-            yield {"event": "exit", "code": st.exit_code if st.exists else None}
-            return
-        sleep(poll_s)
-
-
-def _follow_pod(
-    box: ComputeBox, name: str, *, poll_s: float, sleep: Callable[[float], None]
-) -> Iterator[dict[str, Any]]:
-    """Pod mode: read only the *new* lines of the log file on each poll.
-
-    Unlike `docker logs`, which we re-read whole, we remember how many complete lines
-    we have consumed and ask `tail -n +K` for the rest. A last line without a trailing
-    newline may still be being written, so it is only parsed once the job has ended.
-    """
-    pname = process_name(name)
-    consumed = 0
-    while True:
-        st = status(box, name, runtime="pod")  # status first: then the log read is complete
-        chunk = process.read_log_lines(box, pname, start=consumed)
-        lines = chunk.split("\n")
-        partial = lines.pop()  # text after the last newline ("" if none)
-        consumed += len(lines)
-        if not st.running and partial:
-            lines.append(partial)
-        yield from parse_events("\n".join(lines))
+        events, cursor, st = poll_once(box, name, cursor, runtime=runtime)
+        yield from events
         if not st.running:
             yield {"event": "exit", "code": st.exit_code if st.exists else None}
             return

@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -80,10 +81,19 @@ def build_dataset(
     *,
     min_reward: float = 1.0,
     val_frac: float = 0.05,
+    best_per_task: bool = True,
+    pack_resolver: Callable[[str], Any] | None = None,
 ) -> DatasetReport:
-    """Filter runs to their best episodes, de-duplicate by task, split by task, write files."""
+    """Filter runs to their best episodes, de-duplicate by task, split by task, write files.
+
+    `best_per_task=False` keeps every passing episode (several per task when runs
+    repeat a task); the split is still by task, so a task never lands on both sides.
+    `pack_resolver` maps a pack name to its Environment class for the tool schemas
+    (default `get_pack`; the web app passes one that also knows builder-published packs).
+    """
     report = DatasetReport(out_dir=out_dir)
     best: dict[TaskKey, Trajectory] = {}
+    extra: dict[TaskKey, list[Trajectory]] = {}  # best_per_task=False: the other passes
     sources = []
     for rd in run_dirs:
         trajs = load_run(rd)
@@ -92,30 +102,40 @@ def build_dataset(
         for t in filter_trajectories(trajs, min_reward=min_reward):
             k = task_key(t)
             if k in best:
-                report.duplicates += 1
-                best[k] = _better(best[k], t)
+                if best_per_task:
+                    report.duplicates += 1
+                    best[k] = _better(best[k], t)
+                else:
+                    extra.setdefault(k, []).append(t)
             else:
                 best[k] = t
     if not best:
         raise ValueError(f"no episodes with reward >= {min_reward} in {len(run_dirs)} run(s)")
 
-    train = [t for k, t in sorted(best.items()) if not _is_val(k, val_frac)]
-    val = [t for k, t in sorted(best.items()) if _is_val(k, val_frac)]
-    if not train:  # tiny datasets: keep at least one training example
-        train, val = val[:1], val[1:]
+    def rows(k: TaskKey) -> list[Trajectory]:
+        return [best[k], *extra.get(k, [])]
+
+    train = [t for k in sorted(best) if not _is_val(k, val_frac) for t in rows(k)]
+    val = [t for k in sorted(best) if _is_val(k, val_frac) for t in rows(k)]
+    if not train:  # tiny datasets: keep at least one training task
+        first_val = sorted(k for k in best if _is_val(k, val_frac))[0]
+        train = rows(first_val)
+        val = [t for k in sorted(best) if _is_val(k, val_frac) and k != first_val for t in rows(k)]
 
     packs = sorted({k[0] for k in best})
-    tools = tool_schemas(get_pack(packs[0])) if len(packs) == 1 else None
+    resolve = pack_resolver or get_pack
+    tools = tool_schemas(resolve(packs[0])) if len(packs) == 1 else None
     out_dir.mkdir(parents=True, exist_ok=True)
-    for name, rows in (("train.jsonl", train), ("val.jsonl", val)):
+    for name, split in (("train.jsonl", train), ("val.jsonl", val)):
         with (out_dir / name).open("w", encoding="utf-8") as f:
-            f.writelines(dataset_lines(rows, fmt="chat", tools=tools))
+            f.writelines(dataset_lines(split, fmt="chat", tools=tools))
 
-    report.kept = len(best)
+    report.kept = len(train) + len(val)
     report.n_train, report.n_val = len(train), len(val)
-    for k, t in best.items():
-        report.by_pack_tier[(k[0], k[1])] += 1
-        report.models[t.model] += 1
+    for k in best:
+        for t in rows(k):
+            report.by_pack_tier[(k[0], k[1])] += 1
+            report.models[t.model] += 1
     seeds: dict[str, list[int]] = {}
     for p, _tier, s in best:
         seeds.setdefault(p, []).append(s)
@@ -124,6 +144,7 @@ def build_dataset(
         "created_at": datetime.now(UTC).isoformat(),
         "min_reward": min_reward,
         "val_frac": val_frac,
+        "best_per_task": best_per_task,
         "sources": sources,
         "counts": {
             "episodes_seen": report.total,

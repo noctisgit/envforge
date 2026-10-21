@@ -183,3 +183,65 @@ def gpu_info(box: ComputeBox) -> list[GPUInfo]:
     """List the box's GPUs with memory and utilization."""
     r = box.run(GPU_QUERY, timeout=30, check=True)
     return parse_gpu_csv(r.stdout)
+
+
+# ---------------------------------------------------------------------- box facts
+
+
+# One ssh round trip that reports what the web UI shows next to a box. A constant
+#: script (the only interpolated value is the pinned image name, quoted), so nothing
+#: user-supplied ever reaches the remote shell. Each line is `key=value`; a missing
+#: tool just leaves its value empty.
+def facts_script(vllm_image: str) -> str:
+    """The remote script behind `box_facts` (exposed for tests)."""
+    import shlex
+
+    image = shlex.quote(vllm_image)
+    return "\n".join(
+        [
+            'echo "driver=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n1)"',  # fmt: skip
+            "echo \"cuda=$(nvidia-smi 2>/dev/null | sed -n 's/.*CUDA Version: *\\([0-9.]*\\).*/\\1/p' | head -n1)\"",  # fmt: skip
+            "echo \"disk_free_kb=$(df -Pk /root 2>/dev/null | awk 'NR==2{print $4}')\"",
+            f"if docker image inspect {image} >/dev/null 2>&1; then echo vllm_image=yes; else echo vllm_image=no; fi",  # fmt: skip
+            "echo \"vllm_python=$(python3 -c 'import vllm; print(vllm.__version__)' 2>/dev/null)\"",
+        ]
+    )
+
+
+@dataclass(frozen=True)
+class BoxFacts:
+    """Driver/CUDA versions, free disk under /root and whether vLLM is ready to run."""
+
+    driver: str | None
+    cuda: str | None
+    disk_free_gib: float | None
+    vllm_image: bool  # docker runtime: the pinned vLLM image is already pulled
+    vllm_python: str | None  # pod runtime: `import vllm` works (its version)
+
+
+def parse_facts(text: str) -> BoxFacts:
+    """Parse the `key=value` lines printed by `facts_script`."""
+    kv: dict[str, str] = {}
+    for line in text.splitlines():
+        if "=" in line:
+            k, v = line.split("=", 1)
+            kv[k.strip()] = v.strip()
+    disk = kv.get("disk_free_kb", "")
+    return BoxFacts(
+        driver=kv.get("driver") or None,
+        cuda=kv.get("cuda") or None,
+        disk_free_gib=round(int(disk) / 1024**2, 1) if disk.isdigit() else None,
+        vllm_image=kv.get("vllm_image") == "yes",
+        vllm_python=kv.get("vllm_python") or None,
+    )
+
+
+def box_facts(box: ComputeBox, *, vllm_image: str | None = None) -> BoxFacts:
+    """Driver, CUDA, free disk and vLLM presence in one ssh call (never raises on a
+    missing tool; raises `ComputeError` only if ssh itself fails)."""
+    from envforge.compute.vllm import DEFAULT_VLLM_IMAGE
+
+    r = box.run(facts_script(vllm_image or DEFAULT_VLLM_IMAGE), timeout=120)
+    if r.returncode == 255:
+        r.raise_for_status(f"facts on {box.host}")
+    return parse_facts(r.stdout)
