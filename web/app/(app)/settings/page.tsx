@@ -11,6 +11,7 @@ import { HubModelPicker } from "@/components/HubModelPicker";
 import { ModelPicker } from "@/components/ModelPicker";
 import { WorkspaceMark } from "@/components/Avatar";
 import { Page, PageHeader, Panel } from "@/components/Page";
+import { SettingsTabs } from "@/components/SettingsTabs";
 import { errorText, useToast } from "@/components/Toast";
 import { Api, deleteWorkspace, type Pack } from "@/lib/api";
 import { useWorkspace } from "@/lib/workspace";
@@ -133,6 +134,7 @@ export default function WorkspaceSettingsPage() {
           </>
         }
       />
+      <SettingsTabs active="general" />
 
       <div className="flex flex-wrap items-start gap-6">
         <form onSubmit={saveDefaults} aria-label="Defaults" className="panel min-w-0 flex-[2_1_520px] space-y-5 p-5">

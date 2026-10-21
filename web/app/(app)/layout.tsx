@@ -15,7 +15,15 @@ const NAV: { group?: string; items: { href: string; label: string; also?: string
   { items: [{ href: "/home", label: "Home" }] },
   { group: "Build", items: [{ href: "/environments", label: "Environments" }, { href: "/builder", label: "Builder" }] },
   { group: "Evaluate", items: [{ href: "/runs", label: "Runs", also: ["/compare"] }] },
-  { group: "Train", items: [{ href: "/train", label: "Train a model" }] },
+  {
+    group: "Train",
+    items: [
+      { href: "/train", label: "Guide" },
+      { href: "/datasets", label: "Datasets" },
+      { href: "/training", label: "Fine-tune" },
+      { href: "/models", label: "Models" },
+    ],
+  },
 ];
 
 function NavLink({ href, active, children, onNavigate }: { href: string; active: boolean; children: React.ReactNode; onNavigate?: () => void }) {

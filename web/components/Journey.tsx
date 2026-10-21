@@ -1,16 +1,15 @@
 "use client";
 
 // The step-by-step guide for one goal (lib/journey.ts): a numbered list of steps, each
-// with its status and the one action that moves it forward. Steps that still run on the
-// command line show the exact commands, filled in with this workspace's runs and models.
+// with its status and the one action that moves it forward: a pre-filled run, or a link
+// to the page where the step happens (GPU boxes, Datasets, Fine-tune, Models).
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { CodeBlock } from "@/components/CodeBlock";
-import { ExportButton } from "@/components/ExportButton";
 import { useToast } from "@/components/Toast";
-import { Api, type Run, type Workspace } from "@/lib/api";
+import { Api, Compute, type Run, type Workspace } from "@/lib/api";
 import {
   EVAL_SEED,
   TRAIN_SEED,
@@ -30,19 +29,30 @@ export function useJourneyData(ws: Workspace | null) {
   const [data, setData] = useState<JourneyData | null>(null);
   const load = useCallback(async () => {
     if (!ws) return;
-    const [keys, runs, packs, projects] = await Promise.all([
+    const [keys, runs, packs, projects, boxes, datasets, trainings, adapters] = await Promise.all([
       Api.keys().catch(() => []),
       Api.runs(ws.id),
       Api.wsPacks(ws.id).catch(() => []),
       Api.projects(ws.id).catch(() => []),
+      Compute.boxes(ws.id)
+        .then((b) => b.boxes)
+        .catch(() => []),
+      Compute.datasets(ws.id).catch(() => []),
+      Compute.trainings(ws.id)
+        .then((t) => t.jobs)
+        .catch(() => []),
+      Compute.adapters(ws.id).catch(() => []),
     ]);
-    setData({ keys, runs, packs, projects, marks: loadMarks(ws.id) });
+    setData({ keys, runs, packs, projects, boxes, datasets, trainings, adapters, marks: loadMarks(ws.id) });
   }, [ws]);
   useEffect(() => {
     setData(null);
     load().catch(() => {});
   }, [load]);
-  const active = data?.runs.some((r) => r.status === "queued" || r.status === "running");
+  const active =
+    data?.runs.some((r) => r.status === "queued" || r.status === "running") ||
+    data?.trainings?.some((t) => ["queued", "starting", "running", "fetching"].includes(t.status)) ||
+    data?.boxes?.some((b) => b.job);
   useEffect(() => {
     if (!active) return;
     const t = setInterval(() => load().catch(() => {}), 4000);
@@ -179,7 +189,8 @@ function StepBody({ step, ws, data, onChange }: { step: Step; goal: GoalId; ws: 
   const teacherModel = teacherEval[0]?.model ?? (modelRole(ws.default_model) === "teacher" ? ws.default_model : "anthropic:claude-sonnet-5-5");
   const vllm = data.keys.find((k) => k.provider === "vllm" && k.base_url);
   const base = ws.train_base_model || "Qwen/Qwen2.5-3B-Instruct";
-  const datasetName = `${pack.replace(/[^a-z0-9_-]/gi, "-")}-v1`.toLowerCase();
+  const serving = data.boxes?.find((b) => b.serve_state === "serving");
+  const adapter = data.adapters?.[0];
   const markAnd = (id: string) => () => {
     saveMark(ws.id, id, true);
     onChange();
@@ -203,14 +214,6 @@ function StepBody({ step, ws, data, onChange }: { step: Step; goal: GoalId; ws: 
       Add a provider key
     </Link>
   );
-
-  // the shell preamble every command-line step shares: the CLI reads the web app's runs
-  const preamble = `# On the envforge server, in the folder where you ran ./install.sh (once: uv sync).
-# The web app keeps its runs in a Docker volume; point the CLI at it (needs root):
-export ENVFORGE_DATA_DIR=$(docker volume inspect -f '{{ .Mountpoint }}' envforge_envdata)
-RUNS=$ENVFORGE_DATA_DIR/workspaces/${ws.slug}/runs`;
-  const gpuEnv = `# your GPU box over Tailscale (see docs/COMPUTE.md); drop RUNTIME on a plain VM
-export ENVFORGE_GPU_HOST=gpu-1 ENVFORGE_GPU_KEY=~/.ssh/id_ed25519_gpu ENVFORGE_GPU_RUNTIME=pod`;
 
   switch (step.id) {
     case "key":
@@ -317,22 +320,16 @@ export ENVFORGE_GPU_HOST=gpu-1 ENVFORGE_GPU_KEY=~/.ssh/id_ed25519_gpu ENVFORGE_G
       return (
         <div className="space-y-3">
           <p>
-            Rent a GPU with ~24 GB or more (an L40 or A40 on RunPod) running{" "}
-            <span className="mono">ghcr.io/noctisgit/envforge-gpu</span>, join it to your tailnet as <span className="mono">gpu-1</span>, then start vLLM from the
-            server:
-          </p>
-          <CodeBlock
-            label="serve the open model"
-            code={`${gpuEnv}
-uv run envforge compute check
-uv run envforge compute vllm-up ${base} --bind 127.0.0.1`}
-          />
-          <p>
-            Then add the vLLM provider with base URL <span className="mono">http://gpu-1.&lt;your-tailnet&gt;.ts.net:8000/v1</span>.
+            Rent a GPU with ~24 GB or more (an L40S or A100 on RunPod, Vast or Lambda; on RunPod/Vast run{" "}
+            <span className="mono">ghcr.io/noctisgit/envforge-gpu</span>), reach it over Tailscale or SSH, then add it here, check it and serve{" "}
+            <span className="mono">{base}</span>. It then shows up in the model picker.
           </p>
           <div className="flex flex-wrap gap-2">
-            <Link href="/account#keys" className="btn">
-              Add the vLLM URL
+            <Link href="/settings/gpu-boxes" className="btn">
+              {data.boxes?.length ? (serving ? `Open ${serving.name}` : "Serve the open model") : "Add a GPU box"}
+            </Link>
+            <Link href="/account#keys" className="btn-ghost">
+              Or use your own vLLM URL
             </Link>
           </div>
         </div>
@@ -362,73 +359,48 @@ uv run envforge compute vllm-up ${base} --bind 127.0.0.1`}
 
     case "dataset": {
       const ids = teacherTrain.map((r) => r.id);
-      return (
-        <div className="space-y-3">
-          {ids.length === 0 ? (
-            <p className="hint">Collect the teacher&apos;s solutions on training seeds first.</p>
-          ) : (
-            <>
-              <CodeBlock
-                label="build the dataset (clean solves, one per task, with a validation split)"
-                code={`${preamble}
-uv run envforge train dataset ${ids.map((id) => `$RUNS/${id}`).join(" \\\n    ")} \\
-    --name ${datasetName} --min-reward 1.0 --workspace ${ws.slug}${
-                  studentEval[0]
-                    ? `
-# make sure the evaluation run shares no task with the dataset
-uv run envforge train check-overlap ${datasetName} $RUNS/${studentEval[0].id} --workspace ${ws.slug}`
-                    : ""
-                }`}
-              />
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="hint">Or just look at the data:</span>
-                <ExportButton wsId={ws.id} runIds={ids} />
-              </div>
-            </>
-          )}
+      return ids.length === 0 ? (
+        <p className="hint">Collect the teacher&apos;s solutions on training seeds first.</p>
+      ) : (
+        <div className="flex flex-wrap items-center gap-2">
+          <Link href={`/datasets?runs=${ids.map(encodeURIComponent).join(",")}`} className="btn">
+            Build a dataset from {ids.length} teacher run{ids.length === 1 ? "" : "s"}
+          </Link>
+          <span className="hint">The preview warns if any evaluation run shares a task with it.</span>
         </div>
       );
     }
 
     case "train":
       return (
-        <CodeBlock
-          label="fine-tune on the GPU box, then copy the adapter home"
-          code={`${preamble}
-${gpuEnv}
-uv run envforge train sft ${datasetName} --base ${base} --workspace ${ws.slug}
-# add --max-steps 20 for a quick smoke test first; --detach to leave it running
-uv run envforge train fetch ${datasetName} --workspace ${ws.slug}`}
-        />
+        <div className="flex flex-wrap items-center gap-2">
+          <Link href={data.datasets?.[0] ? `/training?dataset=${data.datasets[0].id}` : "/training"} className="btn">
+            {data.trainings?.length ? "Open Fine-tune" : "Fine-tune a LoRA adapter"}
+          </Link>
+          {!data.boxes?.length && <span className="hint">Needs a GPU box from the step above.</span>}
+        </div>
       );
 
     case "test": {
       const baseline = studentEval[0];
-      const adapter = adapterEval[0];
+      const tested = adapterEval[0];
       return (
-        <div className="space-y-3">
-          <CodeBlock
-            label="serve the base model with your adapter"
-            code={`${gpuEnv}
-uv run envforge compute vllm-up ${base} --bind 127.0.0.1 --lora ${datasetName} --max-lora-rank 16`}
-          />
-          <div className="flex flex-wrap gap-2">
-            <Link href={newRunHref({ pack, model: `vllm:${datasetName}`, seed: EVAL_SEED, episodes: baseline?.episodes ?? 50, label: "student + adapter" })} className="btn">
-              Run vllm:{datasetName} on evaluation seeds
+        <div className="flex flex-wrap gap-2">
+          <Link href={adapter ? `/models#${adapter.id}` : "/models"} className="btn">
+            {adapter ? `Test ${adapter.name} on evaluation seeds` : "Open Models"}
+          </Link>
+          {baseline && tested && (
+            <Link href={compareHref([baseline, tested, ...(teacherEval[0] ? [teacherEval[0]] : [])])} className="btn-ghost">
+              Compare before / after{teacherEval[0] ? " / teacher" : ""}
             </Link>
-            {baseline && adapter && (
-              <Link href={compareHref([baseline, adapter, ...(teacherEval[0] ? [teacherEval[0]] : [])])} className="btn-ghost">
-                Compare before / after{teacherEval[0] ? " / teacher" : ""}
-              </Link>
-            )}
-          </div>
+          )}
         </div>
       );
     }
 
     case "use": {
-      const url = vllm?.base_url ?? "http://gpu-1.<your-tailnet>.ts.net:8000/v1";
-      const model = adapterEval[0]?.model.slice(5) ?? datasetName;
+      const url = serving?.endpoint_url ?? vllm?.base_url ?? "http://<gpu-box>:8000/v1";
+      const model = adapter?.name ?? adapterEval[0]?.model.slice(5) ?? "<adapter>";
       return (
         <div className="space-y-3">
           <p>vLLM speaks the OpenAI API, so any OpenAI client, agent framework or chat UI (e.g. Open WebUI) can use your model:</p>
@@ -436,17 +408,21 @@ uv run envforge compute vllm-up ${base} --bind 127.0.0.1 --lora ${datasetName} -
             label="python"
             code={`from openai import OpenAI
 
-client = OpenAI(base_url="${url}", api_key="<your vLLM key, or anything>")
+client = OpenAI(base_url="${url}", api_key="<the vLLM key set on the box>")
 reply = client.chat.completions.create(
     model="${model}",
     messages=[{"role": "user", "content": "…"}],
 )
 print(reply.choices[0].message.content)`}
           />
-          <p className="hint">
-            The adapter files are on the server under <span className="mono">workspaces/{ws.slug}/adapters/{model}/</span> in the data volume. They only
-            work on top of <span className="mono">{base}</span>; merge them into it to run with Ollama or LM Studio.
-          </p>
+          <div className="flex flex-wrap items-center gap-2">
+            <Link href={adapter ? `/models#${adapter.id}` : "/models"} className="btn-ghost">
+              Endpoint, curl and download on Models
+            </Link>
+            <span className="hint">
+              The adapter only works on top of <span className="mono">{base}</span>.
+            </span>
+          </div>
         </div>
       );
     }

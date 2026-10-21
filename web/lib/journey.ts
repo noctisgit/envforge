@@ -2,12 +2,13 @@
 // get them there, each with a status worked out from real data (keys, runs, packs,
 // builder projects). Powers the Home page, the onboarding chooser and "next step" cards.
 //
-// Steps 4–6 of distillation (train, test, use) run from the command line for now, so the
-// app can't always see them happen. Those steps are inferred where possible (a run on an
-// adapter means training happened) and can be marked done by hand; that mark, and the
-// chosen goal, live in this browser (localStorage), per workspace.
+// The GPU, dataset, training, test and use steps of distillation happen on the GPU boxes,
+// Datasets, Fine-tune and Models pages, so their status comes from those records (a box
+// serving, a saved dataset, a trained adapter, a run on it). Work done on the command line
+// still counts where it shows up (a vLLM key, a run on an adapter), and "use it" can be
+// marked done by hand; that mark, and the chosen goal, live in this browser, per workspace.
 
-import type { BuilderProjectSummary, KeyOut, Pack, Run } from "@/lib/api";
+import type { AdapterRow, BuilderProjectSummary, DatasetRow, GpuBox, KeyOut, Pack, Run, TrainingJob } from "@/lib/api";
 
 export type GoalId = "compare" | "build" | "distill" | "explore";
 
@@ -76,6 +77,10 @@ export interface JourneyData {
   packs: Pack[];
   projects: BuilderProjectSummary[];
   marks: Record<string, boolean>; // steps marked done by hand
+  boxes?: GpuBox[];
+  datasets?: DatasetRow[];
+  trainings?: TrainingJob[];
+  adapters?: AdapterRow[];
 }
 
 const completed = (rs: Run[]) => rs.filter((r) => r.status === "completed");
@@ -198,7 +203,12 @@ export function stepsFor(goal: GoalId, d: JourneyData): Step[] {
     const teacherTrain = done.filter((r) => isTrainingRun(r) && modelRole(r.model) === "teacher");
     const adapterEval = evalRuns.filter((r) => modelRole(r.model) === "student + adapter");
     const solved = teacherTrain.reduce((n, r) => n + Math.round((r.metrics?.overall.solve_rate ?? 0) * r.progress), 0);
-    const trained = adapterEval.length > 0 || done.some((r) => modelRole(r.model) === "student + adapter");
+    const adapters = d.adapters ?? [];
+    const trained = adapters.length > 0 || adapterEval.length > 0 || done.some((r) => modelRole(r.model) === "student + adapter");
+    const serving = (d.boxes ?? []).find((b) => b.serve_state === "serving");
+    const box = serving ?? (d.boxes ?? [])[0];
+    const datasets = d.datasets ?? [];
+    const training = (d.trainings ?? []).find((t) => ["queued", "starting", "running", "fetching"].includes(t.status));
     steps.push(
       keyStep(true),
       {
@@ -211,10 +221,9 @@ export function stepsFor(goal: GoalId, d: JourneyData): Step[] {
       {
         id: "gpu",
         title: "Connect a GPU box with vLLM",
-        why: "Rent a GPU (RunPod, Vast), serve the open model with vLLM, and add its URL as the vLLM provider.",
-        status: vllm ? "done" : "todo",
-        detail: vllm ? vllm.base_url ?? undefined : undefined,
-        cli: true,
+        why: "Rent a GPU (RunPod, Vast, Lambda), add it under Settings → GPU boxes, check it, and serve the open model with vLLM.",
+        status: serving || vllm ? "done" : "todo",
+        detail: serving ? `${serving.name} serving ${serving.served_model}` : vllm ? vllm.base_url ?? undefined : box ? `${box.name} added, not serving` : undefined,
       },
       {
         id: "student-eval",
@@ -234,17 +243,15 @@ export function stepsFor(goal: GoalId, d: JourneyData): Step[] {
         id: "dataset",
         title: "Build the training dataset",
         why: "Keep only the clean solves, one per task, with a held-out validation split.",
-        status: trained || d.marks.dataset ? "done" : "todo",
-        manual: true,
-        cli: true,
+        status: datasets.length || trained || d.marks.dataset ? "done" : "todo",
+        detail: datasets.length ? `${datasets[0].name}: ${datasets[0].n_train} training examples` : undefined,
       },
       {
         id: "train",
         title: "Fine-tune a LoRA adapter",
         why: "Train a small add-on to the open model on the GPU box (about 20–60 min for a 7B model).",
         status: trained || d.marks.train ? "done" : "todo",
-        manual: true,
-        cli: true,
+        detail: adapters.length ? `${adapters[0].name} on ${adapters[0].base_model}` : training ? `${training.adapter_name}: ${training.status}` : undefined,
       },
       {
         id: "test",
@@ -252,7 +259,6 @@ export function stepsFor(goal: GoalId, d: JourneyData): Step[] {
         why: "Serve base + adapter and run the same evaluation seeds. The gain over the baseline is what it learned.",
         status: adapterEval.length ? "done" : "todo",
         detail: adapterEval.length ? adapterEval[0].model : undefined,
-        cli: true,
       },
       {
         id: "use",
@@ -260,7 +266,6 @@ export function stepsFor(goal: GoalId, d: JourneyData): Step[] {
         why: "Call it through vLLM's OpenAI-compatible API from your own apps, or download the adapter.",
         status: d.marks.use ? "done" : "todo",
         manual: true,
-        cli: true,
       },
     );
   }

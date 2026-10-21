@@ -613,3 +613,224 @@ export const fmtTokens = (n: number) =>
 
 /** Delete a workspace with all its runs, builder projects and files (owner only). */
 export const deleteWorkspace = (id: string) => api<void>(`/api/workspaces/${id}`, { method: "DELETE" });
+
+// ---- GPU boxes, datasets, training, adapters (Phase 2/3 in the browser) ----
+
+export interface BoxCheck {
+  runtime: "docker" | "pod";
+  support: { docker: boolean; pod: boolean } | null;
+  checks: { name: string; ok: boolean; detail: string }[];
+  gpus: { name: string; memory_total_mib: number | null; memory_used_mib: number | null; utilization_pct: number | null }[];
+  driver: string | null;
+  cuda: string | null;
+  disk_free_gib: number | null;
+  vllm_image: boolean | null;
+  vllm_python: string | null;
+  problems: string[];
+}
+export interface GpuBox {
+  id: string;
+  name: string;
+  host: string;
+  port: number;
+  user: string;
+  runtime: "docker" | "pod" | "auto";
+  detected_runtime: "docker" | "pod" | null;
+  ssh_key_fingerprint: string; // masked
+  vllm_key: string | null; // masked
+  vllm_key_generated: boolean;
+  hf_token: string | null; // masked
+  vllm_port: number;
+  endpoint_host: string | null;
+  bind: string | null;
+  hourly_usd: number | null;
+  status: "unknown" | "ok" | "degraded" | "unreachable";
+  check_result: BoxCheck | null;
+  checked_at: string | null;
+  serve_state: "stopped" | "starting" | "serving" | "stopping" | "failed";
+  served_model: string | null;
+  served_adapters: string[];
+  endpoint_url: string | null;
+  serve_error: string | null;
+  created_at: string;
+  job: { id: string; kind: string; status: string; progress: string } | null;
+}
+export interface BoxesResponse {
+  boxes: GpuBox[];
+  can_manage: boolean;
+  admin_only: boolean;
+}
+export interface BoxIn {
+  name: string;
+  host: string;
+  port: number;
+  user: string;
+  ssh_private_key: string;
+  runtime: "docker" | "pod" | "auto";
+  vllm_port: number;
+  endpoint_host?: string | null;
+  bind?: string | null;
+  vllm_api_key?: string | null;
+  hf_token?: string | null;
+  hourly_usd?: number | null;
+}
+
+export interface DatasetSource {
+  id: string;
+  label: string;
+  pack: string;
+  model: string;
+  episodes: number;
+  seed_start: number;
+  created_at: string;
+  solve_rate: number | null;
+  eligible: boolean;
+  reason: string | null;
+}
+export interface DatasetFilters {
+  run_ids: string[];
+  min_reward: number;
+  val_frac: number;
+  best_per_task: boolean;
+}
+export interface DatasetPreview {
+  kept: number;
+  n_train: number;
+  n_val: number;
+  tasks: number;
+  episodes_seen?: number;
+  duplicates_dropped?: number;
+  examples_per_task?: { min: number; max: number; mean: number };
+  by_pack_tier?: Record<string, number>;
+  models?: Record<string, number>;
+  packs: string[];
+  overlap: { run_id: string; label: string; model: string; tasks: number; sample: string[] }[];
+  warnings: string[];
+}
+export interface DatasetRow {
+  id: string;
+  name: string;
+  source_runs: string[];
+  filters: { min_reward: number; val_frac: number; best_per_task: boolean };
+  packs: string[];
+  counts: DatasetPreview;
+  n_train: number;
+  n_val: number;
+  created_at: string;
+  tasks: Record<string, number[][]> | null;
+}
+
+export interface TrainParams {
+  epochs: number;
+  lr: number;
+  lora_r: number;
+  lora_alpha: number;
+  max_len: number;
+  batch_size: number;
+  grad_accum: number;
+  max_steps: number | null;
+}
+export interface TrainingJob {
+  id: string;
+  status: "queued" | "starting" | "running" | "fetching" | "completed" | "failed" | "cancelled";
+  adapter_name: string;
+  base_model: string;
+  dataset_id: string | null;
+  dataset_name: string | null;
+  box_id: string | null;
+  box_name: string | null;
+  hyperparams: TrainParams;
+  step: number;
+  total_steps: number | null;
+  epoch: number | null;
+  last_loss: number | null;
+  cancel_requested: boolean;
+  error: string | null;
+  elapsed_s: number;
+  hourly_usd: number | null;
+  est_cost_usd: number | null;
+  adapter_id: string | null;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  polled_at: string | null;
+  losses?: { step: number; loss?: number; eval_loss?: number }[];
+  log_tail?: string;
+}
+export interface TrainingList {
+  jobs: TrainingJob[];
+  defaults: TrainParams & { base_model: string };
+  can_manage: boolean;
+}
+export interface AdapterRow {
+  id: string;
+  name: string;
+  model_spec: string;
+  base_model: string;
+  pack: string | null;
+  dataset_id: string | null;
+  dataset_name: string | null;
+  dataset_deleted: boolean;
+  training_job_id: string | null;
+  lora_rank: number | null;
+  metrics: Record<string, number | string | null>;
+  source_runs: string[];
+  test_run_id: string | null;
+  served_on: { box_id: string; box_name: string; endpoint_url: string | null }[];
+  created_at: string;
+}
+
+const W = (ws: string) => `/api/workspaces/${ws}`;
+const post = (body?: unknown): RequestInit => ({ method: "POST", body: body === undefined ? undefined : JSON.stringify(body) });
+
+export const Compute = {
+  boxes: (ws: string) => api<BoxesResponse>(`${W(ws)}/gpu-boxes`),
+  addBox: (ws: string, body: BoxIn) => api<GpuBox>(`${W(ws)}/gpu-boxes`, post(body)),
+  deleteBox: (ws: string, id: string) => api<void>(`${W(ws)}/gpu-boxes/${id}`, { method: "DELETE" }),
+  checkBox: (ws: string, id: string) => api<GpuBox>(`${W(ws)}/gpu-boxes/${id}/check`, post()),
+  serve: (ws: string, id: string, body: { model: string; adapters?: string[]; max_model_len?: number | null; gpu_memory_utilization?: number }) =>
+    api<GpuBox>(`${W(ws)}/gpu-boxes/${id}/serve`, post(body)),
+  stop: (ws: string, id: string) => api<GpuBox>(`${W(ws)}/gpu-boxes/${id}/stop`, post()),
+
+  datasetSources: (ws: string) => api<DatasetSource[]>(`${W(ws)}/datasets/sources`),
+  previewDataset: (ws: string, f: DatasetFilters) => api<DatasetPreview>(`${W(ws)}/datasets/preview`, post(f)),
+  datasets: (ws: string) => api<DatasetRow[]>(`${W(ws)}/datasets`),
+  saveDataset: (ws: string, f: DatasetFilters & { name: string }) => api<DatasetRow>(`${W(ws)}/datasets`, post(f)),
+  deleteDataset: (ws: string, id: string) => api<void>(`${W(ws)}/datasets/${id}`, { method: "DELETE" }),
+
+  trainings: (ws: string) => api<TrainingList>(`${W(ws)}/training`),
+  training: (ws: string, id: string) => api<TrainingJob>(`${W(ws)}/training/${id}`),
+  startTraining: (ws: string, body: Partial<TrainParams> & { dataset_id: string; box_id: string; base_model: string; adapter_name?: string }) =>
+    api<TrainingJob>(`${W(ws)}/training`, post(body)),
+  cancelTraining: (ws: string, id: string) => api<TrainingJob>(`${W(ws)}/training/${id}/cancel`, post()),
+
+  adapters: (ws: string) => api<AdapterRow[]>(`${W(ws)}/adapters`),
+  serveAdapter: (ws: string, id: string, box_id: string) => api<{ job_id: string }>(`${W(ws)}/adapters/${id}/serve`, post({ box_id })),
+  testAdapter: (ws: string, id: string, box_id: string, episodes: number) =>
+    api<{ job_id: string }>(`${W(ws)}/adapters/${id}/test`, post({ box_id, episodes })),
+  deleteAdapter: (ws: string, id: string) => api<void>(`${W(ws)}/adapters/${id}`, { method: "DELETE" }),
+};
+
+/** Download a file from an /api/* GET (dataset JSONL, adapter tar.gz) with the session or Clerk token. */
+export async function downloadFile(path: string, fallbackName: string): Promise<void> {
+  const res = await fetch(path, { credentials: "include", headers: await authHeaders() });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new ApiError(res.status, body?.detail ?? res.statusText);
+  }
+  const blob = await res.blob();
+  const name = /filename="?([^";]+)"?/.exec(res.headers.get("content-disposition") ?? "")?.[1] ?? fallbackName;
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+/** 3725 → "1h 2m". */
+export const fmtDuration = (s: number) => {
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  return h ? `${h}h ${m}m` : m ? `${m}m ${Math.floor(s % 60)}s` : `${Math.floor(s)}s`;
+};

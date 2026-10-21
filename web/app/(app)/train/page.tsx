@@ -1,8 +1,7 @@
 "use client";
 
 // Train: the distillation guide on its own page — teacher runs → dataset → LoRA on a GPU →
-// test → use — whatever goal Home is set to. Steps 4–6 run on the command line for now;
-// the guide fills the commands in with this workspace's runs.
+// test → use — whatever goal Home is set to. Each step links to the page where it happens.
 
 import { Journey, useJourneyData } from "@/components/Journey";
 import { Page, PageHeader } from "@/components/Page";
@@ -19,8 +18,8 @@ export default function TrainPage() {
         description={
           <>
             A strong model (the <em>teacher</em>) solves tasks; its clean solves become training data; a small open model (the <em>student</em>) is
-            fine-tuned with a LoRA adapter to copy them; the same tasks measure it before and after. Training runs on a rented GPU and is driven
-            from the command line for now: each step shows the exact commands.
+            fine-tuned with a LoRA adapter to copy them; the same tasks measure it before and after. Training runs on a rented GPU box: each step
+            links to the page where it happens (GPU boxes, Datasets, Fine-tune, Models).
           </>
         }
       />
