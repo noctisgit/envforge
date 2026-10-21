@@ -130,11 +130,14 @@ def execute(db: Session, run: Run) -> None:
     assert ws is not None
     provider = svc.provider_of(run.model)
     try:
-        api_key, base_url = (
-            (None, None)
-            if provider == "scripted"
-            else svc.resolve_key(db, run.created_by, provider)
-        )
+        if provider == "scripted":
+            api_key, base_url = None, None
+        elif run.gpu_box_id:  # served by one of the workspace's GPU boxes
+            from envforge.web.compute_service import endpoint_for_run
+
+            api_key, base_url = endpoint_for_run(db, run)
+        else:
+            api_key, base_url = svc.resolve_key(db, run.created_by, provider)
         model = load_model(
             run.model, temperature=run.temperature, api_key=api_key, base_url=base_url
         )
@@ -421,14 +424,19 @@ def reap_stale_jobs(db: Session, minutes: int = 20) -> int:
                 datetime.now(UTC),
             )
             n += 1
+            if job.workspace_id:  # a compute job: don't leave its box/training "starting"
+                from envforge.web.compute_service import fail_related
+
+                fail_related(db, job, job.error)
     db.commit()
     return n
 
 
 def run_forever(poll_s: float = 2.0, once: bool = False, kind: str = "all") -> int:
     """Process work until stopped. `kind`: "runs" (evaluation runs), "builder" (builder
-    chat turns + upload processing) or "all". Production runs one of each, so a long
-    evaluation never blocks the builder chat."""
+    chat turns + upload processing), "compute" (GPU box checks, vLLM serving, training
+    starts and training progress polls) or "all". Production runs one of each, so a long
+    evaluation never blocks the builder chat and a slow box never blocks either."""
     from envforge.web import builder as B
 
     if get_settings().DATABASE_URL.startswith("sqlite"):
@@ -447,7 +455,7 @@ def run_forever(poll_s: float = 2.0, once: bool = False, kind: str = "all") -> i
                     last_reap = time.monotonic()
                     if kind in ("runs", "all") and (n := reap_stale(db)):
                         print(f"[worker] failed {n} stale run(s)", flush=True)
-                    if kind in ("builder", "all") and (n := reap_stale_jobs(db)):
+                    if kind in ("builder", "compute", "all") and (n := reap_stale_jobs(db)):
                         print(f"[worker] failed {n} stale job(s)", flush=True)
                 if kind in ("builder", "all") and (
                     job := B.claim_job(db, ("builder_turn", "ingest", "recluster"))
@@ -457,6 +465,14 @@ def run_forever(poll_s: float = 2.0, once: bool = False, kind: str = "all") -> i
                     if once:
                         return handled
                     continue
+                if kind in ("compute", "all"):
+                    from envforge.web.compute_service import work_once
+
+                    if work_once(db):  # a box job; otherwise it polled running trainings
+                        handled += 1
+                        if once:
+                            return handled
+                        continue
                 if kind in ("runs", "all") and (run := claim_next(db)):
                     execute(db, run)
                     handled += 1
@@ -478,7 +494,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="envforge worker")
     ap.add_argument("--once", action="store_true", help="process one queued item and exit")
     ap.add_argument("--poll", type=float, default=2.0)
-    ap.add_argument("--kind", choices=("runs", "builder", "all"), default="all")
+    ap.add_argument("--kind", choices=("runs", "builder", "compute", "all"), default="all")
     args = ap.parse_args()
     n = run_forever(poll_s=args.poll, once=args.once, kind=args.kind)
     if args.once:

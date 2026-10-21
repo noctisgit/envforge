@@ -136,7 +136,9 @@ def delete_workspace(db: Session, ws: Workspace, user: User) -> None:
             Job.project_id.in_(project_ids), Job.status.in_(active)
         )
     )  # fmt: skip
-    if busy_runs or busy_jobs:
+    from envforge.web import training_service
+
+    if busy_runs or busy_jobs or training_service.workspace_busy(db, ws):
         raise HTTPException(
             status.HTTP_409_CONFLICT,
             "this workspace has queued or running work; cancel it (or wait for it to "
@@ -149,6 +151,7 @@ def delete_workspace(db: Session, ws: Workspace, user: User) -> None:
     db.execute(sql_delete(EnvRevision).where(EnvRevision.project_id.in_(project_ids)))
     db.execute(sql_delete(EnvVersion).where(EnvVersion.workspace_id == ws.id))
     db.execute(sql_delete(EnvProject).where(EnvProject.workspace_id == ws.id))
+    training_service.delete_workspace_rows(db, ws)  # GPU boxes, datasets, training, adapters
     db.execute(sql_delete(Run).where(Run.workspace_id == ws.id))
     db.execute(sql_delete(WorkspaceMember).where(WorkspaceMember.workspace_id == ws.id))
     slug = ws.slug
@@ -330,13 +333,17 @@ def enqueue_run(
 ) -> Run:
     from envforge.core.runner import new_run_id
     from envforge.web.builder import resolve_pack
+    from envforge.web.compute_service import box_for_model
 
     env_cls = resolve_pack(db, ws, pack)  # built-in, or published in this workspace
     provider = provider_of(model)
     if provider not in ("scripted", *PROVIDERS):
         raise HTTPException(400, f"unknown provider in model '{model}'")
+    # a model one of this workspace's GPU boxes serves: the box's endpoint and key are used
+    box = box_for_model(db, ws, model) if provider == "vllm" else None
     if (
         provider in PROVIDERS
+        and box is None
         and not user_has_key(db, user.id, provider)
         and not get_settings().ALLOW_SERVER_KEYS
     ):
@@ -373,6 +380,7 @@ def enqueue_run(
         temperature=temperature,
         label=label,
         status="queued",
+        gpu_box_id=box.id if box else None,
     )
     db.add(run)
     db.commit()

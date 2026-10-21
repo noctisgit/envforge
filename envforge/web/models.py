@@ -158,6 +158,9 @@ class Run(Base):
     # Deleting a run removes its trajectories and hides it, but keeps this row so the
     # usage history (tokens, cost) stays true.
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # set when the model is served by one of the workspace's GPU boxes: the worker then
+    # takes the endpoint and its key from that box instead of the user's vLLM key
+    gpu_box_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -296,6 +299,11 @@ class Job(Base):
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
     kind: Mapped[str] = mapped_column(String(32), index=True)  # builder_turn | ingest
     project_id: Mapped[str | None] = mapped_column(ForeignKey("env_projects.id"), index=True)
+    # compute jobs (box_check, box_serve, box_stop, train_start, adapter_test) belong
+    # to a workspace instead of a builder project
+    workspace_id: Mapped[str | None] = mapped_column(
+        ForeignKey("workspaces.id"), index=True, nullable=True
+    )
     created_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
     payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     status: Mapped[str] = mapped_column(String(16), default="queued", index=True)
@@ -309,3 +317,128 @@ class Job(Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+# ---- GPU boxes, datasets, training (Phase 2/3 in the browser) ------------------------
+#
+# workspaces ──< gpu_boxes            (SSH key + vLLM key Fernet-encrypted; check results)
+#            ──< datasets             (files under data/workspaces/<slug>/sft/<name>/)
+#            ──< training_jobs >── datasets, gpu_boxes
+#            ──< adapters      >── training_jobs, datasets
+#
+# Jobs that touch a box (check, serve, stop, train start, adapter test) are rows in
+# `jobs` with workspace_id set, claimed by `envforge-worker --kind compute`. The worker
+# only ever connects to the host stored on the box row; job payloads carry ids only.
+
+
+class GpuBox(Base):
+    __tablename__ = "gpu_boxes"
+    __table_args__ = (UniqueConstraint("workspace_id", "name"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    name: Mapped[str] = mapped_column(String(64))
+    host: Mapped[str] = mapped_column(String(255))  # Tailscale name, IP or DNS name
+    port: Mapped[int] = mapped_column(Integer, default=22)  # SSH port
+    user: Mapped[str] = mapped_column(String(64), default="root")
+    runtime: Mapped[str] = mapped_column(String(8), default="auto")  # docker | pod | auto
+    detected_runtime: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    # secrets: Fernet tokens; only the fingerprint / masked tail ever leaves the worker
+    ssh_key_ciphertext: Mapped[str] = mapped_column(Text)
+    ssh_key_fingerprint: Mapped[str] = mapped_column(String(80))
+    vllm_key_ciphertext: Mapped[str | None] = mapped_column(Text, nullable=True)
+    vllm_key_masked: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    vllm_key_generated: Mapped[bool] = mapped_column(default=True, server_default="true")
+    hf_token_ciphertext: Mapped[str | None] = mapped_column(Text, nullable=True)
+    hf_token_masked: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # serving: the vLLM port and how the control plane reaches it
+    vllm_port: Mapped[int] = mapped_column(Integer, default=8000)
+    endpoint_host: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    bind: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    hourly_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # last check: unknown | ok | degraded | unreachable
+    status: Mapped[str] = mapped_column(String(16), default="unknown", server_default="unknown")
+    check_result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # serving state: stopped | starting | serving | stopping | failed
+    serve_state: Mapped[str] = mapped_column(
+        String(16), default="stopped", server_default="stopped"
+    )
+    served_model: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    served_adapters: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    endpoint_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    serve_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class Dataset(Base):
+    __tablename__ = "datasets"
+    __table_args__ = (UniqueConstraint("workspace_id", "name"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    name: Mapped[str] = mapped_column(String(64))  # also the default adapter name
+    source_runs: Mapped[list[str]] = mapped_column(JSON)
+    filters: Mapped[dict] = mapped_column(JSON)  # min_reward, val_frac, best_per_task
+    packs: Mapped[list[str]] = mapped_column(JSON)
+    counts: Mapped[dict] = mapped_column(JSON)  # manifest counts + per task stats
+    n_train: Mapped[int] = mapped_column(Integer, default=0)
+    n_val: Mapped[int] = mapped_column(Integer, default=0)
+    path: Mapped[str] = mapped_column(String(500))  # train.jsonl, val.jsonl, manifest.json
+    manifest: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class TrainingJob(Base):
+    __tablename__ = "training_jobs"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    dataset_id: Mapped[str | None] = mapped_column(ForeignKey("datasets.id"), nullable=True)
+    box_id: Mapped[str | None] = mapped_column(ForeignKey("gpu_boxes.id"), nullable=True)
+    job_id: Mapped[str | None] = mapped_column(String(32), nullable=True)  # the train_start job
+    adapter_name: Mapped[str] = mapped_column(String(64))
+    base_model: Mapped[str] = mapped_column(String(200))
+    hyperparams: Mapped[dict] = mapped_column(JSON)  # remote.TrainArgs fields
+    runtime: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    # queued | starting | running | fetching | completed | failed | cancelled
+    status: Mapped[str] = mapped_column(String(16), default="queued", index=True)
+    cancel_requested: Mapped[bool] = mapped_column(default=False, server_default="false")
+    step: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    total_steps: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    epoch: Mapped[float | None] = mapped_column(Float, nullable=True)
+    losses: Mapped[list | None] = mapped_column(JSON, nullable=True)  # [{step, loss, eval_loss?}]
+    log_cursor: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    log_tail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    poll_failures: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    polled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    hourly_usd: Mapped[float | None] = mapped_column(Float, nullable=True)  # box price snapshot
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class Adapter(Base):
+    __tablename__ = "adapters"
+    __table_args__ = (UniqueConstraint("workspace_id", "name"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    name: Mapped[str] = mapped_column(String(64))  # served as vllm:<name>
+    base_model: Mapped[str] = mapped_column(String(200))
+    pack: Mapped[str | None] = mapped_column(String(80), nullable=True)  # what to test it on
+    dataset_id: Mapped[str | None] = mapped_column(ForeignKey("datasets.id"), nullable=True)
+    training_job_id: Mapped[str | None] = mapped_column(
+        ForeignKey("training_jobs.id"), nullable=True
+    )
+    box_id: Mapped[str | None] = mapped_column(String(32), nullable=True)  # trained on
+    path: Mapped[str] = mapped_column(String(500))  # local copy (data/workspaces/<ws>/adapters/)
+    lora_rank: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    metrics: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # envforge_manifest.json
+    test_run_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    created_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)

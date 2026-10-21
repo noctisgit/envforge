@@ -76,6 +76,22 @@ services:
       postgres: { condition: service_healthy }
     command: envforge-worker --poll 1 --kind builder
 
+  # GPU boxes: readiness checks, vLLM serving and LoRA training over SSH, plus polling
+  # running training jobs. Separate so a slow box never blocks runs or the builder.
+  # Decrypts box SSH keys (APP_SECRET_KEY); never needs the Docker socket.
+  compute:
+    build: { context: ., dockerfile: deploy/Dockerfile.api }
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://envforge:${POSTGRES_PASSWORD:-envforge}@postgres:5432/envforge
+      ENVFORGE_DATA_DIR: /data
+    volumes:
+      - envdata:/data
+    depends_on:
+      postgres: { condition: service_healthy }
+    command: envforge-worker --poll 2 --kind compute
+
   web:
     build:
       context: ./web

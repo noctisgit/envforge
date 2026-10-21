@@ -50,6 +50,16 @@ class WebSettings(BaseSettings):
     MAX_CORPUS_BYTES: int = 20 * 1024**3  # largest single builder upload/import (20 GiB)
     SIGNUPS_PER_HOUR: int = 5  # per client IP
 
+    # --- GPU boxes and training (Settings → GPU boxes, Datasets, Training, Models) ---
+    # Adding, checking, serving on and training on a GPU box is for admins only unless
+    # this is false. A box runs whatever the worker tells it to over SSH, and costs money.
+    GPU_BOXES_ADMIN_ONLY: bool = True
+    COMPUTE_SSH_TIMEOUT_S: int = 1800  # cap for any single ssh/scp call without its own
+    SERVE_HEALTH_TIMEOUT_S: int = 1800  # vLLM must answer /v1/models within this (weights!)
+    TRAIN_MAX_HOURS: float = 24.0  # a training job running longer is stopped and failed
+    TRAIN_POLL_SECONDS: int = 20  # how often the compute worker reads training progress
+    TRAIN_MAX_POLL_FAILURES: int = 15  # consecutive unreachable polls before giving up
+
     # --- http ---
     CORS_ORIGINS: Annotated[list[str], NoDecode] = ["http://localhost:3000"]
     COOKIE_SECURE: bool = False  # set true behind HTTPS

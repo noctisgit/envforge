@@ -167,15 +167,21 @@ def list_models(
     db: Session = Depends(get_db),
 ):
     """Tool-capable models you can run in this workspace, given your provider keys."""
-    svc.require_workspace(db, user, ws_id)
+    from envforge.web.compute_service import box_models
+
+    ws = svc.require_workspace(db, user, ws_id)
     providers = svc.available_providers(db, user.id)
     if refresh:
         catalog.gateway_models(refresh=True)
     models = catalog.list_models(providers, native_ids=svc.provider_model_ids(db, user.id))
+    # models served by this workspace's GPU boxes: runnable without a vLLM key of your own
+    served = [ModelOut(**m) for m in box_models(db, ws)]
+    if served and "vllm" not in providers:
+        providers = [*providers, "vllm"]
     return ModelsOut(
         providers=providers,
         catalog_available=bool(catalog.gateway_models()),
-        models=[ModelOut(**m.to_dict()) for m in models],
+        models=served + [ModelOut(**m.to_dict()) for m in models],
     )
 
 
