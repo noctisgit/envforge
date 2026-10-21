@@ -36,8 +36,10 @@ from envforge.web.models import (
     EnvUpload,
     EnvVersion,
     Job,
+    Run,
     User,
     Workspace,
+    WorkspaceMember,
 )
 from envforge.web.services import slugify
 
@@ -386,20 +388,61 @@ def _load_env_dir(path: str):
     return load_env_dir(Path(path))
 
 
-def resolve_pack(db: Session, ws: Workspace, name: str):
+def resolve_pack(db: Session, ws: Workspace, name: str, *, include_deleted: bool = False):
     """A built-in pack, or one of this workspace's published environments. Never another
-    workspace's: published environments are private to their workspace."""
+    workspace's: published environments are private to their workspace.
+
+    A deleted environment can't start new runs; pass `include_deleted=True` to look at
+    runs it already produced (replays, exports, its overview page).
+    """
     from envforge.core.registry import discover_packs
 
     packs = discover_packs()
     if name in packs:
         return packs[name]
-    ver = db.scalar(
-        select(EnvVersion).where(EnvVersion.workspace_id == ws.id, EnvVersion.pack_name == name)
-    )
+    query = select(EnvVersion).where(EnvVersion.workspace_id == ws.id, EnvVersion.pack_name == name)
+    if not include_deleted:
+        query = query.where(EnvVersion.deleted_at.is_(None))
+    ver = db.scalar(query)
     if ver is None:
         raise HTTPException(400, f"unknown environment '{name}'")
     return _load_env_dir(ver.env_dir)
+
+
+def delete_versions(db: Session, ws: Workspace, user: User, versions: list[EnvVersion]) -> None:
+    """Delete published environments: they leave the Environments list and can't start new
+    runs. The files stay, so runs made on them still open, replay and export.
+
+    Only the workspace owner or whoever published a version may delete it, and never while
+    a run on it is queued or running.
+    """
+    live = [v for v in versions if v.deleted_at is None]
+    if not live:
+        return
+    m = db.scalar(
+        select(WorkspaceMember).where(
+            WorkspaceMember.workspace_id == ws.id, WorkspaceMember.user_id == user.id
+        )
+    )
+    is_owner = m is not None and m.role == "owner"
+    for v in live:
+        if v.created_by != user.id and not is_owner:
+            raise HTTPException(
+                403, f"only the workspace owner or its publisher can delete {v.pack_name}"
+            )
+    busy = db.scalar(
+        select(Run.pack).where(
+            Run.workspace_id == ws.id,
+            Run.pack.in_([v.pack_name for v in live]),
+            Run.status.in_(("queued", "running")),
+        )
+    )
+    if busy:
+        raise HTTPException(409, f"a run on {busy} is still going; cancel it or let it finish")
+    now = datetime.now(UTC)
+    for v in live:
+        v.deleted_at = now
+    db.commit()
 
 
 def workspace_packs(db: Session, ws: Workspace) -> list[tuple[str, Any, EnvVersion | None]]:
@@ -410,7 +453,9 @@ def workspace_packs(db: Session, ws: Workspace) -> list[tuple[str, Any, EnvVersi
         (n, c, None) for n, c in sorted(discover_packs().items())
     ]
     for ver in db.scalars(
-        select(EnvVersion).where(EnvVersion.workspace_id == ws.id).order_by(EnvVersion.pack_name)
+        select(EnvVersion)
+        .where(EnvVersion.workspace_id == ws.id, EnvVersion.deleted_at.is_(None))
+        .order_by(EnvVersion.pack_name)
     ):
         try:
             out.append((ver.pack_name, _load_env_dir(ver.env_dir), ver))

@@ -7,6 +7,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { Empty, Page, PageHeader, Panel } from "@/components/Page";
+import { useToast } from "@/components/Toast";
 import { Api, ApiError, type BuilderProjectSummary } from "@/lib/api";
 import { useWorkspace } from "@/lib/workspace";
 
@@ -23,7 +24,7 @@ export default function BuilderPage() {
   const [title, setTitle] = useState("");
   const [purpose, setPurpose] = useState("");
   const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
+  const toast = useToast();
 
   useEffect(() => {
     if (ws)
@@ -37,7 +38,6 @@ export default function BuilderPage() {
   async function start(e: React.FormEvent) {
     e.preventDefault();
     setBusy(true);
-    setErr(null);
     try {
       const p = await Api.createProject(ws!.id, title.trim() || purpose.trim().slice(0, 60), purpose.trim());
       try {
@@ -48,7 +48,7 @@ export default function BuilderPage() {
       }
       router.push(`/builder/${p.id}`);
     } catch (ex) {
-      setErr(ex instanceof ApiError ? ex.message : String(ex));
+      toast.error("Couldn't start the project", ex);
       setBusy(false);
     }
   }
@@ -57,69 +57,92 @@ export default function BuilderPage() {
     <Page>
       <PageHeader
         title="Environment builder"
-        description={
-          <>
-            Describe what you want an agent to learn, upload your data (CSV, TXT or JSON chat logs — personal data is redacted before any model sees it), and
-            chat with the builder. It asks questions until it can build a verifiable environment, and every change it makes is a revision you can review, diff
-            and roll back. Publish a revision to run and train on it.
-          </>
-        }
+        description="Describe what the agent should learn, upload real chat logs (CSV, TXT, JSON), and the builder drafts a declarative spec and extracts tasks from redacted conversations. Every change is a revision you can roll back; publishing makes it a pack you can run."
       />
 
-      <Panel title="New environment">
-        <form onSubmit={start} className="space-y-4">
-          <div>
-            <label className="label">What should the agent learn to do?</label>
-            <textarea
-              className="input min-h-[96px]"
-              value={purpose}
-              maxLength={4000}
-              onChange={(e) => setPurpose(e.target.value)}
-              placeholder="e.g. Resolve customer support tickets for our ISP using the chat logs I'll upload…"
-            />
-            <div className="mt-2 flex flex-wrap gap-2">
-              {EXAMPLES.map((ex) => (
-                <button
-                  key={ex}
-                  type="button"
-                  className="rounded-full border px-2.5 py-1 text-left text-xs"
-                  style={{ borderColor: "var(--line)", color: "var(--muted)" }}
-                  onClick={() => setPurpose(ex)}
-                >
-                  {ex.slice(0, 70)}…
-                </button>
-              ))}
+      <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,5fr)_minmax(0,3fr)]">
+        <Panel title="New environment">
+          <form onSubmit={start} className="space-y-4">
+            <div>
+              <label className="label" htmlFor="purpose">
+                What should the agent learn to do?
+              </label>
+              <textarea
+                id="purpose"
+                className="input min-h-[96px]"
+                rows={4}
+                value={purpose}
+                maxLength={4000}
+                onChange={(e) => setPurpose(e.target.value)}
+                placeholder="e.g. Resolve customer support tickets for our ISP using the chat logs I'll upload…"
+              />
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {EXAMPLES.map((ex) => (
+                  <button
+                    key={ex}
+                    type="button"
+                    className="rounded-full border px-2.5 py-1 text-left text-xs hover:text-[var(--fg)]"
+                    style={{
+                      borderColor: purpose === ex ? "var(--accent)" : "var(--line)",
+                      color: purpose === ex ? "var(--accent)" : "var(--muted)",
+                      background: purpose === ex ? "var(--accent-tint)" : undefined,
+                    }}
+                    aria-pressed={purpose === ex}
+                    onClick={() => setPurpose(ex)}
+                  >
+                    {ex.slice(0, 70)}…
+                  </button>
+                ))}
+              </div>
             </div>
-          </div>
-          <div className="flex flex-wrap items-end gap-3">
-            <div className="min-w-[16rem] flex-1">
-              <label className="label">Name (optional)</label>
-              <input className="input" value={title} maxLength={200} onChange={(e) => setTitle(e.target.value)} placeholder="ISP support desk" />
+            <div className="flex flex-wrap items-end gap-4">
+              <div className="min-w-[15rem] flex-1">
+                <label className="label" htmlFor="title">
+                  Name (optional)
+                </label>
+                <input id="title" className="input" value={title} maxLength={200} onChange={(e) => setTitle(e.target.value)} placeholder="ISP support desk" />
+              </div>
+              <button className="btn btn-field" disabled={busy || purpose.trim().length < 10}>
+                {busy ? "Starting…" : "Start building"}
+              </button>
             </div>
-            <button className="btn btn-field" disabled={busy || purpose.trim().length < 10}>
-              {busy ? "Starting…" : "Start building"}
-            </button>
-          </div>
-          <div className="text-xs" style={{ color: "var(--muted)" }}>
-            Builder model: <span className="mono">{ws.builder_model}</span> (change it in{" "}
-            <Link href="/settings" className="underline">
-              Workspace settings
-            </Link>
-            ). Each message costs a little; extraction of more than 5 conversations always asks you first.
-          </div>
-          {err && (
-            <div className="text-sm" style={{ color: "var(--bad)" }}>
-              {err}
+            <div className="hint border-t pt-3" style={{ borderColor: "var(--line)" }}>
+              Builder model: <span className="mono">{ws.builder_model}</span> — change it in{" "}
+              <Link href="/settings" className="underline">
+                Workspace settings
+              </Link>
+              . Each message costs a little; extracting more than 5 conversations always asks you first.
             </div>
-          )}
-        </form>
-      </Panel>
+          </form>
+        </Panel>
 
-      <Panel title="Projects" flush>
+        <Panel title="From chat logs to a pack">
+          <ol className="list-decimal space-y-2 pl-5" style={{ color: "var(--muted)" }}>
+            <li>
+              <span style={{ color: "var(--fg)" }}>Upload</span> — files are redacted before any model sees them (names, emails, phones, card numbers).
+            </li>
+            <li>
+              <span style={{ color: "var(--fg)" }}>Draft</span> — the builder writes an <span className="mono text-xs">EnvSpec</span>: state, tools, rules, system
+              prompt.
+            </li>
+            <li>
+              <span style={{ color: "var(--fg)" }}>Extract</span> — each conversation becomes a seeded task with checks the verifier can score.
+            </li>
+            <li>
+              <span style={{ color: "var(--fg)" }}>Preview</span> — generate tasks and the reference solution; no model is called.
+            </li>
+            <li>
+              <span style={{ color: "var(--fg)" }}>Publish</span> — <span className="mono text-xs">name@vN</span> appears under Environments, ready to run.
+            </li>
+          </ol>
+        </Panel>
+      </div>
+
+      <Panel title="Projects" hint={projects ? `${projects.length} in this workspace` : undefined} flush>
         {!projects ? (
           <Empty>Loading…</Empty>
         ) : projects.length === 0 ? (
-          <Empty>No projects yet.</Empty>
+          <Empty>No projects yet. Describe an environment above to start one.</Empty>
         ) : (
           <table className="data">
             <thead>
@@ -136,7 +159,7 @@ export default function BuilderPage() {
               {projects.map((p) => (
                 <tr key={p.id}>
                   <td>
-                    <Link href={`/builder/${p.id}`} style={{ color: "var(--accent)" }}>
+                    <Link href={`/builder/${p.id}`} className="font-medium" style={{ color: "var(--accent)" }}>
                       {p.title || p.name}
                     </Link>
                     <div className="mono text-xs" style={{ color: "var(--muted)" }}>
@@ -146,8 +169,8 @@ export default function BuilderPage() {
                   <td className="max-w-md truncate" style={{ color: "var(--muted)" }}>
                     {p.purpose}
                   </td>
-                  <td>{p.head_number ? `r${p.head_number}` : "—"}</td>
-                  <td>{p.n_tasks}</td>
+                  <td className="mono">{p.head_number ? `r${p.head_number}` : "—"}</td>
+                  <td className="num">{p.n_tasks}</td>
                   <td>{p.versions ? `${p.versions} version${p.versions > 1 ? "s" : ""}` : "—"}</td>
                   <td style={{ color: "var(--muted)" }}>{new Date(p.created_at).toLocaleDateString()}</td>
                 </tr>

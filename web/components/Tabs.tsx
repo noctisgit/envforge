@@ -101,7 +101,7 @@ export function Tabs({
                 : {
                     color: on ? "var(--accent)" : "var(--muted)",
                     borderColor: on ? "var(--accent)" : "var(--line)",
-                    background: on ? "rgba(94,234,212,0.08)" : "transparent",
+                    background: on ? "var(--accent-tint)" : "transparent",
                   }
             }
           >

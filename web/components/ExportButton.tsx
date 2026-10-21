@@ -4,23 +4,24 @@
 // scored at least `min reward` from the chosen runs and saves them as JSONL.
 
 import { useState } from "react";
-import { ApiError, downloadExport } from "@/lib/api";
+import { useToast } from "@/components/Toast";
+import { downloadExport } from "@/lib/api";
 
 export function ExportButton({ wsId, runIds }: { wsId: string; runIds: string[] }) {
   const [open, setOpen] = useState(false);
   const [minReward, setMinReward] = useState(1);
   const [format, setFormat] = useState<"chat" | "trajectory">("chat");
-  const [msg, setMsg] = useState<string | null>(null);
+  const toast = useToast();
   const [busy, setBusy] = useState(false);
 
   async function go() {
     setBusy(true);
-    setMsg(null);
     try {
       const n = await downloadExport(wsId, runIds, minReward, format);
-      setMsg(`Exported ${n} episode${n === 1 ? "" : "s"}.`);
+      toast.success("Training data exported", `${n} episode${n === 1 ? "" : "s"} with reward ≥ ${minReward}.`);
+      setOpen(false);
     } catch (e) {
-      setMsg(e instanceof ApiError ? e.message : String(e));
+      toast.error("Export failed", e);
     } finally {
       setBusy(false);
     }
@@ -49,7 +50,9 @@ export function ExportButton({ wsId, runIds }: { wsId: string; runIds: string[] 
       <button className="btn" onClick={go} disabled={busy}>
         Download
       </button>
-      {msg && <span style={{ color: "var(--muted)" }}>{msg}</span>}
+      <button className="btn-ghost" onClick={() => setOpen(false)}>
+        Cancel
+      </button>
     </div>
   );
 }

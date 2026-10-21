@@ -11,6 +11,7 @@ export interface ServerInfo {
   allow_server_keys: boolean;
   providers: Provider[];
   version: string;
+  max_active_runs: number;
 }
 
 export interface User {
@@ -431,6 +432,7 @@ export const Api = {
 
   // environments runnable in a workspace: built-in packs + environments published from the builder
   wsPacks: (ws: string) => api<Pack[]>(`/api/workspaces/${ws}/packs`),
+  deletePack: (ws: string, name: string) => api<void>(`/api/workspaces/${ws}/packs/${encodeURIComponent(name)}`, { method: "DELETE" }),
   pack: (ws: string, name: string) => api<PackDetail>(`/api/workspaces/${ws}/packs/${encodeURIComponent(name)}`),
   preview: (ws: string, name: string, seed: number, tier: number) =>
     api<TaskPreview>(`/api/workspaces/${ws}/packs/${encodeURIComponent(name)}/preview?seed=${seed}&tier=${tier}`),

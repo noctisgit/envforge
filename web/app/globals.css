@@ -1,5 +1,7 @@
 @import "tailwindcss";
 
+/* Design tokens — the same names as the envforge design system (tokens.json).
+   Use var(--…) for colour; never a raw hex in a component. */
 :root {
   --bg: #0b0d10;
   --panel: #12161b;
@@ -10,6 +12,24 @@
   --good: #34d399;
   --warn: #fbbf24;
   --bad: #f87171;
+  --input-bg: #0f1317;
+  --code-bg: #0d1014;
+  --on-accent: #06201c;
+  --on-bad: #2a0606;
+  --accent-tint: #5eead414;
+  --bad-tint: #f871711f;
+  --scrim: #00000099;
+  --pill-queued-bg: #2a3340;
+  --pill-running-bg: #173b36;
+  --pill-completed-bg: #143a2b;
+  --pill-failed-bg: #3d1c1c;
+  --pill-cancelled-bg: #3a2e14;
+  --diagram-edge: #3a4552;
+  --diagram-zone-line: #1d242c;
+  --shadow-dialog: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
+  --radius-panel: 10px;
+  --sidebar-w: 220px;
+  color-scheme: dark;
 }
 
 html,
@@ -17,12 +37,14 @@ body {
   background: var(--bg);
   color: var(--fg);
   font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Inter, sans-serif;
+  font-size: 14px;
+  line-height: 20px;
 }
 
 .panel {
   background: var(--panel);
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: var(--radius-panel);
 }
 
 .mono {
@@ -30,9 +52,9 @@ body {
 }
 
 .btn {
-  @apply inline-flex items-center gap-2 rounded-md px-3 py-1.5 text-sm font-medium;
+  @apply inline-flex items-center gap-2 rounded-md border border-transparent px-3 py-1.5 text-sm font-medium;
   background: var(--accent);
-  color: #06201c;
+  color: var(--on-accent);
 }
 .btn:disabled {
   opacity: 0.5;
@@ -42,6 +64,18 @@ body {
   border-color: var(--line);
   color: var(--fg);
 }
+.btn-ghost[aria-pressed="true"] {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-tint);
+}
+.btn-ghost:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--fg) 25%, var(--line));
+}
+/* small inline variant: a row action inside a table or list */
+.btn-sm {
+  @apply px-2 py-0.5 text-xs;
+}
 
 /* destructive actions: a ghost button in the "bad" colour */
 .btn-danger {
@@ -50,7 +84,7 @@ body {
   color: var(--bad);
 }
 .btn-danger:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--bad) 12%, transparent);
+  background: var(--bad-tint);
 }
 .btn-danger:disabled,
 .btn-ghost:disabled {
@@ -65,9 +99,12 @@ body {
 
 .input {
   @apply w-full rounded-md border px-3 py-2 text-sm;
-  background: #0f1317;
+  background: var(--input-bg);
   border-color: var(--line);
   color: var(--fg);
+}
+.input::placeholder {
+  color: var(--muted);
 }
 .input:focus {
   outline: none;
@@ -79,24 +116,78 @@ body {
   color: var(--muted);
 }
 
+/* muted 12px helper line under a field or heading */
+.hint {
+  @apply text-xs;
+  color: var(--muted);
+}
+
 table.data {
   @apply w-full text-sm;
 }
 table.data th {
-  @apply text-left text-xs uppercase tracking-wide py-2 px-2;
+  @apply px-2 py-2 text-left text-xs font-normal uppercase tracking-wide;
   color: var(--muted);
   border-bottom: 1px solid var(--line);
 }
 table.data td {
-  @apply py-2 px-2 align-top;
+  @apply px-2 py-2 align-top;
   border-bottom: 1px solid var(--line);
+}
+/* in a flush panel the first and last columns line up with its 16px header padding */
+.flush-body table.data th:first-child,
+.flush-body table.data td:first-child {
+  padding-left: 1rem;
+}
+.flush-body table.data th:last-child,
+.flush-body table.data td:last-child {
+  padding-right: 1rem;
+}
+/* a key/value table inside a padded panel: edges flush with the panel's text */
+table.data.inset th:first-child,
+table.data.inset td:first-child {
+  padding-left: 0;
+}
+table.data.inset th:last-child,
+table.data.inset td:last-child {
+  padding-right: 0;
+}
+/* ids, model strings and task ids read as one token: never break them mid-word */
+table.data td.mono {
+  white-space: nowrap;
+}
+table.data tbody tr:last-child td {
+  border-bottom: 0;
+}
+table.data tbody tr:hover td {
+  background: color-mix(in srgb, var(--fg) 2.5%, transparent);
+}
+.num {
+  font-variant-numeric: tabular-nums;
 }
 
 .pill {
-  @apply inline-block rounded-full px-2 py-0.5 text-xs font-medium;
+  @apply inline-block rounded-full px-2 py-0.5 text-xs font-medium whitespace-nowrap;
 }
-.pill-queued { background: #2a3340; color: var(--muted); }
-.pill-running { background: #173b36; color: var(--accent); }
-.pill-completed { background: #143a2b; color: var(--good); }
-.pill-failed { background: #3d1c1c; color: var(--bad); }
-.pill-cancelled { background: #3a2e14; color: var(--warn); }
+.pill-queued { background: var(--pill-queued-bg); color: var(--muted); }
+.pill-running { background: var(--pill-running-bg); color: var(--accent); }
+.pill-completed { background: var(--pill-completed-bg); color: var(--good); }
+.pill-failed { background: var(--pill-failed-bg); color: var(--bad); }
+.pill-cancelled { background: var(--pill-cancelled-bg); color: var(--warn); }
+/* neutral tag (e.g. "simulation", "sandbox") */
+.pill-tag { background: var(--pill-queued-bg); color: var(--fg); }
+
+/* a card nested inside a panel (an upload, a revision, a sub-section) */
+.inset-card {
+  background: var(--input-bg);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-panel);
+}
+
+.code-block {
+  @apply rounded-md p-3 text-xs;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  background: var(--code-bg);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

@@ -213,6 +213,11 @@ extraction costs per conversation. The builder may extract up to 5 conversations
 without asking; beyond that it must show an estimate and get your explicit yes — this is
 enforced in code. Builder spend appears on the Usage page.
 
+Extraction takes a spread of conversations over the topic clusters by default. To fill a
+gap, the builder can aim it with `conversation_ids` (ids from your file) or `cluster`. Its
+`get_tasks` tool reads the stored task records (a compact index, or whole records by id or
+source conversation), so it can audit a task and edit one field without guessing the rest.
+
 ## Revisions, rollback, branches, versions
 
 - Every change (by the builder or by you editing the spec) is an **immutable revision**
@@ -222,6 +227,11 @@ enforced in code. Builder spend appears on the Usage page.
 - **Changes** shows a unified diff of the spec and which tasks were added/removed.
 - **Publish** freezes a valid revision (its valid tasks only) as `<project>@v<n>`, private
   to the workspace. Runs record that exact name, so results are reproducible.
+- **Delete** a published version from Environments, its page, or the project's Overview
+  (the workspace owner or whoever published it; not while a run on it is queued or
+  running). It leaves the list and can't start new runs, but its files stay, so runs
+  made on it still open, replay and export. Version numbers are never reused. Deleting
+  the project deletes all of its published versions the same way.
 
 ## Running it
 

@@ -36,7 +36,7 @@ export function Markdown({ text }: { text: string }) {
       while (i < lines.length && !lines[i].startsWith("```")) code.push(lines[i++]);
       i++;
       blocks.push(
-        <pre key={k++} className="mono overflow-x-auto rounded-md p-3 text-xs" style={{ background: "#0d1014" }}>
+        <pre key={k++} className="mono overflow-x-auto rounded-md p-3 text-xs" style={{ background: "var(--code-bg)" }}>
           {code.join("\n")}
         </pre>,
       );

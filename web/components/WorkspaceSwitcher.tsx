@@ -1,26 +1,13 @@
 "use client";
 
-// Header workspace switcher: a searchable dropdown in the same style as the model
+// Sidebar workspace switcher: a searchable dropdown in the same style as the model
 // picker, with "new workspace" and "settings" at the bottom. Keyboard: ↑ ↓ Enter Esc.
 
 import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { WorkspaceMark as Mark } from "@/components/Avatar";
 import { Api, ApiError } from "@/lib/api";
 import { useWorkspace } from "@/lib/workspace";
-
-function Mark({ name, size = 22 }: { name: string; size?: number }) {
-  // a small coloured square with the workspace's initial, stable per name
-  const hue = [...name].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 360, 7);
-  return (
-    <span
-      aria-hidden
-      className="inline-flex shrink-0 items-center justify-center rounded-md text-[11px] font-semibold"
-      style={{ width: size, height: size, background: `hsl(${hue} 45% 28%)`, color: `hsl(${hue} 80% 85%)` }}
-    >
-      {(name.trim()[0] ?? "?").toUpperCase()}
-    </span>
-  );
-}
 
 export function WorkspaceSwitcher() {
   const { workspaces, current, select, reload } = useWorkspace();
@@ -31,7 +18,11 @@ export function WorkspaceSwitcher() {
   const [newName, setNewName] = useState("");
   const [err, setErr] = useState<string | null>(null);
   const root = useRef<HTMLDivElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
   const search = useRef<HTMLInputElement>(null);
+  // The menu is wider than the sidebar, and the sidebar scrolls (which would clip it),
+  // so it is positioned against the viewport, just under the trigger.
+  const [pos, setPos] = useState<{ top: number; left: number; width: number } | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -39,12 +30,25 @@ export function WorkspaceSwitcher() {
     setActive(0);
     setCreating(false);
     setErr(null);
-    setTimeout(() => search.current?.focus(), 0);
+    const place = () => {
+      const r = trigger.current?.getBoundingClientRect();
+      if (!r) return;
+      const width = Math.min(Math.max(r.width, 288), window.innerWidth - 16);
+      setPos({ top: r.bottom + 8, left: Math.max(8, Math.min(r.left, window.innerWidth - width - 8)), width });
+    };
+    place();
+    setTimeout(() => search.current?.focus({ preventScroll: true }), 0);
     const onDown = (e: MouseEvent) => {
       if (root.current && !root.current.contains(e.target as Node)) setOpen(false);
     };
     document.addEventListener("mousedown", onDown);
-    return () => document.removeEventListener("mousedown", onDown);
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      window.removeEventListener("resize", place);
+      window.removeEventListener("scroll", place, true);
+    };
   }, [open]);
 
   const filtered = useMemo(() => {
@@ -92,23 +96,28 @@ export function WorkspaceSwitcher() {
   return (
     <div ref={root} className="relative">
       <button
+        ref={trigger}
         type="button"
         onClick={() => setOpen((o) => !o)}
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-label="Switch workspace"
-        className="flex max-w-[16rem] items-center gap-2 rounded-md border px-2 py-1.5 text-sm hover:border-[var(--accent)]"
-        style={{ borderColor: "var(--line)", background: "#0f1317" }}
+        className="flex w-full items-center gap-2 rounded-md border px-2 py-1.5 text-sm hover:border-[var(--accent)]"
+        style={{ borderColor: "var(--line)", background: "var(--input-bg)" }}
       >
         <Mark name={current.name} />
-        <span className="truncate">{current.name}</span>
-        <span className="ml-1 text-xs" style={{ color: "var(--muted)" }}>
+        <span className="min-w-0 flex-1 truncate text-left">{current.name}</span>
+        <span className="text-xs" style={{ color: "var(--muted)" }}>
           ▾
         </span>
       </button>
 
-      {open && (
-        <div className="panel absolute right-0 z-30 mt-2 w-80 overflow-hidden shadow-2xl" onKeyDown={onKey}>
+      {open && pos && (
+        <div
+          className="panel fixed z-50 overflow-hidden"
+          style={{ top: pos.top, left: pos.left, width: pos.width, boxShadow: "var(--shadow-dialog)" }}
+          onKeyDown={onKey}
+        >
           <div className="border-b p-2" style={{ borderColor: "var(--line)" }}>
             <input
               ref={search}

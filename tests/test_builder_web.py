@@ -192,6 +192,64 @@ def test_builder_turn_builds_spec_extracts_and_versions(builder):
     assert "explicit OK" in tool_msgs[-1]["content"]
 
 
+def test_extraction_can_target_conversations(builder):
+    c, ws, p, set_script = builder
+    _upload(c, ws, p)
+    model = set_script(
+        [
+            [("update_spec", {"spec": SPEC, "message": "draft"})],
+            [("estimate_extraction", {"n": 5, "conversation_ids": ["c2", "nope"]})],
+            [("extract_tasks", {"n": 5, "conversation_ids": ["c2", "nope"]})],
+            [("extract_tasks", {"n": 5, "conversation_ids": ["c2"]})],  # already done
+            [],
+        ]
+    )
+    c.post(f"{_base(ws, p)}/messages", json={"content": "fill the gap"})
+    _work()
+    assert model.extractions == 1  # only c2: unknown ids are skipped
+    tool_msgs = [
+        m["content"] for m in c.get(f"{_base(ws, p)}/messages").json()["messages"]
+        if m["role"] == "tool"
+    ]  # fmt: skip
+    assert '"conversations": 1' in tool_msgs[-3]  # the estimate counts what can be extracted
+    assert "none of the targeted conversations are left" in tool_msgs[-1]
+    head = c.get(_base(ws, p)).json()["head"]
+    tasks = c.get(f"{_base(ws, p)}/revisions/{head['id']}/tasks").json()
+    assert [t["source"]["conversation"] for t in tasks] == ["c2"]
+
+
+def test_get_tasks_index_and_full_records(builder):
+    c, ws, p, set_script = builder
+    _upload(c, ws, p)
+    set_script([[("update_spec", {"spec": SPEC, "message": "draft"})],
+                [("extract_tasks", {"n": 2})],
+                [("get_tasks", {})],
+                [("get_tasks", {"conversations": ["c2"]})],
+                [("get_tasks", {"ids": ["nope"]})], []])  # fmt: skip
+    c.post(f"{_base(ws, p)}/messages", json={"content": "audit"})
+    _work()
+    from sqlalchemy import select
+
+    from envforge.web.db import session_factory
+    from envforge.web.models import BuilderMessage
+
+    with session_factory()() as db:  # the chat API shortens tool results; read them whole
+        tool = [
+            json.loads(m.content)
+            for m in db.scalars(
+                select(BuilderMessage)
+                .where(BuilderMessage.project_id == p, BuilderMessage.role == "tool")
+                .order_by(BuilderMessage.seq)
+            )
+        ]
+    index, full, missing = tool[-3], tool[-2], tool[-1]
+    assert index["total"] == 2 and {r["conversation"] for r in index["tasks"]} == {"c1", "c2"}
+    assert "state" not in index["tasks"][0]  # the index stays compact
+    assert full["matched"] == 1 and full["tasks"][0]["source"]["conversation"] == "c2"
+    assert full["tasks"][0]["state"] and full["tasks"][0]["reference"]  # the whole record
+    assert "error" in missing
+
+
 def test_revisions_restore_checkout_branch_and_diff(builder):
     c, ws, p, set_script = builder
     set_script([[("update_spec", {"spec": SPEC, "message": "v1"})], []])
@@ -257,6 +315,57 @@ def test_publish_run_and_isolation(builder):
     assert r.status_code == 400
     assert c.get(_base(ws, p)).status_code == 404
     assert c.get(f"/api/workspaces/{ws}/builder/projects").status_code == 404
+
+
+def _published(c, ws, p, set_script) -> str:
+    set_script([[("update_spec", {"spec": SPEC, "message": "spec"})],
+                [("edit_tasks", {"upsert": [dict(t) for t in TASKS[:6]], "message": "t"})], []])  # fmt: skip
+    c.post(f"{_base(ws, p)}/messages", json={"content": "go"})
+    _work()
+    return c.post(f"{_base(ws, p)}/publish", json={}).json()["pack_name"]
+
+
+def test_delete_published_environment_keeps_past_runs(builder):
+    from envforge.web.worker import run_forever
+
+    c, ws, p, set_script = builder
+    name = _published(c, ws, p, set_script)
+    run = c.post(
+        f"/api/workspaces/{ws}/runs", json={"pack": name, "model": "scripted", "episodes": 2}
+    )
+    # a queued run on it blocks the delete
+    assert c.delete(f"/api/workspaces/{ws}/packs/{name}").status_code == 409
+    assert run_forever(once=True, kind="runs") == 1
+
+    assert c.delete(f"/api/workspaces/{ws}/packs/{name}").status_code == 204
+    assert name not in {x["name"] for x in c.get(f"/api/workspaces/{ws}/packs").json()}
+    assert c.get(_base(ws, p)).json()["versions"] == []
+    r = c.post(f"/api/workspaces/{ws}/runs", json={"pack": name, "model": "scripted"})
+    assert r.status_code == 400
+    # the run made on it still opens and replays
+    rid = run.json()["id"]
+    assert c.get(f"/api/workspaces/{ws}/runs/{rid}/episodes/0/replay").status_code == 200
+    assert c.get(f"/api/workspaces/{ws}/packs/{name}").status_code == 200
+    # built-ins can't be deleted, and a second delete is a 404
+    assert c.delete(f"/api/workspaces/{ws}/packs/netops").status_code == 404
+    assert c.delete(f"/api/workspaces/{ws}/packs/{name}").status_code == 404
+    # publishing again makes v2; the deleted number isn't reused
+    again = c.post(f"{_base(ws, p)}/publish", json={}).json()
+    assert again["pack_name"].endswith("@v2")
+
+
+def test_deleting_a_project_deletes_its_environments(builder):
+    c, ws, p, set_script = builder
+    name = _published(c, ws, p, set_script)
+    assert c.delete(_base(ws, p)).status_code == 204
+    assert name not in {x["name"] for x in c.get(f"/api/workspaces/{ws}/packs").json()}
+
+    # another workspace can't delete it (it can't even see it)
+    c.post("/api/auth/logout")
+    _signup(c, email="bob@example.com", pw="bobs-long-password")
+    bws = c.get("/api/workspaces").json()[0]["id"]
+    assert c.delete(f"/api/workspaces/{bws}/packs/{name}").status_code == 404
+    assert c.delete(f"/api/workspaces/{ws}/packs/{name}").status_code == 404
 
 
 def test_message_needs_a_key_for_the_builder_model(client):  # noqa: F811

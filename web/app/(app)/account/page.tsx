@@ -1,15 +1,20 @@
 "use client";
 
-// Your account: profile, password, provider keys and sessions. Provider keys live on
-// the account, so every workspace you run in uses the same keys.
+// Your account: profile, security (password, sessions) and provider keys, one tab each.
+// Provider keys live on the account, so every workspace you run in uses the same keys.
 
+import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { Avatar } from "@/components/AvatarMenu";
+import { Avatar } from "@/components/Avatar";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { invalidateModelCache } from "@/components/ModelPicker";
 import { Page, PageHeader, Panel } from "@/components/Page";
-import { Api, ApiError, type KeyOut, type Provider } from "@/lib/api";
+import { Tabs, tabPanelProps, useHashTab } from "@/components/Tabs";
+import { useToast } from "@/components/Toast";
+import { Api, type KeyOut, type Provider } from "@/lib/api";
 import { useAuthState } from "@/lib/auth";
+import { useWorkspace } from "@/lib/workspace";
 
 const PROVIDERS: { id: Provider; label: string; hint: string; needsUrl?: boolean }[] = [
   { id: "anthropic", label: "Anthropic", hint: "sk-ant-… · checked with Anthropic when saved; models like claude-sonnet-5-5" },
@@ -23,19 +28,21 @@ const PROVIDERS: { id: Provider; label: string; hint: string; needsUrl?: boolean
   },
 ];
 
-const msgOf = (e: unknown) => (e instanceof ApiError ? e.message : String(e));
+const TABS = ["profile", "security", "keys"] as const;
 
 export default function AccountPage() {
-  const { user, refresh } = useAuthState();
+  const { user, refresh, logout } = useAuthState();
+  const { workspaces } = useWorkspace();
+  const router = useRouter();
   const confirm = useConfirm();
+  const toast = useToast();
+  const [tab, setTab] = useHashTab(TABS, "profile");
   const [name, setName] = useState(user?.display_name ?? "");
-  const [profileMsg, setProfileMsg] = useState<string | null>(null);
   const [pw, setPw] = useState({ current: "", next: "", again: "" });
-  const [pwMsg, setPwMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [pwErr, setPwErr] = useState<string | null>(null);
   const [keys, setKeys] = useState<KeyOut[]>([]);
   const [secrets, setSecrets] = useState<Record<string, string>>({});
   const [urls, setUrls] = useState<Record<string, string>>({});
-  const [keyMsg, setKeyMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
 
   useEffect(() => {
@@ -44,8 +51,8 @@ export default function AccountPage() {
         setKeys(ks);
         setUrls(Object.fromEntries(ks.filter((k) => k.base_url).map((k) => [k.provider, k.base_url!])));
       })
-      .catch(() => {});
-  }, []);
+      .catch((e) => toast.error("Couldn't load your provider keys", e));
+  }, [toast]);
 
   if (!user) return null;
   const local = user.auth_provider === "local";
@@ -55,34 +62,55 @@ export default function AccountPage() {
     try {
       await Api.updateProfile(name);
       await refresh();
-      setProfileMsg("Saved.");
+      toast.success("Profile saved", "Your display name is updated everywhere it appears.");
     } catch (ex) {
-      setProfileMsg(msgOf(ex));
+      toast.error("Couldn't save your profile", ex);
     }
   }
 
   async function savePassword(e: React.FormEvent) {
     e.preventDefault();
-    if (pw.next !== pw.again) return setPwMsg({ ok: false, text: "The new passwords don't match." });
+    if (pw.next !== pw.again) return setPwErr("The new passwords don't match.");
+    setPwErr(null);
     try {
       await Api.changePassword(pw.current, pw.next);
       setPw({ current: "", next: "", again: "" });
-      setPwMsg({ ok: true, text: "Password changed. Other devices have been signed out." });
+      toast.success("Password changed", "Your other devices have been signed out.");
     } catch (ex) {
-      setPwMsg({ ok: false, text: msgOf(ex) });
+      toast.error("Couldn't change your password", ex);
     }
   }
 
-  async function saveKey(p: Provider) {
-    setBusy(p);
-    setKeyMsg(null);
+  async function signOutEverywhere() {
+    const ok = await confirm({
+      title: "Sign out everywhere?",
+      body: "Every browser and device signed in to your account will need to sign in again, including this one. Provider keys and workspaces are unaffected.",
+      confirmLabel: "Sign out everywhere",
+      tone: "danger",
+    });
+    if (!ok) return;
     try {
-      setKeys(await Api.putKey(p, secrets[p] ?? "", urls[p]));
+      await Api.logoutAll();
+      window.location.href = "/login";
+    } catch (ex) {
+      toast.error("Couldn't sign out everywhere", ex);
+    }
+  }
+
+  async function saveKey(p: Provider, label: string) {
+    setBusy(p);
+    try {
+      const ks = await Api.putKey(p, secrets[p] ?? "", urls[p]);
+      setKeys(ks);
       setSecrets({ ...secrets, [p]: "" });
       invalidateModelCache();
-      setKeyMsg({ ok: true, text: `${p} key saved.` });
+      const k = ks.find((x) => x.provider === p);
+      toast.success(
+        `${label} key saved`,
+        k?.verified_at ? `Verified with the provider${k.n_models !== null ? ` · ${k.n_models} models` : ""}.` : (k?.verify_note ?? "It will be checked on the first run."),
+      );
     } catch (ex) {
-      setKeyMsg({ ok: false, text: msgOf(ex) });
+      toast.error(`${label} key not saved`, ex);
     } finally {
       setBusy(null);
     }
@@ -96,56 +124,68 @@ export default function AccountPage() {
       tone: "danger",
     });
     if (!ok) return;
-    setKeys(await Api.deleteKey(p));
-    invalidateModelCache();
-    setKeyMsg({ ok: true, text: `${p} key removed.` });
+    try {
+      setKeys(await Api.deleteKey(p));
+      invalidateModelCache();
+      toast.warning(`${label} key removed`, `Runs that use ${label} models will fail until you add a key again.`);
+    } catch (ex) {
+      toast.error(`Couldn't remove the ${label} key`, ex);
+    }
   }
 
-  const sessions = (
-    <Panel title="Sessions">
-      <div className="flex flex-wrap items-center gap-4">
-        <div className="min-w-0 flex-1 text-sm" style={{ color: "var(--muted)" }}>
-          Sign out of envforge on every device and browser, including this one.
-        </div>
-        <button
-          className="btn-danger"
-          onClick={async () => {
-            const ok = await confirm({
-              title: "Sign out everywhere?",
-              body: "Every browser and device signed in to your account will need to sign in again, including this one.",
-              confirmLabel: "Sign out everywhere",
-              tone: "danger",
-            });
-            if (!ok) return;
-            await Api.logoutAll();
-            window.location.href = "/login";
-          }}
-        >
-          Sign out everywhere
-        </button>
-      </div>
-    </Panel>
-  );
+  const facts: [string, React.ReactNode][] = [
+    ["role", user.is_admin ? "admin" : "member"],
+    ["auth", local ? "local · email & password" : "Clerk"],
+    [
+      "workspaces",
+      <>
+        {workspaces.length} ·{" "}
+        <Link href="/settings" className="underline">
+          manage
+        </Link>
+      </>,
+    ],
+  ];
+  if (user.is_admin) facts.push(["admin tools", <span className="mono">envforge admin users | create-user | reset-password | sign-out | set-admin</span>]);
 
   return (
     <Page>
       <PageHeader
-        title="Profile"
-        description="Your account: profile, password, provider keys and sessions. Provider keys live on your account, so every workspace you run in uses the same keys."
+        leading={<Avatar name={user.display_name} email={user.email} size={56} />}
+        title={user.display_name || user.email}
+        description={
+          <>
+            {user.email} · {user.is_admin ? "admin · " : ""}signed in with {local ? "email & password" : "Clerk"}
+          </>
+        }
+        actions={
+          <button
+            className="btn-ghost"
+            onClick={async () => {
+              await logout();
+              router.replace("/login");
+            }}
+          >
+            Sign out
+          </button>
+        }
       />
 
-      <div className="grid grid-cols-1 items-start gap-6 xl:grid-cols-2">
-        <Panel title="Profile">
-          <div className="flex items-center gap-4">
-            <Avatar name={user.display_name} email={user.email} size={48} />
-            <div className="min-w-0">
-              <div className="truncate font-medium">{user.display_name || user.email}</div>
-              <div className="truncate text-sm" style={{ color: "var(--muted)" }}>
-                {user.email} · {user.is_admin ? "admin · " : ""}signed in with {local ? "email & password" : "Clerk"}
-              </div>
-            </div>
-          </div>
-          <form onSubmit={saveProfile} className="grid grid-cols-1 items-end gap-4 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]">
+      <Tabs
+        idPrefix="acct"
+        label="Account sections"
+        tabs={[
+          { id: "profile", label: "Profile" },
+          { id: "security", label: "Security" },
+          { id: "keys", label: "Provider keys", count: keys.length },
+        ]}
+        active={tab}
+        onChange={setTab}
+      />
+
+      <div {...tabPanelProps("acct", "profile")} hidden={tab !== "profile"} className="grid grid-cols-1 items-start gap-6 lg:grid-cols-2">
+        <Panel title="Profile" hint="how you appear in the sidebar and in Usage → By member">
+          <form onSubmit={saveProfile} className="space-y-4">
             <div>
               <label className="label" htmlFor="name">
                 Display name
@@ -157,161 +197,175 @@ export default function AccountPage() {
                 Email
               </label>
               <input id="email" className="input" value={user.email} disabled />
+              <div className="hint mt-1">Email is your sign-in and can&apos;t be changed here.</div>
             </div>
-            <button className="btn btn-field">Save</button>
+            <div className="flex justify-end border-t pt-4" style={{ borderColor: "var(--line)" }}>
+              <button className="btn">Save</button>
+            </div>
           </form>
-          {profileMsg && (
-            <div className="text-sm" style={{ color: profileMsg === "Saved." ? "var(--accent)" : "var(--bad)" }}>
-              {profileMsg}
-            </div>
-          )}
         </Panel>
+        <Panel title="Account">
+          <table className="data inset">
+            <tbody>
+              {facts.map(([k, v]) => (
+                <tr key={k}>
+                  <td style={{ color: "var(--muted)" }}>{k}</td>
+                  <td className="[overflow-wrap:anywhere]">{v}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </Panel>
+      </div>
 
-        {local ? (
-          <Panel title="Change password" hint="Changing it signs out your other devices.">
-            <form onSubmit={savePassword} className="space-y-4">
-              <div className="grid grid-cols-1 items-end gap-4 md:grid-cols-3">
-                <div>
-                  <label className="label" htmlFor="pw-current">
-                    Current password
-                  </label>
-                  <input
-                    id="pw-current"
-                    className="input"
-                    type="password"
-                    autoComplete="current-password"
-                    value={pw.current}
-                    onChange={(e) => setPw({ ...pw, current: e.target.value })}
-                  />
-                </div>
-                <div>
-                  <label className="label" htmlFor="pw-next">
-                    New password
-                  </label>
-                  <input
-                    id="pw-next"
-                    className="input"
-                    type="password"
-                    placeholder="10+ characters"
-                    autoComplete="new-password"
-                    minLength={10}
-                    value={pw.next}
-                    onChange={(e) => setPw({ ...pw, next: e.target.value })}
-                  />
-                </div>
-                <div>
-                  <label className="label" htmlFor="pw-again">
-                    Repeat new password
-                  </label>
-                  <input
-                    id="pw-again"
-                    className="input"
-                    type="password"
-                    autoComplete="new-password"
-                    value={pw.again}
-                    onChange={(e) => setPw({ ...pw, again: e.target.value })}
-                  />
-                </div>
+      <div {...tabPanelProps("acct", "security")} hidden={tab !== "security"} className="grid grid-cols-1 items-start gap-6 lg:grid-cols-2">
+        {local && (
+          <Panel title="Change password" hint="Changing it signs out every other device.">
+            <form onSubmit={savePassword} className="space-y-3">
+              <div>
+                <label className="label" htmlFor="pw-current">
+                  Current password
+                </label>
+                <input
+                  id="pw-current"
+                  className="input"
+                  type="password"
+                  autoComplete="current-password"
+                  value={pw.current}
+                  onChange={(e) => setPw({ ...pw, current: e.target.value })}
+                />
               </div>
-              <div className="flex flex-wrap items-center gap-3">
+              <div>
+                <label className="label" htmlFor="pw-next">
+                  New password
+                </label>
+                <input
+                  id="pw-next"
+                  className="input"
+                  type="password"
+                  placeholder="10+ characters"
+                  autoComplete="new-password"
+                  minLength={10}
+                  value={pw.next}
+                  onChange={(e) => setPw({ ...pw, next: e.target.value })}
+                />
+              </div>
+              <div>
+                <label className="label" htmlFor="pw-again">
+                  Repeat new password
+                </label>
+                <input
+                  id="pw-again"
+                  className="input"
+                  type="password"
+                  autoComplete="new-password"
+                  value={pw.again}
+                  aria-invalid={!!pwErr}
+                  aria-describedby={pwErr ? "pw-err" : undefined}
+                  onChange={(e) => {
+                    setPw({ ...pw, again: e.target.value });
+                    setPwErr(null);
+                  }}
+                />
+                {pwErr && (
+                  <div id="pw-err" className="mt-1 text-sm" style={{ color: "var(--bad)" }}>
+                    {pwErr}
+                  </div>
+                )}
+              </div>
+              <div className="flex justify-end border-t pt-3" style={{ borderColor: "var(--line)" }}>
                 <button className="btn" disabled={!pw.current || pw.next.length < 10}>
                   Change password
                 </button>
-                {pwMsg && (
-                  <span className="text-sm" style={{ color: pwMsg.ok ? "var(--accent)" : "var(--bad)" }}>
-                    {pwMsg.text}
-                  </span>
-                )}
               </div>
             </form>
           </Panel>
-        ) : (
-          sessions
         )}
+        <Panel title="Sessions">
+          <div className="space-y-3">
+            <div style={{ color: "var(--muted)" }}>Sign out of envforge on every device and browser, including this one.</div>
+            <button className="btn-danger" onClick={signOutEverywhere}>
+              Sign out everywhere
+            </button>
+          </div>
+        </Panel>
       </div>
 
-      <Panel
-        title="Provider keys"
-        hint="Your keys, used by every workspace you run in. They're encrypted at rest, never shown again after saving, and only decrypted by the worker that executes your runs. Anthropic and OpenAI keys are checked with the provider when you save them, and the model picker then lists exactly the models your key can use."
-      >
-        {keyMsg && (
-          <div className="text-sm" style={{ color: keyMsg.ok ? "var(--accent)" : "var(--bad)" }}>
-            {keyMsg.text}
+      <div {...tabPanelProps("acct", "keys")} hidden={tab !== "keys"}>
+        <Panel
+          flush
+          title="Provider keys"
+          footer={
+            <span>
+              Try the <span className="mono">scripted</span> model to run without any key. The vLLM base URL is checked against private-address rules before it is
+              saved.
+            </span>
+          }
+        >
+          <div className="border-b px-5 py-3" style={{ borderColor: "var(--line)", color: "var(--muted)" }}>
+            Encrypted at rest, decrypted only inside the worker that executes your runs, never shown again after saving. Anthropic and OpenAI keys are checked with
+            the provider when you save them, and the model picker then lists exactly the models your key can use. Keys are yours across every workspace.
           </div>
-        )}
-        <div>
           {PROVIDERS.map((p) => {
             const existing = keys.find((k) => k.provider === p.id);
             return (
-              // one grid for every provider: about | inputs | actions. Each column starts
-              // with a label line, so inputs and buttons line up across rows.
               <div
                 key={p.id}
-                className="grid grid-cols-1 items-start gap-x-6 gap-y-3 border-t py-4 first:border-t-0 first:pt-0 last:pb-0 lg:grid-cols-[minmax(14rem,2fr)_minmax(0,3fr)_12rem]"
+                className="grid grid-cols-1 items-start gap-4 border-b px-5 py-4 last:border-b-0 md:grid-cols-[220px_minmax(0,1fr)]"
                 style={{ borderColor: "var(--line)" }}
               >
-                <div className="min-w-0">
+                <div className="min-w-0 space-y-1">
                   <div className="font-medium">{p.label}</div>
-                  <div className="text-xs" style={{ color: "var(--muted)" }}>
-                    {p.hint}
-                  </div>
-                  {existing && (
-                    <div className="mt-1 text-xs">
-                      saved <span className="mono">{existing.masked}</span> · {new Date(existing.updated_at).toLocaleDateString()}
-                      {existing.verified_at && (
-                        <span style={{ color: "var(--good)" }}> · ✓ verified{existing.n_models !== null && ` · ${existing.n_models} models`}</span>
-                      )}
-                      {existing.verify_note && <div style={{ color: "var(--warn)" }}>{existing.verify_note}</div>}
-                      {!existing.verified_at && !existing.verify_note && (p.id === "vercel" || p.id === "vllm") && (
-                        <span style={{ color: "var(--muted)" }}> · checked on first run</span>
-                      )}
-                    </div>
-                  )}
+                  <div className="hint">{p.hint}</div>
                 </div>
-                <div className={`grid grid-cols-1 gap-3 ${p.needsUrl ? "sm:grid-cols-2" : ""}`}>
-                  {p.needsUrl && (
-                    <div>
-                      <label className="label" htmlFor={`url-${p.id}`}>
-                        Base URL
-                      </label>
-                      <input
-                        id={`url-${p.id}`}
-                        className="input mono"
-                        value={urls[p.id] ?? ""}
-                        onChange={(e) => setUrls({ ...urls, [p.id]: e.target.value })}
-                      />
+                <div className="min-w-0 space-y-2">
+                  {existing && (
+                    <div className="flex flex-wrap items-center gap-2">
+                      {existing.verified_at ? (
+                        <span className="pill pill-completed">✓ verified</span>
+                      ) : (
+                        <span className="pill pill-queued">saved</span>
+                      )}
+                      <span className="mono">{existing.masked}</span>
+                      <span className="hint">
+                        saved {new Date(existing.updated_at).toLocaleDateString()}
+                        {existing.n_models !== null && ` · ${existing.n_models} models`}
+                        {!existing.verified_at && !existing.verify_note && (p.id === "vercel" || p.id === "vllm") && " · checked on first run"}
+                      </span>
                     </div>
                   )}
-                  <div>
-                    <label className="label" htmlFor={`key-${p.id}`}>
-                      {existing ? "Replace key" : "API key"}
-                      {p.needsUrl && " (optional)"}
-                    </label>
+                  {existing?.verify_note && <div className="text-xs" style={{ color: "var(--warn)" }}>{existing.verify_note}</div>}
+                  {p.needsUrl && (
+                    <input
+                      id={`url-${p.id}`}
+                      className="input mono"
+                      aria-label={`${p.label} base URL`}
+                      placeholder="Base URL — http://your-box:8000/v1"
+                      value={urls[p.id] ?? ""}
+                      onChange={(e) => setUrls({ ...urls, [p.id]: e.target.value })}
+                    />
+                  )}
+                  <div className="flex flex-wrap items-center gap-2 sm:flex-nowrap">
                     <input
                       id={`key-${p.id}`}
                       className="input mono"
                       type="password"
                       autoComplete="off"
+                      aria-label={`${p.label} API key`}
+                      placeholder={existing ? "Replace key" : p.needsUrl ? "API key (optional)" : "API key"}
                       value={secrets[p.id] ?? ""}
                       onChange={(e) => setSecrets({ ...secrets, [p.id]: e.target.value })}
                     />
-                  </div>
-                </div>
-                <div>
-                  <span className="label invisible hidden lg:block" aria-hidden>
-                    actions
-                  </span>
-                  <div className="flex gap-2">
                     <button
-                      className="btn btn-field min-w-[6rem]"
+                      className="btn-ghost btn-field min-w-[5.5rem]"
                       type="button"
-                      onClick={() => saveKey(p.id)}
+                      onClick={() => saveKey(p.id, p.label)}
                       disabled={busy === p.id || !(secrets[p.id] || (p.needsUrl && urls[p.id]))}
                     >
                       {busy === p.id ? "Checking…" : "Save"}
                     </button>
                     {existing && (
-                      <button className="btn-ghost btn-field" type="button" onClick={() => removeKey(p.id, p.label)}>
+                      <button className="btn-danger btn-field" type="button" onClick={() => removeKey(p.id, p.label)}>
                         Remove
                       </button>
                     )}
@@ -320,10 +374,8 @@ export default function AccountPage() {
               </div>
             );
           })}
-        </div>
-      </Panel>
-
-      {local && sessions}
+        </Panel>
+      </div>
     </Page>
   );
 }

@@ -2,7 +2,9 @@
 
 import { useEffect, useState } from "react";
 import { BarChart } from "@/components/BarChart";
-import { Empty, Page, PageHeader, Panel } from "@/components/Page";
+import { Empty, Page, PageHeader, Panel, StatCard, StatGrid } from "@/components/Page";
+import { Tabs } from "@/components/Tabs";
+import { useToast } from "@/components/Toast";
 import { Api, fmtCost, fmtTokens, type Usage, type UsageBucket } from "@/lib/api";
 import { useWorkspace } from "@/lib/workspace";
 
@@ -13,13 +15,13 @@ export default function UsagePage() {
   const [days, setDays] = useState(30);
   const [scope, setScope] = useState<"workspace" | "me">("workspace");
   const [usage, setUsage] = useState<Usage | null>(null);
-  const [err, setErr] = useState<string | null>(null);
+  const toast = useToast();
 
   useEffect(() => {
     if (!ws) return;
     setUsage(null);
-    (scope === "workspace" ? Api.usage(ws.id, days) : Api.myUsage(days)).then(setUsage).catch((e) => setErr(String(e)));
-  }, [ws, days, scope]);
+    (scope === "workspace" ? Api.usage(ws.id, days) : Api.myUsage(days)).then(setUsage).catch((e) => toast.error("Couldn't load usage", e));
+  }, [ws, days, scope, toast]);
 
   if (!ws) return null;
 
@@ -29,35 +31,38 @@ export default function UsagePage() {
       <PageHeader
         title="Usage"
         meta={
-          <div className="flex gap-1 text-sm">
-            <Toggle on={scope === "workspace"} onClick={() => setScope("workspace")}>
-              {ws.name}
-            </Toggle>
-            <Toggle on={scope === "me"} onClick={() => setScope("me")}>
-              Me, all workspaces
-            </Toggle>
-          </div>
+          <Tabs
+            idPrefix="usage-scope"
+            variant="pills"
+            label="Scope"
+            tabs={[
+              { id: "workspace", label: ws.name },
+              { id: "me", label: "Me, all workspaces" },
+            ]}
+            active={scope}
+            onChange={(id) => setScope(id as "workspace" | "me")}
+          />
         }
         actions={
-          <div className="flex gap-1 text-sm">
-            {RANGES.map((d) => (
-              <Toggle key={d} on={days === d} onClick={() => setDays(d)}>
-                {d}d
-              </Toggle>
-            ))}
-          </div>
+          <Tabs
+            idPrefix="usage-range"
+            variant="pills"
+            label="Range"
+            tabs={RANGES.map((d) => ({ id: String(d), label: `${d}d` }))}
+            active={String(days)}
+            onChange={(id) => setDays(Number(id))}
+          />
         }
       />
 
-      {err && <div style={{ color: "var(--bad)" }}>{err}</div>}
       {!usage ? (
         <div style={{ color: "var(--muted)" }}>Loading…</div>
       ) : (
         <>
-          <div className="grid grid-cols-2 gap-4 md:grid-cols-3 xl:grid-cols-5">
-            <Tile label="runs" value={usage.totals.runs.toLocaleString()} />
-            <Tile label="episodes" value={usage.totals.episodes.toLocaleString()} />
-            <Tile
+          <StatGrid cols={5}>
+            <StatCard label="runs" value={usage.totals.runs.toLocaleString()} note={`last ${days} days`} />
+            <StatCard label="episodes" value={usage.totals.episodes.toLocaleString()} />
+            <StatCard
               label="input tokens"
               value={fmtTokens(usage.totals.input_tokens)}
               note={
@@ -66,30 +71,31 @@ export default function UsagePage() {
                   : undefined
               }
             />
-            <Tile label="output tokens" value={fmtTokens(usage.totals.output_tokens)} />
-            <Tile
+            <StatCard label="output tokens" value={fmtTokens(usage.totals.output_tokens)} />
+            <StatCard
               label="est. cost"
+              mono
               value={fmtCost(usage.totals.cost_usd)}
-              note={usage.totals.unpriced_runs ? `+ ${usage.totals.unpriced_runs} unpriced run(s)` : "at list price"}
+              note={usage.totals.unpriced_runs ? `at list price · + ${usage.totals.unpriced_runs} unpriced run(s)` : "at list price"}
             />
-          </div>
+          </StatGrid>
 
           {usage.builder && usage.builder.jobs > 0 && (
-            <div className="panel flex flex-wrap items-center gap-x-6 gap-y-1 px-5 py-3 text-sm">
-              <span className="font-semibold">Environment builder</span>
-              <span>{usage.builder.jobs} chat turn(s)</span>
+            <div className="panel flex flex-wrap items-center gap-x-6 gap-y-1 p-4">
+              <span className="font-medium">Environment builder</span>
               <span>
+                <span className="num">{usage.builder.jobs}</span> <span style={{ color: "var(--muted)" }}>chat turn(s)</span>
+              </span>
+              <span className="num">
                 {fmtTokens(usage.builder.input_tokens)} in · {fmtTokens(usage.builder.output_tokens)} out
               </span>
-              <span>est. {fmtCost(usage.builder.cost_usd)}</span>
-              <span className="text-xs" style={{ color: "var(--muted)" }}>
-                (includes task extraction; not part of the run totals above)
-              </span>
+              <span className="mono">est. {fmtCost(usage.builder.cost_usd)}</span>
+              <span className="hint">includes task extraction · not part of the run totals above</span>
             </div>
           )}
 
           <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-            <Panel title="Tokens per day">
+            <Panel title="Tokens per day" hint="input + output, hover a bar for the split">
               <BarChart
                 data={usage.by_day.map((d) => ({
                   label: d.date,
@@ -99,7 +105,7 @@ export default function UsagePage() {
                 format={fmtTokens}
               />
             </Panel>
-            <Panel title="Estimated cost per day">
+            <Panel title="Estimated cost per day" hint="USD · vLLM and scripted count as $0">
               <BarChart
                 data={usage.by_day.map((d) => ({ label: d.date, value: d.cost_usd, detail: `${d.episodes} episode(s)` }))}
                 format={(v) => fmtCost(v)}
@@ -108,7 +114,7 @@ export default function UsagePage() {
             </Panel>
           </div>
 
-          <div className="grid grid-cols-1 items-start gap-6 2xl:grid-cols-2">
+          <div className="grid grid-cols-1 items-start gap-6 xl:grid-cols-2">
             <Panel title="By model" flush>
               <BucketTable rows={usage.by_model.map((r) => ({ key: r.model, label: <span className="mono">{r.model}</span>, ...r }))} />
             </Panel>
@@ -124,40 +130,13 @@ export default function UsagePage() {
             </Panel>
           </div>
 
-          <p className="text-xs" style={{ color: "var(--muted)" }}>
+          <p className="hint">
             Cost is estimated from token counts at the Vercel AI Gateway&apos;s list prices (also used for native Anthropic/OpenAI ids); prompt-caching
             discounts are ignored. Self-hosted vLLM and the scripted model count as $0.
           </p>
         </>
       )}
     </Page>
-  );
-}
-
-function Toggle({ on, onClick, children }: { on: boolean; onClick: () => void; children: React.ReactNode }) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="rounded-md border px-2.5 py-1"
-      style={{ borderColor: on ? "var(--accent)" : "var(--line)", color: on ? "var(--accent)" : "var(--muted)" }}
-    >
-      {children}
-    </button>
-  );
-}
-
-function Tile({ label, value, note }: { label: string; value: string; note?: string }) {
-  return (
-    <div className="panel p-5">
-      <div className="label">{label}</div>
-      <div className="mt-1 text-2xl font-semibold tabular-nums">{value}</div>
-      {note && (
-        <div className="mt-1 text-xs" style={{ color: "var(--muted)" }}>
-          {note}
-        </div>
-      )}
-    </div>
   );
 }
 
@@ -179,11 +158,11 @@ function BucketTable({ rows }: { rows: (UsageBucket & { key: string; label: Reac
         {rows.map((r) => (
           <tr key={r.key}>
             <td>{r.label}</td>
-            <td className="tabular-nums">{r.runs}</td>
-            <td className="tabular-nums">{r.episodes}</td>
-            <td className="tabular-nums">{fmtTokens(r.input_tokens)}</td>
-            <td className="tabular-nums">{fmtTokens(r.output_tokens)}</td>
-            <td className="tabular-nums">
+            <td className="num">{r.runs}</td>
+            <td className="num">{r.episodes}</td>
+            <td className="num">{fmtTokens(r.input_tokens)}</td>
+            <td className="num">{fmtTokens(r.output_tokens)}</td>
+            <td className="num mono">
               {fmtCost(r.cost_usd)}
               {r.unpriced_runs > 0 && <span style={{ color: "var(--muted)" }}> +?</span>}
             </td>

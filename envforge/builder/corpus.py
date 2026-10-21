@@ -257,6 +257,35 @@ class CorpusStore:
                 found[cid] = conv
         return [found[i] for i in wanted if i in found]
 
+    def resolve_ids(self, refs: Iterable[str]) -> list[str]:
+        """Store ids for conversation references, in the order given. A reference is a
+        store id ("<upload>:<id>") or the conversation's id in the user's file (`ext_id`,
+        which may match one conversation per upload). Unknown references are skipped."""
+        wanted = [str(r) for r in dict.fromkeys(refs)]
+        by_ref: dict[str, list[str]] = {}
+        for chunk in _chunks(wanted):
+            marks = ",".join("?" * len(chunk))
+            rows = self.db.execute(
+                f"SELECT id, ext_id FROM conversations WHERE id IN ({marks}) "
+                f"OR ext_id IN ({marks}) ORDER BY seq",
+                (*chunk, *chunk),
+            )
+            for cid, ext in rows:
+                for ref in {cid, ext}:
+                    by_ref.setdefault(ref, []).append(cid)
+        out: list[str] = []
+        for ref in wanted:
+            out.extend(i for i in by_ref.get(ref, []) if i not in out)
+        return out
+
+    def cluster_ids(self, cluster: int) -> list[str]:
+        """Every unique conversation id in one topic cluster, in seq order."""
+        rows = self.db.execute(
+            "SELECT id FROM conversations WHERE cluster = ? AND near_dup_of IS NULL ORDER BY seq",
+            (cluster,),
+        )
+        return [r[0] for r in rows]
+
     def iter_rows(
         self,
         columns: str,

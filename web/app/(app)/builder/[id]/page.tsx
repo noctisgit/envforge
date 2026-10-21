@@ -8,12 +8,15 @@ import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useConfirm } from "@/components/ConfirmDialog";
+import { useDeleteEnvironment } from "@/components/DeleteEnvironment";
 import { DiagramView } from "@/components/DiagramView";
 import { Markdown } from "@/components/Markdown";
+import { Empty, Page, PageHeader } from "@/components/Page";
 import { CorpusPanel, PrivacyPanel } from "@/components/PrivacyPanel";
+import { Tabs, tabPanelProps, useHashTab, type TabItem } from "@/components/Tabs";
+import { errorText, useToast } from "@/components/Toast";
 import {
   Api,
-  ApiError,
   importBuilderUrl,
   uploadBuilderFile,
   type BuilderMessage,
@@ -26,8 +29,6 @@ import {
 } from "@/lib/api";
 import { useWorkspace } from "@/lib/workspace";
 
-const msgOf = (e: unknown) => (e instanceof ApiError ? e.message : String(e));
-
 const TOOL_LABEL: Record<string, string> = {
   get_state: "Read the project",
   update_spec: "Updated the spec",
@@ -39,14 +40,37 @@ const TOOL_LABEL: Record<string, string> = {
   preview_task: "Previewed a task",
 };
 
-type Tab = "overview" | "spec" | "tasks" | "data" | "revisions" | "preview";
+const TAB_IDS = ["overview", "spec", "tasks", "data", "revisions", "preview"] as const;
+const P = "proj";
+
+/** Publish a revision (the head by default) after a confirmation; toasts the result. */
+function usePublish(wsId: string, project: BuilderProject, onChange: () => void) {
+  const confirm = useConfirm();
+  const toast = useToast();
+  return async (rev: { id?: string; number: number; tasksOk: number }) => {
+    const next = project.versions.length + 1;
+    const ok = await confirm({
+      title: `Publish revision ${rev.number} as ${project.name}@v${next}?`,
+      body: `The spec and its ${rev.tasksOk} valid task${rev.tasksOk === 1 ? "" : "s"} are frozen as an environment anyone in this workspace can run. Tasks with problems are left out. Earlier versions stay runnable, and you can keep editing and publish again later.`,
+      confirmLabel: "Publish",
+    });
+    if (!ok) return;
+    try {
+      const r = await Api.publish(wsId, project.id, rev.id);
+      toast.success(`Published ${r.pack_name}`, "It's listed under Environments, ready to run.");
+      onChange();
+    } catch (e) {
+      toast.error("Couldn't publish", e);
+    }
+  };
+}
 
 export default function BuilderProjectPage() {
   const { id } = useParams<{ id: string }>();
   const { current: ws } = useWorkspace();
   const [project, setProject] = useState<BuilderProject | null>(null);
   const [err, setErr] = useState<string | null>(null);
-  const [tab, setTab] = useState<Tab>("overview");
+  const [tab, setTab] = useHashTab(TAB_IDS, "overview");
   const [revKey, setRevKey] = useState(0); // bump to refresh right-hand panels
 
   const loadProject = useCallback(async () => {
@@ -54,7 +78,7 @@ export default function BuilderProjectPage() {
     try {
       setProject(await Api.project(ws.id, id));
     } catch (e) {
-      setErr(msgOf(e));
+      setErr(errorText(e));
     }
   }, [ws, id]);
 
@@ -70,58 +94,91 @@ export default function BuilderProjectPage() {
     setRevKey((k) => k + 1);
   };
 
+  const latest = project.versions[project.versions.length - 1];
+  const tabs: TabItem[] = [
+    { id: "overview", label: "Overview" },
+    { id: "spec", label: "Spec" },
+    { id: "tasks", label: "Tasks", ...(project.head ? { count: project.head.n_tasks } : {}) },
+    { id: "data", label: "Data", ...(project.uploads.length ? { count: project.uploads.length } : {}) },
+    { id: "revisions", label: "Revisions" },
+    { id: "preview", label: "Preview" },
+  ];
+
   return (
-    <div className="space-y-4">
-      <div className="flex flex-wrap items-center gap-3">
-        <Link href="/builder" style={{ color: "var(--muted)" }}>
-          ← Builder
-        </Link>
-        <h1 className="text-lg font-semibold">{project.title || project.name}</h1>
-        {project.head && <span className="pill pill-queued">r{project.head.number}</span>}
-        {project.versions.length > 0 && (
-          <span className="pill pill-completed">published {project.versions[project.versions.length - 1].pack_name}</span>
-        )}
-      </div>
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,5fr)_minmax(0,7fr)]">
+    <Page>
+      <PageHeader
+        back={{ href: "/builder", label: "Builder" }}
+        title={
+          <>
+            {project.title || project.name}
+            {project.title && project.title !== project.name && (
+              <span className="mono ml-2 text-sm font-normal" style={{ color: "var(--muted)" }}>
+                {project.name}
+              </span>
+            )}
+          </>
+        }
+        meta={
+          <>
+            {project.head && <span className="pill pill-tag">r{project.head.number} · head</span>}
+            {latest && <span className="pill pill-completed">published {latest.pack_name}</span>}
+          </>
+        }
+        actions={
+          <>
+            {latest && (
+              <Link href={`/environments/${encodeURIComponent(latest.pack_name)}`} className="btn-ghost">
+                View as environment
+              </Link>
+            )}
+            {project.head && <PublishButton wsId={ws.id} project={project} onChange={refresh} />}
+          </>
+        }
+      />
+      <div className="grid grid-cols-1 gap-5 lg:grid-cols-[minmax(0,5fr)_minmax(0,7fr)]">
         <Chat wsId={ws.id} project={project} onChange={refresh} onOpenRevisions={() => setTab("revisions")} />
-        <div className="panel min-w-0 p-0">
-          <div className="flex flex-wrap gap-1 border-b px-3 pt-3" style={{ borderColor: "var(--line)" }}>
-            {(["overview", "spec", "tasks", "data", "revisions", "preview"] as Tab[]).map((t) => (
-              <button
-                key={t}
-                onClick={() => setTab(t)}
-                className="rounded-t-md px-3 py-1.5 text-sm capitalize"
-                style={{
-                  color: tab === t ? "var(--fg)" : "var(--muted)",
-                  borderBottom: `2px solid ${tab === t ? "var(--accent)" : "transparent"}`,
-                }}
-              >
-                {t}
-                {t === "data" && project.uploads.length > 0 && ` (${project.uploads.length})`}
-              </button>
-            ))}
+        <section className="panel flex min-w-0 flex-col" aria-label="Project">
+          <div className="px-4 pt-2">
+            <Tabs idPrefix={P} label="Project sections" tabs={tabs} active={tab} onChange={setTab} />
           </div>
-          <div className="p-4">
-            {tab === "overview" && <Overview wsId={ws.id} project={project} onChange={refresh} />}
+          <div {...tabPanelProps(P, tab)} className={`min-w-0 outline-none ${tab === "tasks" ? "" : "p-4"}`}>
+            {tab === "overview" && <Overview wsId={ws.id} project={project} onChange={loadProject} />}
             {tab === "spec" && <SpecTab key={revKey} wsId={ws.id} project={project} onChange={refresh} />}
             {tab === "tasks" && <TasksTab key={revKey} wsId={ws.id} project={project} />}
             {tab === "data" && <DataTab wsId={ws.id} project={project} onChange={refresh} />}
             {tab === "revisions" && <RevisionsTab key={revKey} wsId={ws.id} project={project} onChange={refresh} />}
             {tab === "preview" && <PreviewTab key={revKey} wsId={ws.id} project={project} />}
           </div>
-        </div>
+        </section>
       </div>
-    </div>
+    </Page>
+  );
+}
+
+function PublishButton({ wsId, project, onChange }: { wsId: string; project: BuilderProject; onChange: () => void }) {
+  const publish = usePublish(wsId, project, onChange);
+  const h = project.head!;
+  const v = h.validation;
+  const canPublish = !!v?.spec_ok && (v?.tasks_ok ?? 0) > 0;
+  return (
+    <button
+      className="btn"
+      disabled={!canPublish}
+      title={canPublish ? "" : "needs a valid spec and at least one valid task"}
+      onClick={() => publish({ number: h.number, tasksOk: v?.tasks_ok ?? 0 })}
+    >
+      Publish r{h.number} as v{project.versions.length + 1}
+    </button>
   );
 }
 
 // ---- chat ------------------------------------------------------------------------------
 
 function Chat({ wsId, project, onChange, onOpenRevisions }: { wsId: string; project: BuilderProject; onChange: () => void; onOpenRevisions: () => void }) {
+  const toast = useToast();
   const [messages, setMessages] = useState<BuilderMessage[]>([]);
   const [job, setJob] = useState<{ status: string; progress: string } | null>(project.job);
   const [draft, setDraft] = useState("");
-  const [sendErr, setSendErr] = useState<string | null>(null);
   const [uploading, setUploading] = useState<string | null>(null);
   const lastSeq = useRef(0);
   const wasBusy = useRef(!!project.job);
@@ -129,12 +186,13 @@ function Chat({ wsId, project, onChange, onOpenRevisions }: { wsId: string; proj
   const fileInput = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
+    // an error from the first message, sent by the "Start building" form before it navigated here
     const e = sessionStorage.getItem(`builder-error-${project.id}`);
     if (e) {
-      setSendErr(e);
+      toast.error("Couldn't send your first message", e);
       sessionStorage.removeItem(`builder-error-${project.id}`);
     }
-  }, [project.id]);
+  }, [project.id, toast]);
 
   const poll = useCallback(async () => {
     try {
@@ -166,7 +224,6 @@ function Chat({ wsId, project, onChange, onOpenRevisions }: { wsId: string; proj
   async function send() {
     const text = draft.trim();
     if (!text) return;
-    setSendErr(null);
     try {
       await Api.sendBuilderMessage(wsId, project.id, text);
       setDraft("");
@@ -174,68 +231,71 @@ function Chat({ wsId, project, onChange, onOpenRevisions }: { wsId: string; proj
       setJob({ status: "queued", progress: "Thinking" });
       poll();
     } catch (e) {
-      setSendErr(msgOf(e));
+      toast.error("Message not sent", e);
     }
   }
 
   async function upload(files: FileList | null) {
     if (!files?.length) return;
+    let done = 0;
     for (const f of Array.from(files)) {
       setUploading(f.name);
       try {
         await uploadBuilderFile(wsId, project.id, f, (sent, total) =>
           setUploading(`${f.name} — ${Math.floor((100 * sent) / Math.max(1, total))}% of ${(total / 2 ** 20).toFixed(total > 2 ** 30 ? 0 : 1)} MB`),
         );
+        done++;
       } catch (e) {
-        setSendErr(`${f.name}: ${msgOf(e)}`);
+        toast.error(`Upload failed: ${f.name}`, e);
       }
     }
     setUploading(null);
+    if (fileInput.current) fileInput.current.value = "";
+    if (done) toast.success(done === 1 ? "File uploaded" : `${done} files uploaded`, "Redacting now — progress is under Data.");
     onChange();
   }
 
   const busy = !!job;
   return (
-    <div className="panel flex h-[calc(100vh-170px)] min-h-[520px] flex-col p-0">
+    <section className="panel flex h-[calc(100vh-200px)] min-h-[560px] min-w-0 flex-col" aria-label="Builder chat">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 border-b px-4 py-3" style={{ borderColor: "var(--line)" }}>
+        <h2 className="text-lg font-semibold">Builder</h2>
+        <span className="hint mono">{project.builder_model}</span>
+        <span className="hint">· every change becomes a revision</span>
+      </div>
       <div ref={scroller} className="flex-1 space-y-3 overflow-y-auto p-4">
         {messages.length === 0 && !busy && (
-          <div className="text-sm" style={{ color: "var(--muted)" }}>
-            Tell the builder what the agent should learn, and attach your chat logs with 📎.
-          </div>
+          <div style={{ color: "var(--muted)" }}>Tell the builder what the agent should learn, and attach your chat logs.</div>
         )}
         {messages.map((m) => (
           <ChatMessage key={m.id} m={m} onOpenRevisions={onOpenRevisions} />
         ))}
         {busy && (
-          <div className="flex items-center gap-2 text-sm" style={{ color: "var(--muted)" }}>
+          <div className="flex items-center gap-2 text-xs" style={{ color: "var(--muted)" }}>
             <span className="inline-block h-2 w-2 animate-pulse rounded-full" style={{ background: "var(--accent)" }} />
             {job?.status === "queued" ? "Queued…" : `${job?.progress || "Working"}…`}
           </div>
         )}
       </div>
-      <div className="space-y-2 border-t p-3" style={{ borderColor: "var(--line)" }}>
-        {sendErr && (
-          <div className="text-xs" style={{ color: "var(--bad)" }}>
-            {sendErr}
-          </div>
-        )}
-        {uploading && (
-          <div className="text-xs" style={{ color: "var(--muted)" }}>
-            Uploading {uploading}… (you can leave and re-pick the same file later to resume)
-          </div>
-        )}
+      <div className="space-y-2 border-t px-4 py-3" style={{ borderColor: "var(--line)" }}>
+        {uploading && <div className="hint">Uploading {uploading}… (you can leave and re-pick the same file later to resume)</div>}
         <div className="flex items-end gap-2">
           <button
             type="button"
-            className="btn-ghost px-2.5"
-            title="Upload chat logs (CSV, TXT, JSON) — personal data is redacted before the builder sees it"
+            className="btn-ghost btn-field"
+            aria-label="Attach chat logs (.csv .txt .json .jsonl .log, optionally .gz) — redacted before the model sees them"
+            title="Attach chat logs (CSV, TXT, JSON) — personal data is redacted before the builder sees it"
             onClick={() => fileInput.current?.click()}
           >
-            📎
+            <svg aria-hidden width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+            </svg>
+            Attach
           </button>
           <input ref={fileInput} type="file" multiple accept=".csv,.txt,.json,.jsonl,.log,.gz" className="hidden" onChange={(e) => upload(e.target.files)} />
           <textarea
             className="input max-h-40 min-h-[44px] flex-1 resize-y"
+            aria-label="Message the builder"
             placeholder={busy ? "The builder is working…" : "Message the builder (Enter to send, Shift+Enter for a new line)"}
             value={draft}
             maxLength={20000}
@@ -247,15 +307,12 @@ function Chat({ wsId, project, onChange, onOpenRevisions }: { wsId: string; proj
               }
             }}
           />
-          <button className="btn" onClick={send} disabled={busy || !draft.trim()}>
+          <button className="btn btn-field" onClick={send} disabled={busy || !draft.trim()}>
             Send
           </button>
         </div>
-        <div className="text-[11px]" style={{ color: "var(--muted)" }}>
-          {project.builder_model} · every change becomes a revision you can roll back
-        </div>
       </div>
-    </div>
+    </section>
   );
 }
 
@@ -270,7 +327,10 @@ function ChatMessage({ m, onOpenRevisions }: { m: BuilderMessage; onOpenRevision
       );
     return (
       <div className="flex justify-end">
-        <div className="max-w-[85%] whitespace-pre-wrap rounded-lg px-3 py-2 text-sm" style={{ background: "#173b36" }}>
+        <div
+          className="max-w-[85%] border px-3 py-2 whitespace-pre-wrap [overflow-wrap:anywhere]"
+          style={{ background: "var(--input-bg)", borderColor: "var(--line)", borderRadius: "10px 10px 2px 10px" }}
+        >
           {m.content}
         </div>
       </div>
@@ -285,11 +345,11 @@ function ChatMessage({ m, onOpenRevisions }: { m: BuilderMessage; onOpenRevision
       error = m.content.includes('"error"');
     }
     return (
-      <div className="flex items-center gap-2 text-xs" style={{ color: "var(--muted)" }}>
+      <div className="flex flex-wrap items-center gap-2 text-xs" style={{ color: "var(--muted)" }}>
         <span style={{ color: error ? "var(--warn)" : "var(--good)" }}>{error ? "!" : "✓"}</span>
         {TOOL_LABEL[m.name ?? ""] ?? m.name}
         {rev && (
-          <button className="underline" onClick={onOpenRevisions}>
+          <button className="btn-ghost btn-sm !py-0" onClick={onOpenRevisions}>
             → revision {rev}
           </button>
         )}
@@ -299,7 +359,7 @@ function ChatMessage({ m, onOpenRevisions }: { m: BuilderMessage; onOpenRevision
   }
   if (!m.content.trim()) return null;
   return (
-    <div className="max-w-[95%] text-sm">
+    <div className="max-w-[92%]">
       <Markdown text={m.content} />
     </div>
   );
@@ -309,120 +369,123 @@ function ChatMessage({ m, onOpenRevisions }: { m: BuilderMessage; onOpenRevision
 
 function Overview({ wsId, project, onChange }: { wsId: string; project: BuilderProject; onChange: () => void }) {
   const confirm = useConfirm();
+  const removeEnv = useDeleteEnvironment();
+  const toast = useToast();
   const router = useRouter();
-  const [msg, setMsg] = useState<string | null>(null);
   const h = project.head;
   const v = h?.validation;
-  const canPublish = !!v?.spec_ok && (v?.tasks_ok ?? 0) > 0;
-  const next = project.versions.length + 1;
+  const revOf = (revisionId: string) => (h && h.id === revisionId ? `r${h.number}` : null);
 
   return (
-    <div className="space-y-5 text-sm">
+    <div className="space-y-4">
       {project.purpose && (
         <div>
           <div className="label">purpose</div>
           <p className="whitespace-pre-wrap">{project.purpose}</p>
         </div>
       )}
-      <div>
-        <div className="label mb-1">readiness</div>
-        <ul className="space-y-1">
-          {project.readiness.map((r) => (
-            <li key={r.item} className="flex items-center gap-2">
-              <span style={{ color: r.ok ? "var(--good)" : "var(--muted)" }}>{r.ok ? "✓" : "○"}</span>
-              {r.item}
-              {r.detail !== undefined && r.detail !== null && typeof r.detail !== "object" && (
-                <span style={{ color: "var(--muted)" }}>· {String(r.detail)}</span>
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+        <div className="space-y-1.5">
+          <div className="label">readiness</div>
+          <ul className="space-y-1.5">
+            {project.readiness.map((r) => (
+              <li key={r.item} className="flex gap-2">
+                <span style={{ color: r.ok ? "var(--good)" : "var(--muted)" }}>{r.ok ? "✓" : "○"}</span>
+                <span>
+                  {r.item}
+                  {r.detail !== undefined && r.detail !== null && typeof r.detail !== "object" && <span style={{ color: "var(--muted)" }}> · {String(r.detail)}</span>}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+        <div className="space-y-1.5">
+          <div className="label">current revision</div>
+          {h ? (
+            <>
+              <div>
+                r{h.number} · {h.n_tasks} task{h.n_tasks === 1 ? "" : "s"} ({v?.tasks_ok ?? 0} valid) · spec{" "}
+                <span style={{ color: v?.spec_ok ? "var(--good)" : "var(--bad)" }}>{v?.spec_ok ? "valid" : "has problems"}</span>
+              </div>
+              {!!v?.spec_problems?.length && (
+                <ul className="list-disc pl-5 text-xs" style={{ color: "var(--warn)" }}>
+                  {v.spec_problems.slice(0, 8).map((p, i) => (
+                    <li key={i}>{p}</li>
+                  ))}
+                </ul>
               )}
-            </li>
-          ))}
-        </ul>
-      </div>
-      <div>
-        <div className="label mb-1">current revision</div>
-        {h ? (
-          <div className="space-y-1">
-            <div>
-              r{h.number} · {h.n_tasks} task{h.n_tasks === 1 ? "" : "s"} ({v?.tasks_ok ?? 0} valid) · spec{" "}
-              <span style={{ color: v?.spec_ok ? "var(--good)" : "var(--bad)" }}>{v?.spec_ok ? "valid" : "has problems"}</span>
-            </div>
-            {!!v?.spec_problems?.length && (
-              <ul className="list-disc pl-5 text-xs" style={{ color: "var(--warn)" }}>
-                {v.spec_problems.slice(0, 8).map((p, i) => (
-                  <li key={i}>{p}</li>
-                ))}
-              </ul>
-            )}
-          </div>
-        ) : (
-          <div style={{ color: "var(--muted)" }}>No revision yet — the builder creates one when it drafts the spec.</div>
-        )}
-      </div>
-      <div className="flex flex-wrap items-center gap-3" hidden={!h}>
-        <button
-          className="btn"
-          disabled={!canPublish}
-          title={canPublish ? "" : "needs a valid spec and at least one valid task"}
-          onClick={async () => {
-            const ok = await confirm({
-              title: `Publish revision ${h!.number} as ${project.name}@v${next}?`,
-              body: `The spec and its ${v!.tasks_ok} valid task(s) are frozen as a runnable environment in this workspace. Tasks with problems are left out. You can keep editing and publish again later.`,
-              confirmLabel: "Publish",
-            });
-            if (!ok) return;
-            try {
-              const r = await Api.publish(wsId, project.id);
-              setMsg(`Published ${r.pack_name}.`);
-              onChange();
-            } catch (e) {
-              setMsg(msgOf(e));
-            }
-          }}
-        >
-          Publish r{h?.number ?? "–"} as v{next}
-        </button>
-        {msg && <span style={{ color: "var(--accent)" }}>{msg}</span>}
+            </>
+          ) : (
+            <div style={{ color: "var(--muted)" }}>No revision yet — the builder creates one when it drafts the spec.</div>
+          )}
+        </div>
       </div>
       {project.versions.length > 0 && (
-        <div>
-          <div className="label mb-1">published versions</div>
-          <table className="data">
-            <tbody>
-              {[...project.versions].reverse().map((ver) => (
-                <tr key={ver.version}>
-                  <td className="mono">{ver.pack_name}</td>
-                  <td style={{ color: "var(--muted)" }}>{new Date(ver.created_at).toLocaleString()}</td>
-                  <td>
-                    <Link href={`/environments/${encodeURIComponent(ver.pack_name)}`} className="underline">
-                      view
-                    </Link>
-                  </td>
-                  <td>
-                    <Link href={`/runs?pack=${encodeURIComponent(ver.pack_name)}`} className="underline">
-                      run
-                    </Link>
-                  </td>
+        <div className="border-t pt-3" style={{ borderColor: "var(--line)" }}>
+          <div className="label mb-1.5">published versions</div>
+          <div className="overflow-x-auto">
+            <table className="data inset">
+              <thead>
+                <tr>
+                  <th>pack</th>
+                  <th>published</th>
+                  <th></th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {[...project.versions].reverse().map((ver) => (
+                  <tr key={ver.version}>
+                    <td className="mono">
+                      {ver.pack_name}
+                      {revOf(ver.revision_id) && <span style={{ color: "var(--muted)" }}> · from {revOf(ver.revision_id)}</span>}
+                    </td>
+                    <td style={{ color: "var(--muted)" }}>{new Date(ver.created_at).toLocaleString()}</td>
+                    <td>
+                      <span className="flex justify-end gap-1.5">
+                        <Link href={`/environments/${encodeURIComponent(ver.pack_name)}`} className="btn-ghost btn-sm">
+                          view
+                        </Link>
+                        <Link href={`/runs?pack=${encodeURIComponent(ver.pack_name)}`} className="btn-ghost btn-sm">
+                          run
+                        </Link>
+                        <button
+                          className="btn-ghost btn-sm"
+                          style={{ color: "var(--bad)" }}
+                          onClick={async () => {
+                            if (await removeEnv(wsId, ver.pack_name)) onChange();
+                          }}
+                        >
+                          delete
+                        </button>
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
-      <div className="border-t pt-4" style={{ borderColor: "var(--line)" }}>
+      <div className="flex flex-wrap items-center justify-between gap-3 border-t pt-3" style={{ borderColor: "var(--line)" }}>
+        <span className="hint">Deleting removes the chat, every revision and upload, and the environments published from it.</span>
         <button
-          className="btn-ghost"
-          style={{ color: "var(--bad)" }}
+          className="btn-danger"
           onClick={async () => {
             const ok = await confirm({
               title: "Delete this project?",
-              body: "The chat, revisions and uploads are removed from the builder. Published versions stay runnable, because runs may reference them.",
+              body: `The chat, revisions and uploads are removed from the builder${project.versions.length ? `, and ${project.versions.map((v) => v.pack_name).join(", ")} leave${project.versions.length === 1 ? "s" : ""} the Environments list` : ""}. Runs already made keep their results and replays.`,
               confirmLabel: "Delete project",
               tone: "danger",
               requireText: project.name,
             });
             if (!ok) return;
-            await Api.deleteProject(wsId, project.id);
-            router.replace("/builder");
+            try {
+              await Api.deleteProject(wsId, project.id);
+              toast.success("Project deleted");
+              router.replace("/builder");
+            } catch (e) {
+              toast.error("Couldn't delete the project", e);
+            }
           }}
         >
           Delete project
@@ -435,6 +498,7 @@ function Overview({ wsId, project, onChange }: { wsId: string; project: BuilderP
 // ---- spec ---------------------------------------------------------------------------------
 
 function SpecTab({ wsId, project, onChange }: { wsId: string; project: BuilderProject; onChange: () => void }) {
+  const toast = useToast();
   const spec = project.head?.spec;
   const [editing, setEditing] = useState(false);
   const [text, setText] = useState(spec ? JSON.stringify(spec, null, 2) : "");
@@ -443,7 +507,7 @@ function SpecTab({ wsId, project, onChange }: { wsId: string; project: BuilderPr
 
   if (!spec && !editing)
     return (
-      <div className="text-sm" style={{ color: "var(--muted)" }}>
+      <div style={{ color: "var(--muted)" }}>
         No spec yet. The builder drafts one once it understands your goal.
       </div>
     );
@@ -460,39 +524,40 @@ function SpecTab({ wsId, project, onChange }: { wsId: string; project: BuilderPr
     try {
       await Api.editSpec(wsId, project.id, parsed, message || "Edited the spec by hand");
       setEditing(false);
+      toast.success("Spec saved as a new revision");
       onChange();
     } catch (e) {
-      setErr(msgOf(e));
+      toast.error("Couldn't save the spec", e);
     }
   }
 
   return (
     <div className="space-y-3">
-      <div className="flex items-center gap-2 text-sm">
-        <span style={{ color: "var(--muted)" }}>revision {project.head?.number} · EnvSpec JSON</span>
+      <div className="flex flex-wrap items-center gap-2">
+        <span style={{ color: "var(--muted)" }}>
+          revision {project.head?.number} · <span className="mono text-xs">EnvSpec</span> JSON
+        </span>
         {!editing ? (
-          <button className="btn-ghost ml-auto py-1" onClick={() => setEditing(true)}>
+          <button className="btn-ghost ml-auto" onClick={() => setEditing(true)}>
             Edit by hand
           </button>
         ) : (
-          <div className="ml-auto flex gap-2">
-            <input className="input !w-64 py-1" placeholder="what changed (optional)" value={message} onChange={(e) => setMessage(e.target.value)} />
-            <button className="btn py-1" onClick={save}>
+          <div className="ml-auto flex flex-wrap gap-2">
+            <input className="input !w-64" aria-label="What changed" placeholder="what changed (optional)" value={message} onChange={(e) => setMessage(e.target.value)} />
+            <button className="btn" onClick={save}>
               Save as new revision
             </button>
-            <button className="btn-ghost py-1" onClick={() => setEditing(false)}>
+            <button className="btn-ghost" onClick={() => setEditing(false)}>
               Cancel
             </button>
           </div>
         )}
       </div>
-      {err && <div className="text-sm" style={{ color: "var(--bad)" }}>{err}</div>}
+      {err && <div style={{ color: "var(--bad)" }}>{err}</div>}
       {editing ? (
-        <textarea className="input mono h-[60vh] text-xs" value={text} onChange={(e) => setText(e.target.value)} spellCheck={false} />
+        <textarea className="input mono h-[60vh] text-xs" aria-label="EnvSpec JSON" value={text} onChange={(e) => setText(e.target.value)} spellCheck={false} />
       ) : (
-        <pre className="mono max-h-[60vh] overflow-auto rounded-md p-3 text-xs" style={{ background: "#0d1014" }}>
-          {JSON.stringify(spec, null, 2)}
-        </pre>
+        <pre className="code-block max-h-[60vh] overflow-auto">{JSON.stringify(spec, null, 2)}</pre>
       )}
     </div>
   );
@@ -507,18 +572,19 @@ function TasksTab({ wsId, project }: { wsId: string; project: BuilderProject }) 
     if (project.head) Api.revisionTasks(wsId, project.id, project.head.id).then(setRows).catch(() => setRows([]));
     else setRows([]);
   }, [wsId, project.id, project.head]);
-  if (!rows) return <div style={{ color: "var(--muted)" }}>Loading…</div>;
-  if (!rows.length)
-    return (
-      <div className="text-sm" style={{ color: "var(--muted)" }}>
-        No tasks yet. Upload chat logs and ask the builder to extract a few.
-      </div>
-    );
+  if (!rows) return <Empty>Loading…</Empty>;
+  if (!rows.length) return <Empty>No tasks yet. Upload chat logs and ask the builder to extract a few.</Empty>;
   const valid = rows.filter((r) => !r.problems.length).length;
   return (
-    <div className="space-y-2">
-      <div className="text-sm" style={{ color: "var(--muted)" }}>
-        {rows.length} task(s) in r{project.head?.number}: {valid} valid, {rows.length - valid} with problems (left out when publishing).
+    <div>
+      <div className="border-b px-4 py-3" style={{ borderColor: "var(--line)", color: "var(--muted)" }}>
+        {rows.length} task{rows.length === 1 ? "" : "s"} in r{project.head?.number}: <span style={{ color: "var(--good)" }}>{valid} valid</span>
+        {rows.length - valid > 0 && (
+          <>
+            , <span style={{ color: "var(--warn)" }}>{rows.length - valid} with problems</span> (left out when publishing)
+          </>
+        )}
+        . Click a row to read it in full.
       </div>
       <div className="overflow-x-auto">
         <table className="data">
@@ -535,7 +601,7 @@ function TasksTab({ wsId, project }: { wsId: string; project: BuilderProject }) 
             {rows.map((r) => (
               <tr key={r.id} className="cursor-pointer" onClick={() => setOpen(open === r.id ? null : r.id)}>
                 <td className="mono text-xs">{r.id}</td>
-                <td>{r.tier}</td>
+                <td className="num">{r.tier}</td>
                 <td className="max-w-md">
                   <div className={open === r.id ? "" : "truncate"}>{r.goal}</div>
                   {open === r.id && r.problems.length > 0 && (
@@ -546,10 +612,12 @@ function TasksTab({ wsId, project }: { wsId: string; project: BuilderProject }) 
                     </ul>
                   )}
                 </td>
-                <td>
+                <td className="num whitespace-nowrap">
                   {r.n_success} / {r.n_reference} steps
                 </td>
-                <td style={{ color: r.problems.length ? "var(--warn)" : "var(--good)" }}>{r.problems.length ? `${r.problems.length} problem(s)` : "valid"}</td>
+                <td className="whitespace-nowrap" style={{ color: r.problems.length ? "var(--warn)" : "var(--good)" }}>
+                  {r.problems.length ? `${r.problems.length} problem${r.problems.length === 1 ? "" : "s"}` : "valid"}
+                </td>
               </tr>
             ))}
           </tbody>
@@ -563,8 +631,8 @@ function TasksTab({ wsId, project }: { wsId: string; project: BuilderProject }) 
 
 function DataTab({ wsId, project, onChange }: { wsId: string; project: BuilderProject; onChange: () => void }) {
   const confirm = useConfirm();
+  const toast = useToast();
   const [url, setUrl] = useState("");
-  const [msg, setMsg] = useState<string | null>(null);
   const processing = project.uploads.some((u) => ["receiving", "uploaded", "processing"].includes(u.status));
   useEffect(() => {
     if (!processing) return;
@@ -572,54 +640,58 @@ function DataTab({ wsId, project, onChange }: { wsId: string; project: BuilderPr
     return () => clearInterval(t);
   }, [processing, onChange]);
   return (
-    <div className="space-y-3 text-sm">
+    <div className="space-y-3">
+      <p style={{ color: "var(--muted)" }}>
+        Uploaded files are parsed and <strong style={{ color: "var(--fg)" }}>redacted</strong> (emails, phone numbers, card numbers, addresses,
+        names after cues like “my name is”…) by the builder worker, then the original file is deleted. Only redacted text is stored or shown
+        to the builder model. Redaction is best-effort: run a privacy review before extracting at scale. Attach files in the chat (CSV, TXT,
+        JSON/JSONL, optionally .gz; large files upload in resumable chunks).
+      </p>
       <PrivacyPanel wsId={wsId} project={project} onChange={onChange} />
       <CorpusPanel wsId={wsId} project={project} />
 
       <div className="flex flex-wrap items-end gap-2">
         <div className="min-w-[16rem] flex-1">
-          <label className="label">Import from a URL (large archives — e.g. a presigned S3/R2 https link)</label>
-          <input className="input mono" placeholder="https://…/helpdesk-2025.jsonl" value={url} onChange={(e) => setUrl(e.target.value)} />
+          <label className="label" htmlFor="import-url">
+            Import from a URL (large archives — e.g. a presigned S3/R2 https link)
+          </label>
+          <input id="import-url" className="input mono" placeholder="https://…/helpdesk-2025.jsonl" value={url} onChange={(e) => setUrl(e.target.value)} />
         </div>
         <button
-          className="btn-ghost"
+          className="btn-ghost btn-field"
           disabled={!url.trim().startsWith("https://")}
           onClick={async () => {
-            setMsg(null);
             try {
               await importBuilderUrl(wsId, project.id, url.trim());
               setUrl("");
+              toast.success("Import started", "The worker downloads and redacts the file; progress shows below.");
               onChange();
             } catch (e) {
-              setMsg(msgOf(e));
+              toast.error("Couldn't import from that URL", e);
             }
           }}
         >
           Import
         </button>
       </div>
-      {msg && <div className="text-xs" style={{ color: "var(--bad)" }}>{msg}</div>}
 
-      <p style={{ color: "var(--muted)" }}>
-        Uploaded files are parsed and <strong>redacted</strong> (emails, phone numbers, card numbers, addresses, names after
-        cues like “my name is”…) by the builder worker, then the original file is deleted. Only redacted text is stored or shown
-        to the builder model. Redaction is best-effort: run a privacy review before extracting at scale. Attach files with 📎 in
-        the chat (CSV, TXT, JSON/JSONL, optionally .gz; large files upload in resumable chunks).
-      </p>
       {project.uploads.length === 0 && <div style={{ color: "var(--muted)" }}>No uploads yet.</div>}
       {project.uploads.map((u) => (
-        <div key={u.id} className="rounded-md border p-3" style={{ borderColor: "var(--line)" }}>
+        <div key={u.id} className="inset-card space-y-1.5 p-4">
           <div className="flex flex-wrap items-center gap-2">
-            <span className="font-medium">{u.filename}</span>
-            <span style={{ color: "var(--muted)" }}>
+            <span className="mono">{u.filename}</span>
+            <span className="hint">
               {u.size_bytes < 1024 ? `${u.size_bytes} B` : u.size_bytes < 2 ** 20 ? `${(u.size_bytes / 1024).toFixed(0)} KB` : `${(u.size_bytes / 2 ** 20).toFixed(1)} MB`}
             </span>
             <span className={`pill ${u.status === "ready" ? "pill-completed" : u.status === "failed" ? "pill-failed" : "pill-running"}`}>{u.status}</span>
-            {u.status === "ready" && <span>{u.n_conversations} conversations</span>}
-            {u.format?.format && <span style={{ color: "var(--muted)" }}>· {u.format.format}</span>}
+            {u.status === "ready" && (
+              <span style={{ color: "var(--muted)" }}>
+                {u.n_conversations.toLocaleString()} conversations{u.format?.format && ` · ${u.format.format}`}
+              </span>
+            )}
+            {u.status !== "ready" && u.format?.format && <span style={{ color: "var(--muted)" }}>{u.format.format}</span>}
             <button
-              className="ml-auto text-xs underline"
-              style={{ color: "var(--muted)" }}
+              className="btn-danger btn-sm ml-auto"
               disabled={u.status === "processing"}
               onClick={async () => {
                 const ok = await confirm({
@@ -629,11 +701,16 @@ function DataTab({ wsId, project, onChange }: { wsId: string; project: BuilderPr
                   tone: "danger",
                 });
                 if (!ok) return;
-                await Api.deleteUpload(wsId, project.id, u.id);
-                onChange();
+                try {
+                  await Api.deleteUpload(wsId, project.id, u.id);
+                  toast.success(`Deleted ${u.filename}`);
+                  onChange();
+                } catch (e) {
+                  toast.error(`Couldn't delete ${u.filename}`, e);
+                }
               }}
             >
-              delete
+              Delete
             </button>
           </div>
           {u.status === "receiving" && (
@@ -646,24 +723,20 @@ function DataTab({ wsId, project, onChange }: { wsId: string; project: BuilderPr
               label={`${u.progress.stage ?? "processing"}${u.progress.conversations ? ` · ${u.progress.conversations.toLocaleString()} conversations` : ""}`}
             />
           )}
-          {u.error && <div className="mt-1 text-xs" style={{ color: "var(--bad)" }}>{u.error}</div>}
+          {u.error && <div className="text-xs" style={{ color: "var(--bad)" }}>{u.error}</div>}
           {u.redactions && Object.keys(u.redactions).length > 0 && (
-            <div className="mt-2 flex flex-wrap gap-1 text-xs">
-              <span style={{ color: "var(--muted)" }}>redacted:</span>
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="hint">redacted:</span>
               {Object.entries(u.redactions).map(([k, n]) => (
-                <span key={k} className="rounded px-1.5" style={{ background: "var(--line)" }}>
-                  {k} ×{n}
+                <span key={k} className="pill pill-cancelled">
+                  {k} ×{n.toLocaleString()}
                 </span>
               ))}
             </div>
           )}
-          {u.status === "ready" && u.redactions && Object.keys(u.redactions).length === 0 && (
-            <div className="mt-2 text-xs" style={{ color: "var(--muted)" }}>
-              No personal data patterns found.
-            </div>
-          )}
+          {u.status === "ready" && u.redactions && Object.keys(u.redactions).length === 0 && <div className="hint">No personal data patterns found.</div>}
           {!!u.format?.warnings?.length && (
-            <ul className="mt-2 list-disc pl-5 text-xs" style={{ color: "var(--warn)" }}>
+            <ul className="list-disc pl-5 text-xs" style={{ color: "var(--warn)" }}>
               {u.format.warnings.slice(0, 5).map((w, i) => (
                 <li key={i}>{w}</li>
               ))}
@@ -678,11 +751,11 @@ function DataTab({ wsId, project, onChange }: { wsId: string; project: BuilderPr
 function Progress({ value, total, label }: { value: number; total: number; label: string }) {
   const pct = total ? Math.min(100, Math.floor((100 * value) / total)) : null;
   return (
-    <div className="mt-2 space-y-1">
+    <div className="space-y-1 pt-1">
       <div className="h-1.5 w-full overflow-hidden rounded-full" style={{ background: "var(--line)" }}>
         <div className="h-full rounded-full transition-all" style={{ width: `${pct ?? 30}%`, background: "var(--accent)" }} />
       </div>
-      <div className="text-[11px]" style={{ color: "var(--muted)" }}>
+      <div className="hint">
         {label}
         {pct !== null && ` · ${pct}%`}
       </div>
@@ -694,6 +767,17 @@ function Progress({ value, total, label }: { value: number; total: number; label
 
 function RevisionsTab({ wsId, project, onChange }: { wsId: string; project: BuilderProject; onChange: () => void }) {
   const confirm = useConfirm();
+  const toast = useToast();
+  const publish = usePublish(wsId, project, onChange);
+  const act = async (title: string, fn: () => Promise<unknown>, done?: string) => {
+    try {
+      await fn();
+      if (done) toast.success(done);
+      onChange();
+    } catch (e) {
+      toast.error(title, e);
+    }
+  };
   const [revs, setRevs] = useState<RevisionSummary[] | null>(null);
   const [diffFor, setDiffFor] = useState<string | null>(null);
   const [diff, setDiff] = useState<RevisionDiff | null>(null);
@@ -707,7 +791,7 @@ function RevisionsTab({ wsId, project, onChange }: { wsId: string; project: Buil
   }, [wsId, project.id, diffFor]);
 
   if (!revs) return <div style={{ color: "var(--muted)" }}>Loading…</div>;
-  if (!revs.length) return <div className="text-sm" style={{ color: "var(--muted)" }}>No revisions yet.</div>;
+  if (!revs.length) return <div style={{ color: "var(--muted)" }}>No revisions yet.</div>;
 
   // depth in the revision graph, so branches are visible
   const byNumber = new Map(revs.map((r) => [r.number, r]));
@@ -724,13 +808,17 @@ function RevisionsTab({ wsId, project, onChange }: { wsId: string; project: Buil
   };
 
   return (
-    <div className="space-y-2">
-      <p className="text-xs" style={{ color: "var(--muted)" }}>
-        Every change is an immutable revision. <strong>Restore</strong> makes a new revision copying an old one (history is kept).{" "}
+    <div className="space-y-3">
+      <p className="hint">
+        Every change is an immutable revision, newest first. <strong>Restore</strong> makes a new revision copying an old one (history is kept).{" "}
         <strong>Check out</strong> moves the head: the next change branches from there.
       </p>
       {[...revs].reverse().map((r) => (
-        <div key={r.id} className="rounded-md border p-3 text-sm" style={{ borderColor: r.is_head ? "var(--accent)" : "var(--line)", marginLeft: depth(r) * 16 }}>
+        <div
+          key={r.id}
+          className="panel space-y-2 p-4"
+          style={{ background: "var(--input-bg)", borderColor: r.is_head ? "var(--accent)" : "var(--line)", marginLeft: depth(r) * 16 }}
+        >
           <div className="flex flex-wrap items-center gap-2">
             <span className="mono font-semibold">r{r.number}</span>
             {r.parent_number !== null && r.parent_number !== r.number - 1 && (
@@ -738,43 +826,40 @@ function RevisionsTab({ wsId, project, onChange }: { wsId: string; project: Buil
                 branched from r{r.parent_number}
               </span>
             )}
-            <span className="min-w-0 flex-1 truncate">{r.message}</span>
             {r.is_head && <span className="pill pill-running">head</span>}
             {r.published_version && <span className="pill pill-completed">v{r.published_version}</span>}
+            <span className="min-w-0 flex-1 truncate" style={{ color: "var(--muted)" }}>
+              {r.message}
+            </span>
           </div>
-          <div className="mt-1 flex flex-wrap items-center gap-3 text-xs" style={{ color: "var(--muted)" }}>
+          <div className="flex flex-wrap items-center gap-3 text-xs" style={{ color: "var(--muted)" }}>
             <span>{r.author === "user" ? "you" : "builder"}</span>
             <span>{new Date(r.created_at).toLocaleString()}</span>
             <span>
               {r.n_tasks} tasks ({r.tasks_ok} valid)
             </span>
             <span style={{ color: r.spec_ok ? "var(--good)" : "var(--warn)" }}>{r.spec_ok ? "spec valid" : "spec has problems"}</span>
-            <span className="ml-auto flex gap-3">
-              <button className="underline" onClick={() => setDiffFor(diffFor === r.id ? null : r.id)}>
+            <span className="ml-auto flex flex-wrap gap-1.5">
+              <button className="btn-ghost btn-sm" aria-expanded={diffFor === r.id} onClick={() => setDiffFor(diffFor === r.id ? null : r.id)}>
                 {diffFor === r.id ? "hide changes" : "changes"}
               </button>
               {!r.is_head && (
                 <>
                   <button
-                    className="underline"
-                    onClick={async () => {
-                      await Api.checkoutRevision(wsId, project.id, r.id);
-                      onChange();
-                    }}
+                    className="btn-ghost btn-sm"
+                    onClick={() => act(`Couldn't check out r${r.number}`, () => Api.checkoutRevision(wsId, project.id, r.id), `Checked out r${r.number}`)}
                   >
                     check out
                   </button>
                   <button
-                    className="underline"
+                    className="btn-ghost btn-sm"
                     onClick={async () => {
                       const ok = await confirm({
                         title: `Restore revision ${r.number}?`,
                         body: `A new revision is created with r${r.number}'s spec and tasks and becomes the head. Nothing is deleted — you can return to the current state any time.`,
                         confirmLabel: "Restore",
                       });
-                      if (!ok) return;
-                      await Api.restoreRevision(wsId, project.id, r.id);
-                      onChange();
+                      if (ok) await act(`Couldn't restore r${r.number}`, () => Api.restoreRevision(wsId, project.id, r.id), `Restored r${r.number} as the new head`);
                     }}
                   >
                     restore
@@ -782,26 +867,14 @@ function RevisionsTab({ wsId, project, onChange }: { wsId: string; project: Buil
                 </>
               )}
               {r.spec_ok && r.tasks_ok > 0 && !r.published_version && (
-                <button
-                  className="underline"
-                  onClick={async () => {
-                    const ok = await confirm({
-                      title: `Publish revision ${r.number}?`,
-                      body: `Frozen as ${project.name}@v${project.versions.length + 1} with its ${r.tasks_ok} valid task(s), runnable in this workspace.`,
-                      confirmLabel: "Publish",
-                    });
-                    if (!ok) return;
-                    await Api.publish(wsId, project.id, r.id);
-                    onChange();
-                  }}
-                >
+                <button className="btn-ghost btn-sm" onClick={() => publish({ id: r.id, number: r.number, tasksOk: r.tasks_ok })}>
                   publish
                 </button>
               )}
             </span>
           </div>
           {diffFor === r.id && (
-            <div className="mt-2 space-y-2">
+            <div className="space-y-2">
               {!diff ? (
                 <div className="text-xs" style={{ color: "var(--muted)" }}>
                   Loading…
@@ -814,7 +887,7 @@ function RevisionsTab({ wsId, project, onChange }: { wsId: string; project: Buil
                     {diff.tasks_removed.length > 0 && ` · −${diff.tasks_removed.length} task(s)`}
                   </div>
                   {diff.spec_diff ? (
-                    <pre className="mono max-h-80 overflow-auto rounded-md p-2 text-[11px]" style={{ background: "#0d1014" }}>
+                    <pre className="code-block max-h-80 overflow-auto" style={{ whiteSpace: "pre" }}>
                       {diff.spec_diff.split("\n").map((l, i) => (
                         <div key={i} style={{ color: l.startsWith("+") && !l.startsWith("+++") ? "var(--good)" : l.startsWith("-") && !l.startsWith("---") ? "var(--bad)" : l.startsWith("@@") ? "var(--accent)" : "var(--muted)" }}>
                           {l || " "}
@@ -852,7 +925,7 @@ function PreviewTab({ wsId, project }: { wsId: string; project: BuilderProject }
         setData(await Api.builderPreview(wsId, project.id, s, t));
         setView("before");
       } catch (e) {
-        setErr(msgOf(e));
+        setErr(errorText(e));
       }
     },
     [wsId, project.id],
@@ -861,21 +934,25 @@ function PreviewTab({ wsId, project }: { wsId: string; project: BuilderProject }
     load(0);
   }, [load]);
 
-  if (err) return <div className="text-sm" style={{ color: "var(--muted)" }}>Preview not available yet: {err}</div>;
+  if (err) return <div style={{ color: "var(--muted)" }}>Preview not available yet: {err}</div>;
   if (!data) return <div style={{ color: "var(--muted)" }}>Loading…</div>;
   const { overview, preview } = data;
   const diagram = view === "after" && preview.diagram_after ? preview.diagram_after : preview.diagram_before;
 
   return (
-    <div className="space-y-4 text-sm">
+    <div className="space-y-4">
       <div className="flex flex-wrap items-end gap-3">
         <div>
-          <label className="label">Seed</label>
-          <input className="input !w-28" type="number" min={0} value={seed} onChange={(e) => setSeed(Math.max(0, Number(e.target.value)))} />
+          <label className="label" htmlFor="pv-seed">
+            Seed
+          </label>
+          <input id="pv-seed" className="input mono !w-28" type="number" min={0} value={seed} onChange={(e) => setSeed(Math.max(0, Number(e.target.value)))} />
         </div>
         <div>
-          <label className="label">Tier</label>
-          <select className="input !w-24" value={tier ?? overview.tiers[0]} onChange={(e) => setTier(Number(e.target.value))}>
+          <label className="label" htmlFor="pv-tier">
+            Tier
+          </label>
+          <select id="pv-tier" className="input !w-24" value={tier ?? overview.tiers[0]} onChange={(e) => setTier(Number(e.target.value))}>
             {overview.tiers.map((t) => (
               <option key={t} value={t}>
                 {t}
@@ -883,12 +960,10 @@ function PreviewTab({ wsId, project }: { wsId: string; project: BuilderProject }
             ))}
           </select>
         </div>
-        <button className="btn" onClick={() => load(seed, tier)}>
+        <button className="btn btn-field" onClick={() => load(seed, tier)}>
           Generate
         </button>
-        <span className="text-xs" style={{ color: "var(--muted)" }}>
-          head revision r{project.head?.number} · no model called
-        </span>
+        <span className="hint pb-2.5">head revision r{project.head?.number} · no model called</span>
       </div>
       <div>
         <div className="label">the agent is told</div>
@@ -897,28 +972,29 @@ function PreviewTab({ wsId, project }: { wsId: string; project: BuilderProject }
       {diagram && (
         <div className="space-y-2">
           {preview.diagram_after && (
-            <div className="flex gap-1">
-              {(["before", "after"] as const).map((v) => (
-                <button
-                  key={v}
-                  onClick={() => setView(v)}
-                  className="rounded-md border px-2.5 py-1"
-                  style={{ borderColor: view === v ? "var(--accent)" : "var(--line)", color: view === v ? "var(--accent)" : "var(--muted)" }}
-                >
-                  {v === "before" ? "Start" : "After the reference solution"}
-                </button>
-              ))}
-            </div>
+            <Tabs
+              idPrefix="pv-world"
+              variant="pills"
+              label="World state"
+              tabs={[
+                { id: "before", label: "Start" },
+                { id: "after", label: "After the reference solution" },
+              ]}
+              active={view}
+              onChange={(id) => setView(id as "before" | "after")}
+            />
           )}
-          <DiagramView diagram={diagram} height={380} />
+          <div {...(preview.diagram_after ? tabPanelProps("pv-world", view) : {})} className="outline-none">
+            <DiagramView diagram={diagram} height={380} />
+          </div>
         </div>
       )}
       <div>
         <div className="label">reference solution{preview.verdict && ` → reward ${preview.verdict.reward.toFixed(1)}`}</div>
-        <ol className="list-decimal space-y-1 pl-5">
+        <ol className="mono mt-1 list-decimal space-y-1 pl-5 text-xs">
           {preview.solution.map((c, i) => (
             <li key={i}>
-              <span className="mono text-xs" style={{ color: "var(--accent)" }}>
+              <span style={{ color: "var(--accent)" }}>
                 {c.name}({Object.entries(c.args).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(", ")})
               </span>
             </li>
@@ -927,7 +1003,7 @@ function PreviewTab({ wsId, project }: { wsId: string; project: BuilderProject }
       </div>
       <details>
         <summary className="label cursor-pointer">dimensions, tools and system prompt</summary>
-        <table className="data mt-2">
+        <table className="data inset mt-2">
           <tbody>
             {overview.dimensions.map(([k, v]) => (
               <tr key={k}>

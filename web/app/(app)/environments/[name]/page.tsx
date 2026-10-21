@@ -9,22 +9,27 @@
 // knows about a particular pack.
 
 import Link from "next/link";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
+import { useDeleteEnvironment } from "@/components/DeleteEnvironment";
 import { DiagramView } from "@/components/DiagramView";
-import { Page, PageHeader, Panel } from "@/components/Page";
+import { Empty, Page, PageHeader, Panel } from "@/components/Page";
 import { Tabs, tabPanelProps, useHashTab, type TabItem } from "@/components/Tabs";
+import { useToast } from "@/components/Toast";
 import { Api, ApiError, type Pack, type PackDetail, type TaskPreview, type ToolSpec } from "@/lib/api";
 import { useWorkspace } from "@/lib/workspace";
 
 const TAB_IDS = ["overview", "world", "tools", "rules", "preview"] as const;
 const P = "env"; // id prefix for tab / panel elements
+// key/value tables inside a padded panel: line the first column up with the panel text
 
 export default function EnvironmentPage() {
   const { name } = useParams<{ name: string }>();
   const { current: ws } = useWorkspace();
   const [pack, setPack] = useState<PackDetail | null>(null);
-  const [listing, setListing] = useState<Pack | null>(null); // custom flag + builder project
+  const [listing, setListing] = useState<Pack | null | undefined>(undefined); // custom flag + builder project; null = not runnable here
+  const removeEnv = useDeleteEnvironment();
+  const router = useRouter();
   const [err, setErr] = useState<string | null>(null);
   const [tab, setTab] = useHashTab(TAB_IDS, "overview");
   // tabs mount the first time they're opened and then stay mounted (hidden), so the
@@ -43,7 +48,13 @@ export default function EnvironmentPage() {
       .catch(() => setListing(null));
   }, [name, ws]);
 
-  if (err) return <div style={{ color: "var(--bad)" }}>{err}</div>;
+  if (err)
+    return (
+      <Page>
+        <PageHeader back={{ href: "/environments", label: "Environments" }} title={decodeURIComponent(name)} />
+        <div style={{ color: "var(--bad)" }}>{err}</div>
+      </Page>
+    );
   if (!pack) return <div style={{ color: "var(--muted)" }}>Loading…</div>;
 
   const tabs: TabItem[] = [
@@ -54,6 +65,8 @@ export default function EnvironmentPage() {
     { id: "preview", label: "Task preview" },
   ];
   const panel = (id: string) => ({ ...tabPanelProps(P, id), hidden: tab !== id, className: "outline-none" });
+  // a published environment that has since been deleted: still viewable for its past runs
+  const deleted = listing === null && pack.name.includes("@v");
 
   return (
     <Page>
@@ -62,31 +75,44 @@ export default function EnvironmentPage() {
         title={pack.name}
         meta={
           <>
-            <span className="pill pill-queued">{pack.kind === "sim" ? "simulation" : "container sandbox"}</span>
+            <span className="pill pill-tag">{pack.kind === "sim" ? "simulation" : "container sandbox"}</span>
             {listing?.custom && <span className="pill pill-running">built in this workspace</span>}
+            {deleted && <span className="pill pill-failed">deleted</span>}
+            <span style={{ color: "var(--muted)" }}>
+              tiers {pack.tiers.join(", ")} · up to {pack.max_steps} turns · {pack.tools.length} tools + finish
+              {pack.replayable && " · replayable"}
+            </span>
           </>
         }
         actions={
           <>
+            {listing?.custom && ws && (
+              <button
+                className="btn-ghost"
+                style={{ color: "var(--bad)" }}
+                onClick={async () => {
+                  if (await removeEnv(ws.id, pack.name)) router.replace("/environments");
+                }}
+              >
+                Delete
+              </button>
+            )}
             {listing?.project_id && (
               <Link href={`/builder/${listing.project_id}`} className="btn-ghost">
                 Open in Builder
               </Link>
             )}
-            <Link href={`/runs?pack=${encodeURIComponent(pack.name)}`} className="btn">
-              Run it
-            </Link>
+            {!deleted && (
+              <Link href={`/runs?pack=${encodeURIComponent(pack.name)}`} className="btn">
+                Run it
+              </Link>
+            )}
           </>
         }
-        description={<span style={{ color: "var(--fg)" }}>{pack.description}</span>}
-      >
-        <div className="text-xs" style={{ color: "var(--muted)" }}>
-          tiers {pack.tiers.join(", ")} · up to {pack.max_steps} turns · {pack.tools.length} tools + finish
-          {pack.replayable && " · replayable"}
-        </div>
-      </PageHeader>
+        description={pack.description}
+      />
 
-      <div className="space-y-6">
+      <div className="space-y-5">
         <Tabs idPrefix={P} label={`${pack.name} sections`} tabs={tabs} active={tab} onChange={setTab} />
 
         <div {...panel("overview")}>
@@ -113,14 +139,14 @@ function OverviewTab({ pack }: { pack: PackDetail }) {
   const overview = pack.overview && pack.overview !== pack.description ? pack.overview : "";
   return (
     <div className="space-y-6">
-      <Panel title="How an episode works">
+      <Panel title="How an episode works" hint="the same five steps for every pack">
         {overview && <p className="max-w-4xl text-sm leading-relaxed">{overview}</p>}
         <EpisodeFlow pack={pack} />
       </Panel>
 
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+      <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
         <Panel title="Dimensions" hint="LLM-agent environments have no tensors: observations and actions are text. This is what can be counted.">
-          <table className="data">
+          <table className="data inset">
             <tbody>
               {pack.dimensions.map(([k, v]) => (
                 <tr key={k}>
@@ -135,7 +161,7 @@ function OverviewTab({ pack }: { pack: PackDetail }) {
         </Panel>
         <Panel title="The world">
           {pack.world.length ? (
-            <ul className="list-disc space-y-1 pl-5 text-sm">
+            <ul className="list-disc space-y-1 pl-5" style={{ color: "var(--muted)" }}>
               {pack.world.map((w, i) => (
                 <li key={i}>{w}</li>
               ))}
@@ -144,17 +170,17 @@ function OverviewTab({ pack }: { pack: PackDetail }) {
             <Muted>{pack.description}</Muted>
           )}
           {(pack.observation || pack.action) && (
-            <dl className="grid grid-cols-1 gap-3 border-t pt-3 text-sm" style={{ borderColor: "var(--line)" }}>
+            <dl className="grid grid-cols-1 gap-3 border-t pt-3 sm:grid-cols-2" style={{ borderColor: "var(--line)" }}>
               {pack.observation && (
                 <div>
                   <dt className="label">the agent sees</dt>
-                  <dd>{pack.observation}</dd>
+                  <dd style={{ color: "var(--muted)" }}>{pack.observation}</dd>
                 </div>
               )}
               {pack.action && (
                 <div>
                   <dt className="label">the agent can</dt>
-                  <dd>{pack.action}</dd>
+                  <dd style={{ color: "var(--muted)" }}>{pack.action}</dd>
                 </div>
               )}
             </dl>
@@ -174,27 +200,24 @@ function EpisodeFlow({ pack }: { pack: PackDetail }) {
     ["Reward", pack.reward_rules.length ? pack.reward_rules.map((r) => r.reward.toFixed(1)).join(" / ") : "a scalar"],
   ];
   return (
-    <ol className="flex flex-col gap-2 md:flex-row md:items-stretch md:gap-0">
-      {steps.map(([t, d], i) => (
-        <li key={t} className="flex min-w-0 flex-1 items-stretch">
-          <div className="min-w-0 flex-1 rounded-md border px-3 py-2.5 text-sm" style={{ borderColor: "var(--line)", background: "#0f1317" }}>
-            <div className="font-medium">
-              <span className="mono text-xs" style={{ color: "var(--accent)" }}>
-                {i + 1}
-              </span>{" "}
-              {t}
+    <ol className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5">
+      {steps.map(([t, d], i) => {
+        const loop = t === "Loop"; // the part the model plays: highlighted
+        return (
+          <li
+            key={t}
+            className="flex min-w-0 flex-col gap-1 rounded-md border p-3"
+            style={{ borderColor: loop ? "var(--accent)" : "var(--line)", background: loop ? "var(--accent-tint)" : "var(--input-bg)" }}
+          >
+            <div className="label mb-0" style={loop ? { color: "var(--accent)" } : undefined}>
+              {i + 1} · {t}
             </div>
-            <div className="text-xs leading-snug" style={{ color: "var(--muted)" }}>
+            <div className="text-xs" style={{ color: "var(--muted)" }}>
               {d}
             </div>
-          </div>
-          {i < steps.length - 1 && (
-            <span aria-hidden className="hidden w-5 shrink-0 items-center justify-center text-xs md:flex" style={{ color: "var(--muted)" }}>
-              →
-            </span>
-          )}
-        </li>
-      ))}
+          </li>
+        );
+      })}
     </ol>
   );
 }
@@ -283,30 +306,34 @@ function ToolsTab({ pack }: { pack: PackDetail }) {
   const nShown = shown.reduce((n, g) => n + g.tools.length, 0);
 
   return (
-    <Panel title={`Tools (${pack.tools.length} + finish)`} hint="What the model may call, with the JSON-schema parameters it sees (? = optional).">
-      <div className="flex flex-wrap items-center gap-3">
-        <Tabs idPrefix="tools" label="Tool category" variant="pills" tabs={cats} active={cat} onChange={setCat} />
-        <div className="ml-auto flex w-full items-center gap-2 sm:w-auto">
+    <Panel
+      flush
+      title={`Tools (${pack.tools.length} + finish)`}
+      aside={
+        <>
+          <Tabs idPrefix="tools" label="Tool category" variant="pills" tabs={cats} active={cat} onChange={setCat} />
           <input
-            className="input sm:!w-64"
+            className="input sm:!w-60"
             type="search"
-            placeholder="Filter by name, parameter, description…"
+            placeholder="Filter by name, parameter…"
             aria-label="Filter tools"
             value={q}
             onChange={(e) => setQ(e.target.value)}
           />
-        </div>
-      </div>
-      <div {...tabPanelProps("tools", cat)} className="space-y-5 outline-none">
-        {q.trim() && (
-          <div className="text-xs" style={{ color: "var(--muted)" }}>
-            {nShown} of {cat === "all" ? total : groups.find((g) => g.id === cat)?.tools.length} tools match
-          </div>
-        )}
+        </>
+      }
+      footer={
+        <span>
+          {q.trim() ? `${nShown} of ${cat === "all" ? total : groups.find((g) => g.id === cat)?.tools.length} tools match` : `${nShown} tools`} · what the model
+          may call, with the JSON-schema parameters it sees · ? = optional
+        </span>
+      }
+    >
+      <div {...tabPanelProps("tools", cat)} className="outline-none">
         {shown.map((g) => (
           <ToolTable key={g.id} title={g.title} tools={g.tools} />
         ))}
-        {nShown === 0 && <Muted>No tools match “{q}”.</Muted>}
+        {nShown === 0 && <Empty>No tools match “{q}”.</Empty>}
       </div>
     </Panel>
   );
@@ -315,7 +342,7 @@ function ToolsTab({ pack }: { pack: PackDetail }) {
 function ToolTable({ title, tools }: { title: string; tools: ToolSpec[] }) {
   return (
     <div>
-      <div className="label mb-1">
+      <div className="label mb-0 px-4 pt-4 pb-1">
         {title} · {tools.length}
       </div>
       {/* fixed layout: column widths hold no matter how long an enum or description is */}
@@ -357,14 +384,16 @@ function RulesTab({ pack }: { pack: PackDetail }) {
   const tables = pack.tables;
   const t = tables[Math.min(sel, tables.length - 1)];
   return (
-    <div className="space-y-6">
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+    <div className="space-y-5">
+      <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
         <Panel title="Difficulty tiers">
-          <table className="data">
+          <table className="data inset">
             <tbody>
               {pack.tiers.map((t) => (
                 <tr key={t}>
-                  <td className="whitespace-nowrap font-medium">tier {t}</td>
+                  <td className="num whitespace-nowrap" style={{ color: "var(--muted)" }}>
+                    tier {t}
+                  </td>
                   <td>{pack.tier_notes[String(t)] ?? "—"}</td>
                 </tr>
               ))}
@@ -373,7 +402,7 @@ function RulesTab({ pack }: { pack: PackDetail }) {
         </Panel>
         <Panel title="Reward" hint="Computed by code at the end of the episode.">
           {pack.reward_rules.length ? (
-            <table className="data">
+            <table className="data inset">
               <tbody>
                 {pack.reward_rules.map((r, i) => (
                   <tr key={i}>
@@ -395,48 +424,45 @@ function RulesTab({ pack }: { pack: PackDetail }) {
       </div>
 
       {t && (
-        <Panel title="Reference tables" hint="What the task generator draws from and the verifier checks against.">
-          {tables.length > 1 && (
-            <Tabs
-              idPrefix="tables"
-              label="Reference tables"
-              variant="pills"
-              tabs={tables.map((x, i) => ({ id: String(i), label: x.title, count: x.rows.length }))}
-              active={String(Math.min(sel, tables.length - 1))}
-              onChange={(id) => setSel(Number(id))}
-            />
-          )}
-          <div {...(tables.length > 1 ? tabPanelProps("tables", String(Math.min(sel, tables.length - 1))) : {})} className="space-y-2 outline-none">
-            <div>
-              <h3 className="text-sm font-medium">{t.title}</h3>
-              {t.note && (
-                <p className="max-w-4xl text-xs" style={{ color: "var(--muted)" }}>
-                  {t.note}
-                </p>
-              )}
-            </div>
-            <div className="overflow-x-auto">
-              <table className="data">
-                <thead>
-                  <tr>
-                    {t.columns.map((c) => (
-                      <th key={c}>{c}</th>
+        <Panel
+          flush
+          title="Reference tables"
+          aside={
+            tables.length > 1 && (
+              <Tabs
+                idPrefix="tables"
+                label="Reference tables"
+                variant="pills"
+                tabs={tables.map((x, i) => ({ id: String(i), label: x.title, count: x.rows.length }))}
+                active={String(Math.min(sel, tables.length - 1))}
+                onChange={(id) => setSel(Number(id))}
+              />
+            )
+          }
+          footer={t.note ? <span>{t.note}</span> : <span>What the task generator draws from and the verifier checks against.</span>}
+        >
+          <div {...(tables.length > 1 ? tabPanelProps("tables", String(Math.min(sel, tables.length - 1))) : {})} className="outline-none">
+            {tables.length === 1 && <div className="label mb-0 px-4 pt-4 pb-1">{t.title}</div>}
+            <table className="data">
+              <thead>
+                <tr>
+                  {t.columns.map((c) => (
+                    <th key={c}>{c}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {t.rows.map((r, i) => (
+                  <tr key={i}>
+                    {r.map((c, j) => (
+                      <td key={j} className={j === 0 ? "font-medium" : ""}>
+                        {c}
+                      </td>
                     ))}
                   </tr>
-                </thead>
-                <tbody>
-                  {t.rows.map((r, i) => (
-                    <tr key={i}>
-                      {r.map((c, j) => (
-                        <td key={j} className={j === 0 ? "font-medium" : ""}>
-                          {c}
-                        </td>
-                      ))}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+                ))}
+              </tbody>
+            </table>
           </div>
         </Panel>
       )}
@@ -452,16 +478,15 @@ function Preview({ pack, wsId }: { pack: PackDetail; wsId: string }) {
   const [p, setP] = useState<TaskPreview | null>(null);
   const [view, setView] = useState<"before" | "after">("before");
   const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
+  const toast = useToast();
 
   async function load(s = seed, t = tier) {
     setBusy(true);
-    setErr(null);
     try {
       setP(await Api.preview(wsId, pack.name, s, t));
       setView("before");
     } catch (e) {
-      setErr(e instanceof ApiError ? e.message : String(e));
+      toast.error("Couldn't generate the task", e);
     } finally {
       setBusy(false);
     }
@@ -474,7 +499,7 @@ function Preview({ pack, wsId }: { pack: PackDetail; wsId: string }) {
   const diagram = view === "after" && p?.diagram_after ? p.diagram_after : p?.diagram_before;
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-5">
       <Panel
         title="Task preview"
         hint="Generate any task the way a run would. No model is called and nothing is billed. Hidden facts are what the verifier knows and the agent doesn't."
@@ -506,11 +531,11 @@ function Preview({ pack, wsId }: { pack: PackDetail; wsId: string }) {
               ))}
             </select>
           </div>
-          <button className="btn h-[38px]" onClick={() => load()} disabled={busy}>
+          <button className="btn btn-field" onClick={() => load()} disabled={busy}>
             {busy ? "Generating…" : "Generate"}
           </button>
           <button
-            className="btn-ghost h-[38px]"
+            className="btn-ghost btn-field"
             onClick={() => {
               const s = Math.floor(Math.random() * 100000);
               setSeed(s);
@@ -521,11 +546,12 @@ function Preview({ pack, wsId }: { pack: PackDetail; wsId: string }) {
             Random seed
           </button>
         </div>
-        {err && <div style={{ color: "var(--bad)" }}>{err}</div>}
         {p && (
           <div className="grid grid-cols-1 gap-4 border-t pt-4 lg:grid-cols-2" style={{ borderColor: "var(--line)" }}>
             <div className="space-y-1">
-              <div className="label">goal (what the agent is told) · {p.task.id}</div>
+              <div className="label">
+                goal (what the agent is told) · <span className="mono normal-case">{p.task.id}</span>
+              </div>
               <div className="text-sm">{p.task.goal}</div>
             </div>
             <div className="space-y-1">
@@ -562,7 +588,7 @@ function Preview({ pack, wsId }: { pack: PackDetail; wsId: string }) {
       )}
 
       {p && (
-        <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
+        <div className="grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
           {p.solution.length > 0 ? (
             <Panel
               title={`Reference solution (${p.solution.length} call${p.solution.length === 1 ? "" : "s"})`}

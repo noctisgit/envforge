@@ -409,6 +409,24 @@ def test_validate_spec_ok_and_planted_errors():
         assert expected in problems, expected
 
 
+def test_validate_spec_rejects_template_style_references():
+    """ "{order_id}" would be stored as that literal text; only "$order_id" is filled in."""
+    spec = shop_spec()
+    for i, value in enumerate(["{order_id}", "{{order_id}}", "<order_id>", "${order_id}"]):
+        spec.tools.append(ToolDef(name=f"tmpl_{i}", description="", category="act",
+            params=[ToolParam(name="order_id")],
+            effect=SetFields(collection="orders", key_param="order_id", set={"status": value})))  # fmt: skip
+    problems = validate_spec(spec)
+    assert sum("is literal text, not a reference" in p for p in problems) == 4
+    assert all('write "$order_id"' in p for p in problems if "literal text" in p)
+    # braces around a word that isn't a parameter are an ordinary literal
+    ok = shop_spec()
+    ok.tools.append(ToolDef(name="lit", description="", category="act",
+        params=[ToolParam(name="order_id")],
+        effect=SetFields(collection="orders", key_param="order_id", set={"status": "{shipped}"})))  # fmt: skip
+    assert not any("literal text" in p for p in validate_spec(ok))
+
+
 def test_validate_task_ok_and_planted_errors():
     spec = shop_spec()
     assert validate_task(spec, shop_task()) == []

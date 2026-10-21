@@ -707,3 +707,15 @@ def test_scale_200k_bounded_memory(tmp_path):
     assert ov["conversations"] == report.conversations and len(ids) == 50
     assert max(peaks.values()) < 400e6  # bounded: the corpus itself is ~200 MB+
     assert timings["ingest"] < 900
+
+
+def test_resolve_ids_and_cluster_ids(built):
+    store = built[0]
+    first, second = list(store.iter_ids())[:2]
+    ext = store.get([second])[0].meta["ext_id"]
+    # a file id or a store id, in the order asked; unknown references skipped
+    assert store.resolve_ids([ext, "no-such-id", first]) == [second, first]
+    cluster = store.get([first])[0].meta["cluster"]
+    ids = store.cluster_ids(cluster)
+    assert first in ids
+    assert {c.meta["cluster"] for c in store.get(ids)} == {cluster}

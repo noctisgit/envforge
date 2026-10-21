@@ -130,6 +130,7 @@ class ServerInfo(BaseModel):
     allow_server_keys: bool
     providers: list[str]
     version: str
+    max_active_runs: int = 3  # queued + running per workspace
 
 
 class ModelOut(BaseModel):

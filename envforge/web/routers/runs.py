@@ -93,7 +93,7 @@ def export_dataset(
         trajs = list(TrajectoryStore(Path(r.run_dir)).read())
         kept.extend(filter_trajectories(trajs, min_reward=min_reward))
         if fmt == "chat" and r.pack not in tools_by_pack:
-            tools_by_pack[r.pack] = tool_schemas(resolve_pack(db, ws, r.pack))
+            tools_by_pack[r.pack] = tool_schemas(resolve_pack(db, ws, r.pack, include_deleted=True))
     # one pack → embed its tool schemas in every example; mixed packs → per-example
     packs = {r.pack for r in rows}
     tools = tools_by_pack.get(next(iter(packs))) if len(packs) == 1 else None
@@ -213,7 +213,7 @@ def replay_episode(
     for t in TrajectoryStore(Path(r.run_dir)).read():
         if t.episode == episode:
             try:
-                return replay(resolve_pack(db, ws, r.pack), t)
+                return replay(resolve_pack(db, ws, r.pack, include_deleted=True), t)
             except NotReplayable as e:
                 raise HTTPException(409, str(e)) from e
     raise HTTPException(404, "episode not found")

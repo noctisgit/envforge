@@ -15,15 +15,15 @@ import type { Diagram, DiagramEdge, DiagramNode } from "@/lib/api";
 
 const NODE_STYLE: Record<string, { stroke: string; fill: string; dash?: string; opacity?: number }> = {
   ok: { stroke: "var(--line)", fill: "var(--panel)" },
-  broken: { stroke: "var(--bad)", fill: "rgba(248,113,113,0.12)" },
-  target: { stroke: "var(--accent)", fill: "rgba(94,234,212,0.10)" },
+  broken: { stroke: "var(--bad)", fill: "var(--bad-tint)" },
+  target: { stroke: "var(--accent)", fill: "var(--accent-tint)" },
   inactive: { stroke: "var(--muted)", fill: "var(--panel)", dash: "4 3", opacity: 0.55 },
 };
 const EDGE_STYLE: Record<string, { stroke: string; width: number; dash?: string; opacity?: number }> = {
-  ok: { stroke: "#3a4552", width: 1.5 },
+  ok: { stroke: "var(--diagram-edge)", width: 1.5 },
   path: { stroke: "var(--accent)", width: 2.5 },
   broken: { stroke: "var(--bad)", width: 2.5, dash: "6 4" },
-  inactive: { stroke: "#3a4552", width: 1.5, dash: "3 4", opacity: 0.5 },
+  inactive: { stroke: "var(--diagram-edge)", width: 1.5, dash: "3 4", opacity: 0.5 },
 };
 const STATE_LABEL: Record<string, string> = {
   broken: "faulty / where it fails",
@@ -60,7 +60,7 @@ export function DiagramView({ diagram, height = 460 }: { diagram: Diagram; heigh
         </ul>
       )}
       {node ? (
-        <div className="rounded-md border p-3 text-sm" style={{ borderColor: "var(--line)", background: "#0f1317" }}>
+        <div className="rounded-md border p-3 text-sm" style={{ borderColor: "var(--line)", background: "var(--input-bg)" }}>
           <div className="mb-1 flex flex-wrap items-center gap-2">
             <span className="font-medium">{node.label}</span>
             <span className="text-xs" style={{ color: "var(--muted)" }}>
@@ -224,11 +224,11 @@ function GraphView({ diagram, height, selected, onSelect }: { diagram: Diagram; 
   const nodeById = new Map(diagram.nodes.map((n) => [n.id, n]));
 
   return (
-    <div ref={wrap} className="w-full overflow-x-auto rounded-md border" style={{ borderColor: "var(--line)", background: "#0d1014" }}>
+    <div ref={wrap} className="w-full overflow-x-auto rounded-md border" style={{ borderColor: "var(--line)", background: "var(--code-bg)" }}>
       <svg width={w} height={H} role="img" aria-label={diagram.title || "environment diagram"} onClick={() => onSelect(null)}>
         <defs>
           <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-            <path d="M0,0 L10,5 L0,10 z" fill="#3a4552" />
+            <path d="M0,0 L10,5 L0,10 z" fill="var(--diagram-edge)" />
           </marker>
         </defs>
         {/* zones */}
@@ -242,7 +242,7 @@ function GraphView({ diagram, height, selected, onSelect }: { diagram: Diagram; 
             const y1 = Math.max(...pts.map((p) => p.y)) + BOX_H / 2 + 18;
             return (
               <g key={g}>
-                <rect x={x0} y={y0} width={x1 - x0} height={y1 - y0} rx={10} fill="rgba(255,255,255,0.02)" stroke="#1d242c" />
+                <rect x={x0} y={y0} width={x1 - x0} height={y1 - y0} rx={10} fill="rgba(255,255,255,0.02)" stroke="var(--diagram-zone-line)" />
                 <text x={x0 + 8} y={y0 + 14} fontSize={10} fill="var(--muted)" letterSpacing="0.06em">
                   {g.toUpperCase()}
                 </text>
@@ -262,7 +262,7 @@ function GraphView({ diagram, height, selected, onSelect }: { diagram: Diagram; 
               <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke={s.stroke} strokeWidth={s.width} strokeDasharray={s.dash} markerEnd={e.directed ? "url(#arrow)" : undefined} />
               {e.label && (
                 <>
-                  <rect x={mx - e.label.length * 3 - 4} y={my - 8} width={e.label.length * 6 + 8} height={14} rx={3} fill="#0d1014" />
+                  <rect x={mx - e.label.length * 3 - 4} y={my - 8} width={e.label.length * 6 + 8} height={14} rx={3} fill="var(--code-bg)" />
                   <text x={mx} y={my + 3} fontSize={9.5} textAnchor="middle" fill="var(--muted)" className="mono">
                     {e.label}
                   </text>
@@ -362,7 +362,7 @@ function TreeView({ diagram, selected, onSelect }: { diagram: Diagram; selected:
     });
 
   return (
-    <div className="max-h-[480px] overflow-auto rounded-md border py-2" style={{ borderColor: "var(--line)", background: "#0d1014" }}>
+    <div className="max-h-[480px] overflow-auto rounded-md border py-2" style={{ borderColor: "var(--line)", background: "var(--code-bg)" }}>
       {render(null, 0)}
     </div>
   );

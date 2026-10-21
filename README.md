@@ -131,20 +131,31 @@ only. Optional Clerk sign-in, all settings and the API reference: [docs/WEB.md](
 
 ## Using the web app
 
-1. **Add a provider key** under Profile → Provider keys: Anthropic, OpenAI, a Vercel AI Gateway
-   key (400+ models), or the URL of your own vLLM server. Keys belong to your account and work
-   in all your workspaces. Anthropic and OpenAI keys are checked when saved, and the model
-   picker then lists exactly the models your key can use, with prices.
-2. **Explore an environment** under Environments: start with `netops`. Tabs show how an episode
-   works, the world diagram, the tools, the reward rules and generated tasks.
-3. **Start a run** under Runs: pick an environment, a model, the number of episodes and the
-   difficulty tiers. Watch progress live; the run's page shows metrics, cost and every episode
-   with a step-by-step replay. The `scripted` model replays the reference solution at no cost,
-   which is handy to see what "solved" looks like.
-4. **Compare** two or more runs (solve rate per tier, steps, collateral, cost).
-5. **Export training data**: the best episodes as chat-format JSONL for fine-tuning.
-6. **Build your own environment** in the Builder (see below).
-7. **Settings** (per workspace): default model, environment and episodes, the builder model, and
+**Start at Home.** The first time you sign in it asks what you want to do: compare models on a
+task, build an environment from your own data, train a small open model, or just look around.
+It then lists the steps for that goal in order, ticks them off from your workspace's real
+runs, and gives each one a button that opens the right page with the form already filled in.
+The sidebar follows the same pipeline: **Build** (Environments, Builder), **Evaluate** (Runs),
+**Train** (Train a model).
+
+1. **Add a provider key** under Provider keys: Anthropic, OpenAI, a Vercel AI Gateway key
+   (400+ models), or the URL of your own vLLM server. Keys belong to your account and work in
+   all your workspaces. Anthropic and OpenAI keys are checked when saved, and the model picker
+   then lists exactly the models your key can use, with prices. The `scripted` model needs no key.
+2. **Pick an environment** under Environments (start with `netops`), or build your own in the
+   Builder (see below). Tabs show how an episode works, the world diagram, the tools, the reward
+   rules and generated tasks.
+3. **Start a run** under Runs: model, environment, episodes, tiers and a **purpose**:
+   *evaluation* (seeds 0+, the fixed tasks every model is scored on) or *training data*
+   (seeds 10000+, tasks a model may learn from, never used for scoring). The run's page shows
+   metrics, cost and a step-by-step replay of every episode, then suggests what to do next.
+4. **Compare** two or more runs on the same tasks (solve rate per tier, steps, collateral, cost).
+5. **Train a model** walks through distillation: score the teacher and the untrained open
+   model, collect the teacher's solutions on training seeds, build the dataset, fine-tune a
+   LoRA adapter on a rented GPU, test it on the evaluation seeds and call it through vLLM.
+   Steps 4–6 run on the command line for now; the page shows the exact commands, filled in with
+   your runs.
+6. **Settings** (per workspace): default model, environment and episodes, the builder model, and
    the training base model (searchable live from Hugging Face, with a GPU-memory estimate).
    **Usage** shows tokens and cost per day, model, member and workspace.
 

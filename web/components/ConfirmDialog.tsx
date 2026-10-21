@@ -71,12 +71,12 @@ function Dialog({ title, body, confirmLabel = "Confirm", cancelLabel = "Cancel",
   }, [danger, requireText, onClose]);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(0,0,0,0.6)" }} onMouseDown={() => onClose(false)}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "var(--scrim)" }} onMouseDown={() => onClose(false)}>
       <div
         role="alertdialog"
         aria-modal="true"
         aria-labelledby="confirm-title"
-        className="panel w-full max-w-md space-y-4 p-5 shadow-2xl"
+        className="panel w-full max-w-md space-y-4 p-5" style={{ boxShadow: "var(--shadow-dialog)" }}
         onMouseDown={(e) => e.stopPropagation()}
         onKeyDown={(e) => {
           // keep Tab inside the dialog
@@ -129,7 +129,7 @@ function Dialog({ title, body, confirmLabel = "Confirm", cancelLabel = "Cancel",
             className="btn"
             disabled={!allowed}
             onClick={() => onClose(true)}
-            style={danger ? { background: "var(--bad)", color: "#2a0606" } : undefined}
+            style={danger ? { background: "var(--bad)", color: "var(--on-bad)" } : undefined}
           >
             {confirmLabel}
           </button>

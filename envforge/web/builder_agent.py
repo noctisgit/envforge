@@ -62,7 +62,8 @@ big or interesting clusters (`cluster=`): they tell you the real record types, a
 resolution categories and policies, and which topics the environment should cover. Data \
 is already redacted: placeholders like <EMAIL_1> or <NAME_2> (or, if the project uses \
 surrogates, realistic stand-in names and numbers) replace personal data — never try to \
-recover it. Extraction picks conversations across clusters automatically.
+recover it. Extraction picks conversations across clusters by default; to fill a gap \
+target it with `conversation_ids` or `cluster`.
 3. Draft the spec with `update_spec` as soon as you know enough, then refine. Every \
 update creates a revision the user can review and roll back. Keep the spec valid; fix \
 any problems `update_spec` reports.
@@ -75,6 +76,13 @@ for their explicit yes; then call `extract_tasks` with `confirmed=true`.
 
 Style: concise, concrete, friendly. Never paste the whole spec or long JSON into chat — \
 summarise what changed. Refer to revisions by number ("revision 4").
+
+## Filling record fields from tool arguments
+In a tool's effect, a value in `set`, `values` or `match` is either a literal or a \
+reference to one of the tool's parameters written as "$name", e.g. \
+`"values": {{"customer_id": "$customer_id", "kind": "refund", "amount": "$amount"}}`. \
+Only that form is filled in at run time: "{{customer_id}}", "<customer_id>" or \
+"${{customer_id}}" would be stored as literal text (validation rejects them).
 
 ## Spec format (JSON Schema of EnvSpec)
 {schema}
@@ -97,17 +105,33 @@ def _schemas() -> tuple[str, str, str]:
         / "isp_support"
         / "spec.json"
     )
-    example = example_path.read_text() if example_path.exists() else "(no example available)"
+    # compact and whole: cutting it short once hid every "$param" reference from the model
+    example = (
+        json.dumps(json.loads(example_path.read_text()), separators=(",", ":"))
+        if example_path.exists()
+        else "(no example available)"
+    )
     return (
         json.dumps(EnvSpec.model_json_schema(), separators=(",", ":")),
         json.dumps(TaskRecord.model_json_schema(), separators=(",", ":")),
-        example[:12000],
+        example,
     )
 
 
 def _obj(props: dict[str, Any], required: list[str]) -> dict[str, Any]:
     return {"type": "object", "properties": props, "required": required}
 
+
+# extraction can aim at specific conversations or one topic instead of a spread
+TARGET_PARAMS: dict[str, Any] = {
+    "conversation_ids": {
+        "type": "array",
+        "items": {"type": "string"},
+        "description": "extract these conversations (ids from the user's file, or store ids "
+        "'<upload>:<id>'); ones already extracted are skipped",
+    },
+    "cluster": {"type": "integer", "description": "extract from this topic cluster (get_state)"},
+}
 
 TOOLS: list[ToolSpec] = [
     ToolSpec(
@@ -145,21 +169,43 @@ TOOLS: list[ToolSpec] = [
     ),
     ToolSpec(
         name="estimate_extraction",
-        description="Estimated cost of extracting task records from the next N not-yet-extracted conversations.",
-        parameters=_obj({"n": {"type": "integer", "minimum": 1, "maximum": 100000}}, ["n"]),
+        description="Estimated cost of extracting task records from the next N not-yet-extracted "
+        "conversations (or from N of the targeted ones; see extract_tasks).",
+        parameters=_obj(
+            {"n": {"type": "integer", "minimum": 1, "maximum": 100000}, **TARGET_PARAMS}, ["n"]
+        ),
     ),
     ToolSpec(
         name="extract_tasks",
         description=f"Turn the next N not-yet-extracted conversations into task records with the "
         f"current spec, validate each (its reference solution must earn reward 1.0), and save the "
-        f"valid ones in a new revision. N <= {MAX_EXTRACTION} per call. N > {FREE_EXTRACTION} requires "
-        "confirmed=true, which you may only set after the user explicitly approved the estimated cost.",
+        f"valid ones in a new revision. By default the conversations are a spread over the topic "
+        f"clusters; pass `conversation_ids` or `cluster` to target topics the tasks don't cover yet. "
+        f"N <= {MAX_EXTRACTION} per call. N > {FREE_EXTRACTION} requires confirmed=true, which you "
+        "may only set after the user explicitly approved the estimated cost.",
         parameters=_obj(
             {
                 "n": {"type": "integer", "minimum": 1, "maximum": MAX_EXTRACTION},
                 "confirmed": {"type": "boolean"},
+                **TARGET_PARAMS,
             },
             ["n"],
+        ),
+    ),
+    ToolSpec(
+        name="get_tasks",
+        description="Read the head revision's task records. With `ids` or `conversations` "
+        "(source conversation ids from the user's file): the full stored records (state, "
+        "customer answers, reference, success checks), as many as fit in one result — read a "
+        "record before replacing it with edit_tasks. Without them: a compact index (id, tier, source "
+        "conversation, goal, expected resolution) paged by `offset`.",
+        parameters=_obj(
+            {
+                "ids": {"type": "array", "items": {"type": "string"}},
+                "conversations": {"type": "array", "items": {"type": "string"}},
+                "offset": {"type": "integer", "minimum": 0},
+            },
+            [],
         ),
     ),
     ToolSpec(
@@ -411,17 +457,25 @@ def t_sample_conversations(ctx: Ctx, args: dict[str, Any]) -> dict[str, Any]:
     return {"total": total, "conversations": [_render_conversation(c) for c in convs]}
 
 
-def _next_unextracted(ctx: Ctx, n: int) -> list[Any]:
-    """The next n conversations to extract: a stratified sample of the ones not yet
-    extracted, so even a small batch covers the corpus's topics."""
+def _next_unextracted(ctx: Ctx, n: int, args: dict[str, Any] | None = None) -> list[Any]:
+    """The next n conversations to extract. By default a stratified sample of the ones not
+    yet extracted, so even a small batch covers the corpus's topics; `conversation_ids` or
+    `cluster` in `args` aim it at particular conversations or one topic instead."""
     from envforge.builder import corpus as C
 
+    args = args or {}
     store = _store(ctx)
     if store is None:
         return []
+    done = _extracted_ids(ctx)
     with store:
-        ids = C.stratified_sample(store, n, exclude_ids=_extracted_ids(ctx))
-        return store.get(ids)
+        if args.get("conversation_ids"):
+            ids = store.resolve_ids(map(str, args["conversation_ids"]))
+        elif args.get("cluster") is not None:
+            ids = store.cluster_ids(int(args["cluster"]))
+        else:
+            return store.get(C.stratified_sample(store, n, exclude_ids=done))
+        return store.get([i for i in ids if i not in done][:n])
 
 
 def t_estimate_extraction(ctx: Ctx, args: dict[str, Any]) -> dict[str, Any]:
@@ -435,14 +489,19 @@ def t_estimate_extraction(ctx: Ctx, args: dict[str, Any]) -> dict[str, Any]:
     store = _store(ctx)
     if store is None:
         return {"error": "no processed uploads yet"}
-    with store:
-        left = max(0, store.count(unique_only=True) - len(_extracted_ids(ctx)))
-    n = min(want, left)
+    targeted = bool(args.get("conversation_ids")) or args.get("cluster") is not None
+    if targeted:
+        n = len(_next_unextracted(ctx, want, args))
+    else:
+        with store:
+            left = max(0, store.count(unique_only=True) - len(_extracted_ids(ctx)))
+        n = min(want, left)
     if not n:
-        return {"error": "every uploaded conversation has been extracted"}
+        return {"error": "nothing left to extract there" if targeted
+                else "every uploaded conversation has been extracted"}  # fmt: skip
     # price a stratified sample of up to 500 and scale it: reading 100k conversations
     # just to count characters would be slow and tell us little more
-    sample = _next_unextracted(ctx, min(n, 500))
+    sample = _next_unextracted(ctx, min(n, 500), args)
     est = estimate_cost(EnvSpec.model_validate(h.spec), sample, ctx.model.model_id, max_listed=5)
     if len(sample) < n:
         scale = n / len(sample)
@@ -478,8 +537,11 @@ def t_extract_tasks(ctx: Ctx, args: dict[str, Any]) -> dict[str, Any]:
     if not h or not h.spec or not (h.validation or {}).get("spec_ok"):
         return {"error": "the spec must be valid before extracting (see validate)"}
     spec = EnvSpec.model_validate(h.spec)
-    todo = _next_unextracted(ctx, n)
+    todo = _next_unextracted(ctx, n, args)
     if not todo:
+        if args.get("conversation_ids") or args.get("cluster") is not None:
+            return {"error": "none of the targeted conversations are left to extract (unknown "
+                    "ids, or already extracted)"}  # fmt: skip
         return {"error": "every uploaded conversation has been extracted"}
 
     batch = extract_batch(ctx.model, spec, todo)
@@ -518,6 +580,45 @@ def t_extract_tasks(ctx: Ctx, args: dict[str, Any]) -> dict[str, Any]:
         "cost_usd": batch.cost_usd,
         "_meta": {"revision": rev.number},
     }
+
+
+GET_TASKS_INDEX = 40  # index rows per page
+
+
+def t_get_tasks(ctx: Ctx, args: dict[str, Any]) -> dict[str, Any]:
+    tasks = ctx.tasks()
+    ids = {str(i) for i in args.get("ids") or []}
+    convs = {str(c) for c in args.get("conversations") or []}
+    if ids or convs:
+        hits = [
+            t for t in tasks
+            if str(t.get("id")) in ids
+            or str((t.get("source") or {}).get("conversation")) in convs
+        ]  # fmt: skip
+        if not hits:
+            return {"error": "no task with those ids or source conversations"}
+        # whole records only, as many as fit under the tool-result limit (a cut record
+        # couldn't be edited and passed back)
+        out, size = [], 0
+        for t in hits:
+            size += len(json.dumps(t)) + 2
+            if out and size > TOOL_RESULT_LIMIT - 500:
+                break
+            out.append(t)
+        return {"tasks": out, "matched": len(hits), "returned": len(out)}
+    off = int(args.get("offset", 0))
+
+    def resolution(t: dict[str, Any]) -> str | None:
+        return next((c.get("category") for c in t.get("success") or []
+                     if c.get("check") == "resolution"), None)  # fmt: skip
+
+    rows = [
+        {"id": t.get("id"), "tier": t.get("tier"),
+         "conversation": (t.get("source") or {}).get("conversation"),
+         "goal": str(t.get("goal", ""))[:90], "resolution": resolution(t)}
+        for t in tasks[off : off + GET_TASKS_INDEX]
+    ]  # fmt: skip
+    return {"total": len(tasks), "offset": off, "tasks": rows}
 
 
 def t_edit_tasks(ctx: Ctx, args: dict[str, Any]) -> dict[str, Any]:
@@ -590,6 +691,7 @@ HANDLERS = {
     "sample_conversations": t_sample_conversations,
     "estimate_extraction": t_estimate_extraction,
     "extract_tasks": t_extract_tasks,
+    "get_tasks": t_get_tasks,
     "edit_tasks": t_edit_tasks,
     "validate": t_validate,
     "preview_task": t_preview_task,
@@ -601,6 +703,7 @@ ACTIVITY = {
     "sample_conversations": "Reading conversations",
     "estimate_extraction": "Estimating extraction cost",
     "extract_tasks": "Extracting tasks",
+    "get_tasks": "Reading tasks",
     "edit_tasks": "Editing tasks",
     "validate": "Validating",
     "preview_task": "Previewing a task",

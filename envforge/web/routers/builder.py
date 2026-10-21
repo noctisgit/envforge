@@ -96,14 +96,13 @@ def _rev_out(
     }
 
 
-def _versions(db: Session, p: EnvProject) -> list[EnvVersion]:
+def _versions(db: Session, p: EnvProject, *, include_deleted: bool = False) -> list[EnvVersion]:
     from sqlalchemy import select
 
-    return list(
-        db.scalars(
-            select(EnvVersion).where(EnvVersion.project_id == p.id).order_by(EnvVersion.version)
-        )
-    )
+    query = select(EnvVersion).where(EnvVersion.project_id == p.id)
+    if not include_deleted:
+        query = query.where(EnvVersion.deleted_at.is_(None))
+    return list(db.scalars(query.order_by(EnvVersion.version)))
 
 
 def _upload_out(u: EnvUpload) -> dict:
@@ -240,13 +239,15 @@ def patch_project(
 def delete_project(
     ws_id: str, pid: str, user: User = Depends(current_user), db: Session = Depends(get_db)
 ) -> None:
-    """Hide the project. Published versions stay runnable (runs may reference them)."""
+    """Delete the project and the environments published from it. Runs already made on
+    those environments keep their results and replays."""
     from datetime import UTC, datetime
 
     ws = svc.require_workspace(db, user, ws_id)
     p = B.get_project(db, ws, pid)
     if B.active_job(db, p):
         raise HTTPException(409, "the builder is busy with this project; try again in a moment")
+    B.delete_versions(db, ws, user, _versions(db, p))
     p.deleted_at = datetime.now(UTC)
     db.commit()
 
@@ -461,7 +462,7 @@ async def upload(
                         413, f"file too large (limit {B.MAX_UPLOAD_BYTES // 2**20} MB); split it"
                     )
                 f.write(chunk)
-    except HTTPException:
+    except Exception:  # too large, or the client went away mid-upload: keep no partial file
         raw.unlink(missing_ok=True)
         db.rollback()
         raise
@@ -756,7 +757,27 @@ def workspace_pack_detail(
     from envforge.core.explore import pack_overview
 
     ws = svc.require_workspace(db, user, ws_id)
-    return pack_overview(B.resolve_pack(db, ws, name))
+    return pack_overview(B.resolve_pack(db, ws, name, include_deleted=True))
+
+
+@router.delete("/packs/{name}", status_code=204)
+def delete_workspace_pack(
+    ws_id: str, name: str, user: User = Depends(current_user), db: Session = Depends(get_db)
+) -> None:
+    """Delete a published environment (`<project>@v<n>`). Built-in packs can't be deleted."""
+    from sqlalchemy import select
+
+    ws = svc.require_workspace(db, user, ws_id)
+    ver = db.scalar(
+        select(EnvVersion).where(
+            EnvVersion.workspace_id == ws.id,
+            EnvVersion.pack_name == name,
+            EnvVersion.deleted_at.is_(None),
+        )
+    )
+    if ver is None:
+        raise HTTPException(404, f"no published environment '{name}' in this workspace")
+    B.delete_versions(db, ws, user, [ver])
 
 
 @router.get("/packs/{name}/preview")
@@ -767,7 +788,7 @@ def workspace_pack_preview(
     from envforge.core.explore import preview_task
 
     ws = svc.require_workspace(db, user, ws_id)
-    env_cls = B.resolve_pack(db, ws, name)
+    env_cls = B.resolve_pack(db, ws, name, include_deleted=True)
     if tier not in env_cls.tiers:
         raise HTTPException(400, f"tier must be one of {list(env_cls.tiers)}")
     return preview_task(env_cls, seed, tier)

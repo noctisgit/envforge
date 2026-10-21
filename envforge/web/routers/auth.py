@@ -52,6 +52,7 @@ def info() -> ServerInfo:
         allow_server_keys=s.ALLOW_SERVER_KEYS,
         providers=list(PROVIDERS),
         version=__version__,
+        max_active_runs=s.MAX_ACTIVE_RUNS_PER_WORKSPACE,
     )
 
 

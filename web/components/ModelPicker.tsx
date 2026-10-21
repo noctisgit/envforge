@@ -157,7 +157,7 @@ export function ModelPicker({
       </button>
       {value && data && !selected && !value.startsWith("vllm:") && (
         <div className="mt-1 text-xs" style={{ color: "var(--warn)" }}>
-          Not available with your keys — add a key for its provider (Profile), or check the id.
+          Not available with your keys — add a key for its provider under Provider keys, or check the id.
         </div>
       )}
 
@@ -230,7 +230,7 @@ export function ModelPicker({
             )}
             {data && data.providers.length === 0 && (
               <div className="px-3 py-2 text-xs" style={{ color: "var(--muted)" }}>
-                Only the offline model is available. Add a provider key under Profile → Provider keys to see real models.
+                Only the offline model is available. Add a provider key under Provider keys (sidebar) to see real models.
               </div>
             )}
             {custom && (

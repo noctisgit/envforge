@@ -242,6 +242,8 @@ class EnvVersion(Base):
     env_dir: Mapped[str] = mapped_column(String(500))  # spec.json + tasks.jsonl
     created_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    # deleted: gone from Environments and can't start new runs; past runs still replay
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class EnvUpload(Base):

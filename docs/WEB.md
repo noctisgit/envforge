@@ -218,6 +218,7 @@ Commit the generated file under `envforge/web/migrations/versions/`.
 | GET | `/api/packs/{name}` | environment description, dimensions, sample diagram |
 | GET | `/api/packs/{name}/preview?seed=&tier=` | one generated task + reference solution |
 | DELETE | `/api/workspaces/{id}/runs/{run}` | delete a finished run's trajectories (usage kept) |
+| DELETE | `/api/workspaces/{id}/packs/{name}` | delete a builder-published environment (past runs still replay) |
 | GET | `/api/workspaces/{id}/runs/{run}/episodes/{n}/replay` | diagram after each tool call (sim packs) |
 | GET/POST | `/api/workspaces/{id}/runs` | list / enqueue |
 | GET | `/api/workspaces/{id}/runs/{run}` | status + metrics |

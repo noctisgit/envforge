@@ -9,8 +9,8 @@
 
 import { Fragment, useCallback, useEffect, useState } from "react";
 import { useConfirm } from "@/components/ConfirmDialog";
+import { errorText, useToast } from "@/components/Toast";
 import {
-  ApiError,
   builderCorpus,
   clusterExamples,
   getPrivacyReview,
@@ -26,7 +26,6 @@ import {
 } from "@/lib/api";
 
 const pct = (x: number) => `${(x * 100).toFixed(x < 0.1 ? 1 : 0)}%`;
-const msgOf = (e: unknown) => (e instanceof ApiError ? e.message : String(e));
 
 const PROFILES: { id: PrivacyProfile; label: string; hint: string }[] = [
   { id: "off", label: "off", hint: "public or synthetic data: nothing is redacted" },
@@ -38,18 +37,18 @@ const PROFILES: { id: PrivacyProfile; label: string; hint: string }[] = [
 
 export function PrivacyPanel({ wsId, project, onChange }: { wsId: string; project: BuilderProject; onChange: () => void }) {
   const confirm = useConfirm();
+  const toast = useToast();
   const pv = project.privacy;
   const [reviewing, setReviewing] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
   const hasData = project.uploads.some((u) => u.status === "ready");
 
-  async function patch(p: PrivacyPatch) {
-    setErr(null);
+  async function patch(p: PrivacyPatch, done?: string) {
     try {
       await setBuilderPrivacy(wsId, project.id, p);
+      if (done) toast.success(done, "Applies to uploads processed from now on.");
       onChange();
     } catch (e) {
-      setErr(msgOf(e));
+      toast.error("Couldn't change the privacy settings", e);
     }
   }
 
@@ -67,7 +66,7 @@ export function PrivacyPanel({ wsId, project, onChange }: { wsId: string; projec
       tone: profile === "off" ? "danger" : "default",
       ...(profile === "off" ? { requireText: "public data" } : {}),
     });
-    if (ok) await patch({ profile, confirm_off: profile === "off" });
+    if (ok) await patch({ profile, confirm_off: profile === "off" }, profile === "off" ? "Redaction turned off" : `Switched to the ${profile} profile`);
   }
 
   const rv = pv.review;
@@ -75,10 +74,10 @@ export function PrivacyPanel({ wsId, project, onChange }: { wsId: string; projec
   const border = pv.blocked ? "var(--bad)" : pv.needs_signoff ? "var(--warn)" : "var(--line)";
 
   return (
-    <div className="space-y-3 rounded-md border p-4" style={{ borderColor: border }}>
+    <section className="panel space-y-3 p-4" style={{ borderColor: border, background: "var(--input-bg)" }} aria-label="Privacy">
       <div className="flex flex-wrap items-center gap-3">
-        <span className="font-medium">Privacy</span>
-        <div className="flex gap-1" role="radiogroup" aria-label="Redaction profile">
+        <h3 className="font-semibold">Privacy</h3>
+        <div className="flex flex-wrap gap-1.5" role="radiogroup" aria-label="Redaction profile">
           {PROFILES.map((p) => (
             <button
               key={p.id}
@@ -86,19 +85,18 @@ export function PrivacyPanel({ wsId, project, onChange }: { wsId: string; projec
               aria-checked={pv.profile === p.id}
               title={p.hint}
               onClick={() => changeProfile(p.id)}
-              className="rounded-md border px-2.5 py-1 text-xs"
+              className="rounded-full border px-2.5 py-1 text-xs outline-none focus-visible:ring-1 focus-visible:ring-[var(--accent)]"
               style={{
                 borderColor: pv.profile === p.id ? (p.id === "off" ? "var(--warn)" : "var(--accent)") : "var(--line)",
                 color: pv.profile === p.id ? (p.id === "off" ? "var(--warn)" : "var(--accent)") : "var(--muted)",
+                background: pv.profile === p.id ? (p.id === "off" ? "transparent" : "var(--accent-tint)") : "transparent",
               }}
             >
               {p.label}
             </button>
           ))}
         </div>
-        <span className="text-xs" style={{ color: "var(--muted)" }}>
-          {PROFILES.find((p) => p.id === pv.profile)?.hint}
-        </span>
+        <span className="hint">{PROFILES.find((p) => p.id === pv.profile)?.hint}</span>
       </div>
 
       {pv.profile !== "off" && (
@@ -123,7 +121,7 @@ export function PrivacyPanel({ wsId, project, onChange }: { wsId: string; projec
           </label>
           <label className="flex flex-col gap-1">
             <span className="font-medium">second pass (PII model)</span>
-            <select className="input !py-1 text-xs" value={pv.tier2} onChange={(e) => patch({ tier2: e.target.value as "off" | "auto" | "all" })}>
+            <select className="input !py-1 text-xs" aria-label="Second pass (PII model)" value={pv.tier2} onChange={(e) => patch({ tier2: e.target.value as "off" | "auto" | "all" })}>
               <option value="off">off</option>
               <option value="auto">risky conversations only (recommended)</option>
               <option value="all">every conversation (slow)</option>
@@ -132,7 +130,7 @@ export function PrivacyPanel({ wsId, project, onChange }: { wsId: string; projec
           </label>
           <label className="flex flex-col gap-1">
             <span className="font-medium">review threshold</span>
-            <select className="input !py-1 text-xs" value={String(pv.threshold)} onChange={(e) => patch({ threshold: Number(e.target.value) })}>
+            <select className="input !py-1 text-xs" aria-label="Review threshold" value={String(pv.threshold)} onChange={(e) => patch({ threshold: Number(e.target.value) })}>
               {[0.01, 0.02, 0.05, 0.1].map((t) => (
                 <option key={t} value={String(t)}>
                   at most {pct(t)} of conversations leak
@@ -147,7 +145,7 @@ export function PrivacyPanel({ wsId, project, onChange }: { wsId: string; projec
       {pv.profile !== "off" && (
         <div className="flex flex-wrap items-center gap-3 border-t pt-3 text-xs" style={{ borderColor: "var(--line)" }}>
           <ReviewStatus review={rv} />
-          <button className={`${pv.needs_signoff || pv.blocked ? "btn" : "btn-ghost"} ml-auto py-1`} disabled={!hasData} onClick={() => setReviewing(true)}>
+          <button className={`${pv.needs_signoff || pv.blocked ? "btn" : "btn-ghost"} ml-auto`} disabled={!hasData} title={hasData ? "" : "upload some data first"} onClick={() => setReviewing(true)}>
             {rv?.status === "open" ? "Continue review" : res ? "New review" : "Review a sample"}
           </button>
         </div>
@@ -169,7 +167,6 @@ export function PrivacyPanel({ wsId, project, onChange }: { wsId: string; projec
           {(rv?.flagged?.length ?? 0) > 8 && " …"}
         </div>
       )}
-      {err && <div className="text-xs" style={{ color: "var(--bad)" }}>{err}</div>}
       {reviewing && (
         <ReviewDialog
           wsId={wsId}
@@ -180,7 +177,7 @@ export function PrivacyPanel({ wsId, project, onChange }: { wsId: string; projec
           }}
         />
       )}
-    </div>
+    </section>
   );
 }
 
@@ -212,7 +209,7 @@ function Highlighted({ text }: { text: string }) {
     <>
       {text.split(PLACEHOLDER).map((part, i) =>
         PLACEHOLDER.test(part) ? (
-          <span key={i} className="mono rounded px-1 text-[11px]" style={{ background: "#173b36", color: "var(--accent)" }}>
+          <span key={i} className="mono rounded px-1 text-[11px]" style={{ background: "var(--pill-running-bg)", color: "var(--accent)" }}>
             {part}
           </span>
         ) : (
@@ -224,6 +221,7 @@ function Highlighted({ text }: { text: string }) {
 }
 
 function ReviewDialog({ wsId, project, onClose }: { wsId: string; project: BuilderProject; onClose: (changed: boolean) => void }) {
+  const toast = useToast();
   const [review, setReview] = useState<PrivacyReview | null>(null);
   const [convs, setConvs] = useState<CorpusConversation[]>([]);
   const [flagged, setFlagged] = useState<Set<string>>(new Set());
@@ -249,7 +247,7 @@ function ReviewDialog({ wsId, project, onClose }: { wsId: string; project: Build
           if (saved) setFlagged(new Set(JSON.parse(saved)));
         } catch {}
       } catch (e) {
-        setErr(msgOf(e));
+        setErr(errorText(e));
       } finally {
         setBusy(false);
       }
@@ -288,13 +286,17 @@ function ReviewDialog({ wsId, project, onClose }: { wsId: string; project: Build
     setBusy(true);
     setErr(null);
     try {
-      await submitPrivacyReview(wsId, project.id, review.id, [...flagged]);
+      const p = await submitPrivacyReview(wsId, project.id, review.id, [...flagged]);
       try {
         if (draftKey) localStorage.removeItem(draftKey);
       } catch {}
+      const r = p.privacy.review;
+      if (r?.status === "passed") toast.success("Privacy review passed", `${r.result?.flagged ?? 0} of ${r.result?.reviewed ?? convs.length} conversations flagged.`);
+      else if (r?.status === "failed") toast.warning("Privacy review failed", "Too much personal data is left; extraction is blocked until a review passes.");
+      else toast.success("Review submitted");
       onClose(true);
     } catch (e) {
-      setErr(msgOf(e));
+      toast.error("Couldn't submit the review", e);
       setBusy(false);
     }
   }
@@ -302,17 +304,19 @@ function ReviewDialog({ wsId, project, onClose }: { wsId: string; project: Build
   const c = convs[i];
   const seen = Math.min(convs.length, i + 1);
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" role="dialog" aria-modal aria-label="Privacy review">
-      <div className="panel flex max-h-[92vh] w-full max-w-4xl flex-col shadow-2xl">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "var(--scrim)" }} role="dialog" aria-modal aria-labelledby="review-title">
+      <div className="panel flex max-h-[92vh] w-full max-w-4xl flex-col" style={{ boxShadow: "var(--shadow-dialog)" }}>
         <div className="flex flex-wrap items-center gap-3 border-b px-5 py-3" style={{ borderColor: "var(--line)" }}>
-          <div className="font-medium">Privacy review</div>
+          <h2 id="review-title" className="text-base font-semibold">
+            Privacy review
+          </h2>
           {review && (
-            <div className="text-xs" style={{ color: "var(--muted)" }}>
+            <div className="hint">
               conversation {seen} of {convs.length} · {flagged.size} flagged · random sample of {review.population.toLocaleString()} unique
               conversations
             </div>
           )}
-          <button className="btn-ghost ml-auto py-1 text-xs" onClick={() => onClose(changed)}>
+          <button className="btn-ghost btn-sm ml-auto" onClick={() => onClose(changed)}>
             Close (keeps progress)
           </button>
         </div>
@@ -326,6 +330,7 @@ function ReviewDialog({ wsId, project, onClose }: { wsId: string; project: Build
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
           {busy && !c && <div style={{ color: "var(--muted)" }}>Drawing a sample…</div>}
+          {err && !c && <div style={{ color: "var(--bad)" }}>{err}</div>}
           {c && (
             <div className="space-y-2 text-sm">
               <div className="mono text-xs" style={{ color: "var(--muted)" }}>
@@ -346,23 +351,27 @@ function ReviewDialog({ wsId, project, onClose }: { wsId: string; project: Build
           )}
         </div>
         <div className="flex flex-wrap items-center gap-2 border-t px-5 py-3" style={{ borderColor: "var(--line)" }}>
-          <button className="btn-ghost py-1" disabled={i === 0} onClick={() => setI(i - 1)}>
+          <button className="btn-ghost" disabled={i === 0} onClick={() => setI(i - 1)}>
             ← Previous
           </button>
           {c && (
             <button
-              className="rounded-md border px-3 py-1 text-sm"
-              style={{ borderColor: flagged.has(c.id) ? "var(--bad)" : "var(--line)", color: flagged.has(c.id) ? "var(--bad)" : "var(--fg)" }}
+              className="btn-ghost"
+              aria-pressed={flagged.has(c.id)}
+              style={{
+                borderColor: flagged.has(c.id) ? "var(--bad)" : undefined,
+                color: flagged.has(c.id) ? "var(--bad)" : undefined,
+                background: flagged.has(c.id) ? "var(--bad-tint)" : undefined,
+              }}
               onClick={() => toggle(c.id)}
             >
               {flagged.has(c.id) ? "⚑ Flagged: personal data left" : "Flag: personal data left"}
             </button>
           )}
-          <button className="btn-ghost py-1" disabled={i >= convs.length - 1} onClick={() => setI(i + 1)}>
+          <button className="btn-ghost" disabled={i >= convs.length - 1} onClick={() => setI(i + 1)}>
             Next →
           </button>
           <div className="ml-auto flex items-center gap-3">
-            {err && <span className="text-xs" style={{ color: "var(--bad)" }}>{err}</span>}
             <button className="btn" disabled={busy || !review || seen < convs.length} title={seen < convs.length ? "Read every conversation first" : ""} onClick={submit}>
               Submit review ({flagged.size} flagged)
             </button>
@@ -397,9 +406,9 @@ export function CorpusPanel({ wsId, project }: { wsId: string; project: BuilderP
 
   if (!ov) return null;
   return (
-    <div className="space-y-3 rounded-md border p-4" style={{ borderColor: "var(--line)" }}>
+    <section className="inset-card space-y-3 p-4" aria-label="Corpus">
       <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1">
-        <span className="font-medium">Corpus</span>
+        <h3 className="font-semibold">Corpus</h3>
         <span>{ov.conversations.toLocaleString()} conversations</span>
         <span style={{ color: "var(--muted)" }}>
           {ov.unique.toLocaleString()} unique · {ov.exact_duplicates.toLocaleString()} exact and {ov.near_duplicates.toLocaleString()} near duplicates
@@ -407,12 +416,12 @@ export function CorpusPanel({ wsId, project }: { wsId: string; project: BuilderP
         </span>
         {!!ov.stale?.length && <span className="text-xs" style={{ color: "var(--warn)" }}>updating {ov.stale.join(", ")}…</span>}
       </div>
-      <p className="text-xs" style={{ color: "var(--muted)" }}>
+      <p className="hint">
         Similar conversations are grouped by their wording; the builder samples across these topics so a small extraction still covers the
         whole corpus. Click a topic to read examples (redacted).
       </p>
       <div className="overflow-x-auto">
-        <table className="data">
+        <table className="data inset">
           <thead>
             <tr>
               <th className="w-12">#</th>
@@ -424,7 +433,7 @@ export function CorpusPanel({ wsId, project }: { wsId: string; project: BuilderP
           <tbody>
             {ov.clusters.map((cl) => (
               <Fragment key={cl.id}>
-                <tr className="cursor-pointer hover:bg-white/[0.02]" onClick={() => toggle(cl.id)}>
+                <tr className="cursor-pointer" aria-expanded={open === cl.id} onClick={() => toggle(cl.id)}>
                   <td className="mono text-xs" style={{ color: "var(--muted)" }}>
                     {cl.id}
                   </td>
@@ -432,13 +441,13 @@ export function CorpusPanel({ wsId, project }: { wsId: string; project: BuilderP
                     <span className="font-medium">{cl.label}</span>
                     {cl.terms.length > 0 && <span style={{ color: "var(--muted)" }}> · {cl.terms.join(", ")}</span>}
                   </td>
-                  <td className="text-right">{cl.size.toLocaleString()}</td>
+                  <td className="num text-right">{cl.size.toLocaleString()}</td>
                   <td>
                     <div className="flex items-center gap-2">
                       <div className="h-1.5 flex-1 overflow-hidden rounded-full" style={{ background: "var(--line)" }}>
                         <div className="h-full rounded-full" style={{ width: `${Math.max(2, cl.share * 100)}%`, background: "var(--accent)" }} />
                       </div>
-                      <span className="w-10 text-right text-xs" style={{ color: "var(--muted)" }}>
+                      <span className="num w-10 text-right text-xs" style={{ color: "var(--muted)" }}>
                         {pct(cl.share)}
                       </span>
                     </div>
@@ -451,7 +460,7 @@ export function CorpusPanel({ wsId, project }: { wsId: string; project: BuilderP
                       {!examples[cl.id] && <span style={{ color: "var(--muted)" }}>Loading…</span>}
                       <div className="space-y-3">
                         {examples[cl.id]?.map((c) => (
-                          <div key={c.id} className="rounded border p-2 text-xs" style={{ borderColor: "var(--line)" }}>
+                          <div key={c.id} className="rounded-md border p-3 text-xs" style={{ borderColor: "var(--line)", background: "var(--panel)" }}>
                             <div className="mono mb-1" style={{ color: "var(--muted)" }}>
                               {c.source_id ?? c.id}
                             </div>
@@ -472,6 +481,6 @@ export function CorpusPanel({ wsId, project }: { wsId: string; project: BuilderP
           </tbody>
         </table>
       </div>
-    </div>
+    </section>
   );
 }

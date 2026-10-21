@@ -216,7 +216,13 @@ def _effect_problems(spec: EnvSpec, eff: Any, params: dict, label: str) -> list[
         if fdef is None:
             problems.append(f"{label}: {coll.name} has no field '{field_name}'")
             continue
-        if is_param_ref(value):
+        if name := _template_param(value, params):
+            # "{customer_id}" is stored as that literal text; only "$customer_id" is filled in
+            problems.append(
+                f"{label}: {value!r} is literal text, not a reference; "
+                f'write "${name}" to fill {coll.name}.{field_name} from the argument'
+            )
+        elif is_param_ref(value):
             need_param(value[1:], "$-reference")
             p = params.get(value[1:])
             if p is not None and fdef.type == "number" and p.type != "number":
@@ -224,6 +230,17 @@ def _effect_problems(spec: EnvSpec, eff: Any, params: dict, label: str) -> list[
         elif not _value_fits(fdef.type, fdef.enum, value):
             problems.append(f"{label}: {value!r} does not fit {coll.name}.{field_name}")
     return problems
+
+
+def _template_param(value: Any, params: dict) -> str | None:
+    """The parameter a literal was meant to reference ("{name}", "{{name}}", "<name>" or
+    "${name}" where `name` is one of the tool's parameters), else None."""
+    if not isinstance(value, str):
+        return None
+    v = value.strip().removeprefix("$")
+    wrapped = (v.startswith("{") and v.endswith("}")) or (v.startswith("<") and v.endswith(">"))
+    name = v.strip("{}<> ")
+    return name if wrapped and name in params else None
 
 
 def _customer_collection(spec: EnvSpec) -> str | None:
