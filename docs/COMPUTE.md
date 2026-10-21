@@ -20,9 +20,17 @@ workloads as background processes inside it (`--runtime pod`). See section 6.
 **Scope:** you bring your own box. envforge does not create, start or stop instances through
 the RunPod, Vast or cloud APIs. Rent the box in their web console, then point envforge at it.
 
-Code: `envforge/compute/` (`ssh.py` = `SSHBox`, `host.py` = checks and GPU info,
+**In the browser.** Everything below can also be done from the web app: Settings → GPU
+boxes adds a box (its SSH key stored encrypted), runs the readiness checks (GPU, VRAM,
+driver/CUDA, free disk, vLLM), and starts / stops vLLM; a serving box shows up in the model
+picker as `vllm:<model>` for that workspace. Those actions are admin-only by default
+(`GPU_BOXES_ADMIN_ONLY`) and run in `envforge-worker --kind compute` using this same code.
+See docs/WEB.md, "GPU boxes, datasets, training and models".
+
+Code: `envforge/compute/` (`ssh.py` = `SSHBox`, `host.py` = checks, GPU info and box facts,
 `vllm.py` = serving, `runtime.py` = docker vs pod, `process.py` = detached processes for pod
-mode, `cli.py` = `envforge compute …`). The GPU image lives in `deploy/gpu/`.
+mode, `cli.py` = `envforge compute …`, `fake.py` = `FakeGPUBox` for offline tests). The GPU
+image lives in `deploy/gpu/`.
 
 ## 1. Renting a box
 

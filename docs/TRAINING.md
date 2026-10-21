@@ -23,6 +23,15 @@ as the pod and add `--runtime pod` to every `compute` / `train` command that tak
 or set `ENVFORGE_GPU_RUNTIME=pod` once. Setup is in docs/COMPUTE.md, section 6. The
 commands below are otherwise identical.
 
+**In the browser.** Steps 2–5 have pages in the web app, built on the same code:
+**Datasets** (pick runs on training seeds, live preview with the eval-seed overlap check,
+save), **Fine-tune** (dataset + base model + GPU box + hyperparameters with the CLI's
+defaults; live steps, loss curve, log tail, elapsed time, estimated cost; cancel) and
+**Models** (adapters with lineage; *Test* serves base + adapter and queues a run on seeds 0+,
+then links to Compare with the teacher and the base model; serve, download `.tar.gz`, curl /
+Python snippets). GPU boxes are added under Settings → GPU boxes. The Home guide links each
+step to its page. Details in docs/WEB.md.
+
 ## 1. Collect teacher episodes — on *training* seeds
 
 Every seed is a different generated task. Keep two disjoint ranges: **train on seeds
@@ -53,7 +62,8 @@ per task (the shortest best one), holds out ~5% of *tasks* for validation, and w
 | `train.jsonl`, `val.jsonl` | one conversation per line: system prompt, task + first observation, then the teacher's turns (text + tool calls) and the environment's replies, plus the tool schemas |
 | `manifest.json` | source runs and models, counts per pack/tier, and every `(pack, tier, seed)` used |
 
-The web UI's **Export training data** produces the same chat format for ad-hoc use.
+The web UI's **Datasets** page builds the same files (and manifest) with a live preview;
+`best per task` off keeps every passing episode, still split by task.
 
 ## 3. Baseline the student — on *evaluation* seeds
 

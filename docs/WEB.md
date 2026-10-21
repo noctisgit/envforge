@@ -11,8 +11,11 @@ The web layer is optional. The CLI and library work without it. It adds:
   rules and a live task preview, generated from the pack (see docs/PACKS.md)
 - **a run queue** executed by a separate worker process
 - **a UI** for queuing runs, watching progress, reading metrics and transcripts,
-  comparing runs, exporting training data, and **usage** (tokens and estimated cost per
-  day, model, member and workspace)
+  comparing runs, and **usage** (tokens and estimated cost per day, model, member and
+  workspace)
+- **GPU boxes, datasets, fine-tuning and models** (Phases 2–3 in the browser): add a GPU
+  box, check it, serve an open model with vLLM, build a dataset from a strong model's
+  solutions, train a LoRA adapter on the box, test and serve it (see below)
 
 ```
 browser ──► Next.js (web/, :3000) ──/api/*──► FastAPI (envforge/web, :8000) ──► Postgres
@@ -109,8 +112,74 @@ The worker adds each episode's tokens and estimated cost to its run as it goes;
 
 `GET /api/workspaces/{id}/runs/export?runs=a,b&min_reward=1.0&format=chat` streams the
 episodes that scored at least `min_reward` as JSONL. `chat` is OpenAI messages + tool
-schemas (what TRL's SFTTrainer takes); `trajectory` is the raw envforge format. The UI
-offers it on a run, on a selection of runs, and on the compare page.
+schemas (what TRL's SFTTrainer takes); `trajectory` is the raw envforge format. In the UI,
+"Build a training dataset" on a run, a selection of runs or the compare page opens the
+**Datasets** page with those runs preselected instead (named, reproducible datasets with
+a manifest; see below). The export endpoint stays for scripts.
+
+## GPU boxes, datasets, training and models
+
+What `envforge compute ...` and `envforge train ...` do on the command line, in the
+browser, reusing the same code (`envforge/compute`, `envforge/train`). Logic lives in
+`envforge/web/compute_service.py` and `training_service.py`; the routers are thin.
+
+- **GPU boxes** (Settings → GPU boxes). A box row holds host, SSH port, user, runtime
+  (docker / pod / auto), the vLLM port, an optional endpoint host / bind address, an
+  optional $/hour, and three secrets, all Fernet-encrypted like provider keys: the SSH
+  private key (validated, no passphrase; responses show only a masked `SHA256:` public
+  fingerprint), the vLLM API key (generated when left empty, sent to vLLM on stdin) and
+  an optional Hugging Face token. **Check**, **Serve** and **Stop** are jobs for the
+  compute worker; a check stores GPU model, VRAM, driver/CUDA, free disk, vLLM presence,
+  reachability and the time.
+- **Serving boxes in the model picker.** While a box serves, `GET .../models` lists
+  `vllm:<model>` (and `vllm:<adapter>` for LoRA adapters) for that workspace. Queuing a run
+  with one of them records `runs.gpu_box_id`; the worker then takes the endpoint and key
+  from the box, so no personal vLLM key is needed.
+- **Datasets.** Only completed runs on training seeds (`seed_start >= 10000`) can be used.
+  `POST .../datasets/preview` builds the dataset in a scratch directory with
+  `train.dataset.build_dataset` and returns counts, the train/val split, examples per task,
+  and every evaluation run (seeds < 10000) that shares tasks with it (`overlap()`).
+  Saving writes `data/workspaces/<slug>/sft/<name>/` (train.jsonl, val.jsonl,
+  manifest.json; customer-data environments re-sanitised like the export) and a `datasets`
+  row with the source runs, filters, counts and manifest.
+- **Training.** `POST .../training` creates a `training_jobs` row and a `train_start` job:
+  the compute worker uploads the dataset and `sft.py` and starts training detached
+  (`train.remote.start_training`). After that the worker *polls* each running job every
+  `TRAIN_POLL_SECONDS` (`train.remote.poll_once`): step, epoch, losses, log tail. On exit 0
+  it fetches the adapter to `data/workspaces/<slug>/adapters/<name>/` and creates an
+  `adapters` row (base model, dataset, metrics from `envforge_manifest.json`). Cancel stops
+  the job on the box at the next poll. A job is failed after `TRAIN_MAX_HOURS` or
+  `TRAIN_MAX_POLL_FAILURES` unreachable polls in a row.
+- **Models.** Serve an adapter on any box (`--lora-modules`; uploaded from the local copy if
+  that box doesn't have it), **Test** it (serve if needed, then an evaluation run on seeds
+  0+ of its environment, linked to Compare with the teacher and the base model), download
+  it as `.tar.gz`, and copy curl / openai-SDK snippets for its endpoint.
+
+**Security.** A box belongs to one workspace and every lookup is by (workspace, id), so
+other users get 404. Adding, checking, serving on, training on and deleting boxes or
+adapters is admin-only while `GPU_BOXES_ADMIN_ONLY=true` (the default). Job payloads carry
+ids only: the worker connects to the host stored on the box row and nowhere else. Model ids
+and adapter names are validated by regex and every remote command is an argv list quoted
+with `shlex`. The worker writes the SSH key to a mode-600 file in a private temp directory
+for the duration of one connection (`IdentitiesOnly`, no agent, no ssh config proxy, a
+per-box `known_hosts` under `data/ssh/`), never logs it, and caps every ssh/scp call at
+`COMPUTE_SSH_TIMEOUT_S`. With `GPU_BOXES_ADMIN_ONLY=false`, boxes added by non-admins must
+resolve to public addresses (private and Tailscale ranges stay admin-only), checked when
+saved, before each connection, and on the endpoint URL.
+
+**Worker.** `envforge-worker --kind compute` (the `compute` service in docker-compose)
+claims `box_check`, `box_serve`, `box_stop`, `train_start` and `adapter_test` jobs and polls
+running training jobs, so a slow box never blocks evaluation runs or the builder. It needs
+`ssh`/`scp` (openssh-client is in the API image). Jobs heartbeat; a job whose worker died is
+failed by `reap_stale_jobs` and its box/training job is marked failed, never left
+"starting".
+
+Settings: `GPU_BOXES_ADMIN_ONLY` (true), `COMPUTE_SSH_TIMEOUT_S` (1800),
+`SERVE_HEALTH_TIMEOUT_S` (1800), `TRAIN_MAX_HOURS` (24), `TRAIN_POLL_SECONDS` (20),
+`TRAIN_MAX_POLL_FAILURES` (15).
+
+Tests: `tests/test_web_compute.py` runs all of it offline with `FakeGPUBox`
+(`envforge/compute/fake.py`) in place of SSH.
 
 ## Administration
 
@@ -228,6 +297,24 @@ Commit the generated file under `envforge/web/migrations/versions/`.
 | GET | `/api/workspaces/{id}/models[?refresh=true]` | models you can pick (from your keys) |
 | GET | `/api/workspaces/{id}/usage?days=30` | workspace usage by day, model, member |
 | GET | `/api/auth/me/usage?days=30` | your usage across your workspaces |
+| GET/POST | `/api/workspaces/{id}/gpu-boxes` | list (keys masked, `can_manage`) / add a GPU box (admin) |
+| DELETE | `/api/workspaces/{id}/gpu-boxes/{box}` | forget a box (admin) |
+| POST | `/api/workspaces/{id}/gpu-boxes/{box}/check` | queue a readiness check (admin) |
+| POST | `/api/workspaces/{id}/gpu-boxes/{box}/serve` | queue vLLM serving `{model, adapters?, max_model_len?}` (admin) |
+| POST | `/api/workspaces/{id}/gpu-boxes/{box}/stop` | queue stopping vLLM (admin) |
+| GET | `/api/workspaces/{id}/datasets/sources` | completed runs, eligible (training seeds) or why not |
+| POST | `/api/workspaces/{id}/datasets/preview` | counts, split, examples per task, eval-seed overlap |
+| GET/POST | `/api/workspaces/{id}/datasets` | list / save a named dataset |
+| GET/DELETE | `/api/workspaces/{id}/datasets/{ds}` | detail with manifest / delete files + row |
+| GET | `/api/workspaces/{id}/datasets/{ds}/download?split=train\|val` | the JSONL file |
+| GET/POST | `/api/workspaces/{id}/training` | jobs + CLI defaults / start a LoRA SFT job (admin) |
+| GET | `/api/workspaces/{id}/training/{job}` | status, step/epoch, losses, log tail, elapsed, est. cost |
+| POST | `/api/workspaces/{id}/training/{job}/cancel` | cancel (admin) |
+| GET | `/api/workspaces/{id}/adapters[/{a}]` | trained adapters with lineage and where they're served |
+| POST | `/api/workspaces/{id}/adapters/{a}/serve` | serve on a box `{box_id}` (admin) |
+| POST | `/api/workspaces/{id}/adapters/{a}/test` | serve if needed + eval run on seeds 0+ `{box_id, episodes}` (admin) |
+| GET | `/api/workspaces/{id}/adapters/{a}/download` | the adapter as .tar.gz |
+| DELETE | `/api/workspaces/{id}/adapters/{a}` | delete the local copy (admin) |
 | POST | `/api/auth/logout-all` | invalidate all your sessions |
 
 Interactive docs: `/docs` on the API port.

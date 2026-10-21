@@ -60,7 +60,8 @@ envforge/
   builder/          environment-builder data pipeline: ingest.py (CSV/TXT/JSON -> conversations), redact.py (PII),
                     extract.py (conversation -> TaskRecord with any ChatModel)
   sandbox/          Sandbox interface; docker.py (hardened, default) and local.py (tests only)
-  compute/          SSH GPU box driver + vLLM serving; `envforge compute ...` (docs/COMPUTE.md)
+  compute/          SSH GPU box driver + vLLM serving; `envforge compute ...` (docs/COMPUTE.md);
+                    fake.py = FakeGPUBox, an in-memory box for offline tests
   train/
     filter.py       kept trajectories -> chat-format JSONL for SFT
     dataset.py      rejection sampling: best episode per task, task-level val split, seed manifest, overlap()
@@ -75,14 +76,20 @@ envforge/
     crypto.py       Fernet encryption of provider keys (derived from APP_SECRET_KEY)
     auth/           local (argon2 + session cookie) and clerk (JWT via JWKS); one current_user dep
     services.py     workspace access, key resolution, run enqueue, usage aggregation
+    compute_service.py  GPU boxes: encrypted SSH key, admin gate, open_box, check/serve/stop jobs, box models in the picker
+    training_service.py datasets (train.dataset), LoRA training jobs (train.remote, polled), adapters (serve, test, download)
+    compute_schemas.py  request bodies for the two services above
     security.py     vLLM base-URL checks (SSRF) and in-memory rate limiting
     builder.py      builder projects, revision DAG, content-addressed task sets, uploads, publish, resolve_pack, jobs
     builder_agent.py  the builder agent: tools + tool-use loop (runs in `envforge-worker --kind builder`)
     admin_cli.py    `envforge admin users|reset-password|sign-out|set-admin`
-    routers/        auth (+me/usage), account (/api/me: profile, password, keys), workspaces (+packs, models, usage), runs (+episodes, export, replay, delete)
-    worker.py       claims queued runs, executes with the queuing user's keys, writes progress/tokens/cost, heartbeats
+    routers/        auth (+me/usage), account (/api/me: profile, password, keys), workspaces (+packs, models, usage), runs (+episodes, export, replay, delete),
+                    compute (gpu-boxes), training (datasets, training, adapters)
+    worker.py       claims queued runs, executes with the queuing user's keys, writes progress/tokens/cost, heartbeats;
+                    `--kind runs|builder|compute|all` (compute = GPU box jobs + training polls)
     app.py          FastAPI factory; entry points envforge-api / envforge-worker
-web/                Next.js UI (login, runs, run detail + replay, compare, environments, builder, usage, profile, workspace settings); proxies /api/* to FastAPI
+web/                Next.js UI (login, runs, run detail + replay, compare, environments, builder, usage, profile, workspace settings + GPU boxes,
+                    datasets, fine-tune, models); proxies /api/* to FastAPI
 deploy/             Dockerfiles + Caddyfile; docker-compose.yml at repo root (postgres, api, worker, web)
 docs/
   ARCHITECTURE.md   design decisions, the pack contract, phase roadmap
