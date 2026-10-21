@@ -38,9 +38,10 @@ session cookie is first-party and no CORS is needed. The UI never holds secrets.
 | `ALLOW_SERVER_KEYS` | if `true`, workspaces without their own key fall back to the server's `.env` keys (a shared pool). Default `false`. |
 | `CORS_ORIGINS` | only needed if the UI is served from a different origin without the proxy |
 | `COOKIE_SECURE` | set `true` behind HTTPS |
-| `BASE_URL_ALLOW_PRIVATE`, `BASE_URL_ALLOW_CIDRS` | where a vLLM base URL may point: public hosts plus `100.64.0.0/10` (Tailscale) by default; never loopback, the Docker network or metadata endpoints |
+| `BASE_URL_ALLOW_PRIVATE`, `BASE_URL_ALLOW_CIDRS` | where a vLLM base URL may point: public hosts only; **admin** accounts may also use the CIDRs (`100.64.0.0/10`, Tailscale, by default). Never loopback, the Docker network or metadata endpoints. Checked when the key is saved and again by the worker before use; redirects from the endpoint are not followed. |
 | `MAX_ACTIVE_RUNS_PER_WORKSPACE` | queued + running runs per workspace (default 3) |
 | `LOGIN_ATTEMPTS_PER_MINUTE`, `SIGNUPS_PER_HOUR` | in-memory rate limits per client IP (and per email for login); the API runs one process so they hold |
+| `CLIENT_IP_HEADER` | the header the reverse proxy in front of the API sets with the client's IP (default `x-forwarded-for`; `cf-connecting-ip` behind Cloudflare). Only this header is read, so clients can't pick their own IP for the rate limits. |
 | `STALE_RUN_SECONDS` | a running run whose worker heartbeat is older than this is marked failed (default 180) |
 | `ENVFORGE_SANDBOX` | worker: `docker` to run sandbox packs (needs the Docker socket); `local` is refused for sandbox packs |
 
@@ -191,7 +192,9 @@ docker compose exec api envforge admin sign-out someone@example.com
 docker compose exec api envforge admin set-admin someone@example.com [--off]
 ```
 
-Users can also "Sign out everywhere" from Settings. Sessions carry an epoch that these bump.
+Sessions carry an epoch that these bump. Signing out in the UI (`/logout`) bumps it too, so it
+ends every session the user has rather than only clearing this browser's cookie: a copied
+session token stops working at once.
 `create-user` is how accounts are added when sign-up is off (`ALLOW_SIGNUP=false`, the
 installer's default); it prompts for the password, or reads it from stdin with
 `--password-stdin` so it never appears in argv or shell history.
@@ -246,7 +249,9 @@ claimed by whoever signs up first. Re-running it is the update path (`git pull &
 The UI listens on `WEB_LISTEN:WEB_PORT` (default `127.0.0.1:3000`). TLS and a domain are
 up to you: nginx, Caddy (`deploy/Caddyfile` is an example), a Cloudflare Tunnel or a port
 forward in front of it. Behind HTTPS, set `COOKIE_SECURE=true` (`./install.sh --url
-https://…` does). `API_PORT` / `POSTGRES_PORT` are published on 127.0.0.1 only, for
+https://…` does). Behind Cloudflare (a Tunnel, or proxied DNS), set
+`CLIENT_IP_HEADER=cf-connecting-ip` so the rate limits see the visitor rather than
+Cloudflare's edge. `API_PORT` / `POSTGRES_PORT` are published on 127.0.0.1 only, for
 development; the installer moves them if the defaults are taken.
 
 Trajectories live in the `envdata` volume under `/data/workspaces/<slug>/runs/`; the DB holds
@@ -276,7 +281,7 @@ Commit the generated file under `envforge/web/migrations/versions/`.
 | method | path | purpose |
 |---|---|---|
 | GET | `/api/auth/info` | provider, sign-up policy, version (public) |
-| POST | `/api/auth/signup`, `/login`, `/logout` | local auth |
+| POST | `/api/auth/signup`, `/login`, `/logout` | local auth; `/logout` signs out every device |
 | GET | `/api/auth/me` | current user |
 | GET | `/api/packs` | available environment packs |
 | GET/POST | `/api/workspaces` | list / create |

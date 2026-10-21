@@ -37,10 +37,10 @@ class WebSettings(BaseSettings):
     # If true, a workspace with no key of its own may fall back to the server's .env keys.
     ALLOW_SERVER_KEYS: bool = False
     # A vLLM base URL makes the worker send requests wherever it points. By default only
-    # public hosts and the Tailscale range are allowed, so nobody can aim the worker at
-    # this machine, the Docker network or a cloud metadata endpoint.
+    # public hosts are allowed, so nobody can aim the worker at this machine, the Docker
+    # network or a cloud metadata endpoint. Admin accounts may also use these CIDRs (the
+    # operator's Tailscale range); comma-separated in .env (NoDecode: not JSON; see _split).
     BASE_URL_ALLOW_PRIVATE: bool = False
-    # comma-separated in .env (NoDecode: not parsed as JSON; see _split)
     BASE_URL_ALLOW_CIDRS: Annotated[list[str], NoDecode] = ["100.64.0.0/10"]
 
     # --- limits ---
@@ -62,6 +62,9 @@ class WebSettings(BaseSettings):
 
     # --- http ---
     CORS_ORIGINS: Annotated[list[str], NoDecode] = ["http://localhost:3000"]
+    # The header your reverse proxy sets with the real client IP (rate limits key on it).
+    # Caddy/nginx: x-forwarded-for (the default). Behind Cloudflare: cf-connecting-ip.
+    CLIENT_IP_HEADER: str = "x-forwarded-for"
     COOKIE_SECURE: bool = False  # set true behind HTTPS
     COOKIE_NAME: str = "envforge_session"
 

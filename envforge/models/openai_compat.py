@@ -35,7 +35,7 @@ class OpenAICompatModel(ChatModel):
         max_tokens: int = 2048,
         temperature: float = 0.0,
     ) -> None:
-        from openai import OpenAI  # lazy import
+        from openai import DefaultHttpxClient, OpenAI  # lazy import
 
         if provider not in PROVIDERS:
             raise ValueError(f"Unknown OpenAI-compatible provider '{provider}'")
@@ -45,7 +45,12 @@ class OpenAICompatModel(ChatModel):
             key = "not-needed"  # vLLM ignores the key unless configured with --api-key
         if not key:
             raise RuntimeError(f"{spec['key_env']} is not set (see .env.example)")
-        self._client = OpenAI(api_key=key, base_url=base_url or spec["base_url"])
+        # A vLLM URL is user-supplied and was checked against private networks; the SDK
+        # follows redirects by default, which would let that host bounce us anywhere.
+        http_client = DefaultHttpxClient(follow_redirects=False) if provider == "vllm" else None
+        self._client = OpenAI(
+            api_key=key, base_url=base_url or spec["base_url"], http_client=http_client
+        )
         self._model = model
         self._max_tokens = max_tokens
         self._temperature = temperature

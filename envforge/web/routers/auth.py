@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from envforge import __version__
-from envforge.web.auth import current_user
+from envforge.web.auth import current_user, optional_user
 from envforge.web.auth import local as local_auth
 from envforge.web.db import get_db
 from envforge.web.models import User
@@ -104,7 +104,14 @@ def login(
 
 
 @router.post("/logout", status_code=204)
-def logout(resp: Response) -> None:
+def logout(
+    resp: Response, user: User | None = Depends(optional_user), db: Session = Depends(get_db)
+) -> None:
+    """Sign out, on every device. Session tokens are stateless, so clearing the cookie
+    alone would leave a copied token valid for 14 days; bumping the user's session epoch
+    revokes it (and every other session they have)."""
+    if user is not None and get_settings().AUTH_PROVIDER == "local":
+        _bump_epoch(db, user)
     resp.delete_cookie(get_settings().COOKIE_NAME, path="/")
 
 
@@ -113,10 +120,14 @@ def logout_all(
     resp: Response, user: User = Depends(current_user), db: Session = Depends(get_db)
 ) -> None:
     """Invalidate every session this user has, on every device."""
+    _bump_epoch(db, user)
+    resp.delete_cookie(get_settings().COOKIE_NAME, path="/")
+
+
+def _bump_epoch(db: Session, user: User) -> None:
     user.session_epoch = (user.session_epoch or 0) + 1
     db.add(user)
     db.commit()
-    resp.delete_cookie(get_settings().COOKIE_NAME, path="/")
 
 
 @router.get("/me", response_model=UserOut)

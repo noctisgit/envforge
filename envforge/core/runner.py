@@ -11,6 +11,7 @@ same way. The model may also end an episode by replying with no tool calls.
 
 from __future__ import annotations
 
+import re
 import time
 import uuid
 from collections.abc import Callable, Iterable
@@ -157,8 +158,11 @@ def run_episode(
 
 
 def new_run_id(pack: str, model_id: str) -> str:
+    """`<stamp>-<pack>-<model>-<6 hex>`; it names the run directory, so the model part is
+    reduced to letters, digits, '.', '_' and '-' (a user-supplied model string may contain
+    anything)."""
     stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
-    safe_model = model_id.replace(":", "_").replace("/", "-")
+    safe_model = re.sub(r"[^A-Za-z0-9._-]+", "-", model_id.replace(":", "_"))
     return f"{stamp}-{pack}-{safe_model}-{uuid.uuid4().hex[:6]}"
 
 

@@ -283,7 +283,7 @@ export default function AccountPage() {
         )}
         <Panel title="Sessions">
           <div className="space-y-3">
-            <div style={{ color: "var(--muted)" }}>Sign out of envforge on every device and browser, including this one.</div>
+            <div style={{ color: "var(--muted)" }}>Signing out always ends every session: on every device and browser, including this one.</div>
             <button className="btn-danger" onClick={signOutEverywhere}>
               Sign out everywhere
             </button>

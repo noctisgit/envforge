@@ -204,12 +204,16 @@ def list_provider_models(
         # already checked against the private-network rules by the caller
         import urllib.request
 
+        from envforge.web.security import NoRedirects
+
         headers = {"User-Agent": "envforge"}
         if secret and secret != "not-needed":
             headers["Authorization"] = f"Bearer {secret}"
         req = urllib.request.Request(f"{base_url}/models", headers=headers)
+        # no redirects: the checked host must not be able to bounce us to an internal one
+        opener = urllib.request.build_opener(NoRedirects())
         try:
-            with urllib.request.urlopen(req, timeout=10) as r:  # noqa: S310 - checked URL
+            with opener.open(req, timeout=10) as r:  # noqa: S310 - checked URL
                 return sorted(m["id"] for m in json.loads(r.read()).get("data", []))
         except urllib.error.HTTPError as e:
             if e.code in (401, 403):
@@ -247,9 +251,9 @@ def set_key(
     # so a stored key can never be sent anywhere but its own provider.
     if provider == "vllm":
         if not base_url:
-            raise HTTPException(400, "vLLM needs a base URL, e.g. http://100.x.y.z:8000/v1")
+            raise HTTPException(400, "vLLM needs a base URL, e.g. https://gpu.example.com/v1")
         try:
-            base_url = check_base_url(base_url)
+            base_url = check_base_url(base_url, allow_tailnet=user.is_admin)
         except ValueError as e:
             raise HTTPException(400, str(e)) from e
     else:
@@ -296,9 +300,10 @@ def resolve_key(db: Session, user_id: str, provider: str) -> tuple[str | None, s
     """(api_key, base_url) from this user's keys, or the server fallback if allowed."""
     row = _key_row(db, user_id, provider)
     if row:
-        base_url = (
-            check_base_url(row.base_url) if row.base_url else None
-        )  # re-check: DNS can change
+        base_url = None
+        if row.base_url:  # re-check: DNS can change, and so can the owner's admin status
+            owner = db.get(User, user_id)
+            base_url = check_base_url(row.base_url, allow_tailnet=bool(owner and owner.is_admin))
         return crypto.decrypt(row.ciphertext), base_url
     if get_settings().ALLOW_SERVER_KEYS:
         return None, None  # load_model will read the server .env
@@ -366,9 +371,12 @@ def enqueue_run(
         )
     valid_tiers = [t for t in tiers if t in env_cls.tiers] or list(env_cls.tiers)
 
+    # The id doubles as a directory name and the column holds 80 chars: a 15-char stamp,
+    # the pack, the model and a 6-char suffix, with 3 separators. Shorten the model part
+    # to fit (a published environment can have a long name).
+    model_budget = 80 - 15 - len(pack) - 6 - 3
     run = Run(
-        # the id doubles as a directory name, so keep the model part short
-        id=new_run_id(pack, model[:40]),
+        id=new_run_id(pack, model[: max(8, min(40, model_budget))]),
         workspace_id=ws.id,
         created_by=user.id,
         pack=pack,
