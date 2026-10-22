@@ -24,6 +24,10 @@ from pydantic import BaseModel, Field
 
 EnvKind = Literal["sim", "sandbox"]
 
+#: Seeds at or above this are for collecting training data; evaluation uses seeds below it
+#: (0-99 by convention). Packs with a fixed list of tasks use it to keep the two apart.
+TRAIN_SEED_MIN = 10_000
+
 
 class ToolSpec(BaseModel):
     """A tool the agent may call. `parameters` is a JSON Schema object.

@@ -32,6 +32,15 @@ Rewards are computed by code from the end state (1.0 / 0.3 / 0.0), never by a mo
 an agent can't talk its way to a high score. A task is only valid if its reference
 solution actually earns 1.0 in the runtime — the builder checks this for every task.
 
+**Held-out tasks.** A declarative environment has a fixed list of tickets, so it can't
+make a new task per seed the way netops does. Instead about a quarter of the task records
+are held out for evaluation: seeds below 10000 (the evaluation seeds) pick only those,
+and seeds from 10000 up (training data) pick only the rest. Which side a record is on
+depends only on a hash of its id, so it stays put across versions: training on v2 and
+evaluating on v3 is still clean. The Environments page shows the counts. A task set too
+small to split (one side would be empty) uses every record for both. The dataset
+manifest and the overlap check compare task records, not seeds, for these environments.
+
 See `envforge/declarative/examples/isp_support/` for a complete hand-written example,
 and `uv run envforge env validate <dir>` / `envforge run <dir> --model scripted` to work
 with environment directories from the CLI.

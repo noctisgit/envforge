@@ -6,12 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from envforge.core.env import Diagram, ToolCall, ToolError
+from envforge.core.env import TRAIN_SEED_MIN, Diagram, ToolCall, ToolError
 from envforge.core.explore import pack_overview, preview_task, replay_episode
 from envforge.core.registry import get_pack
 from envforge.core.runner import run_episode
 from envforge.declarative.rules import World, compare, evaluate_check, matches, resolve_value
-from envforge.declarative.runtime import make_environment
+from envforge.declarative.runtime import is_eval_record, make_environment
 from envforge.declarative.spec import (
     AddRecord,
     AskCustomer,
@@ -325,7 +325,7 @@ def test_generate_task_selection_and_names():
     tasks = [shop_task(id=f"t{i}", tier=1 + (i % 2)) for i in range(5)]  # tiers 1 and 2
     cls = make_environment(shop_spec(), tasks, name="shop@v3")
     assert cls.name == "shop@v3" and cls.tiers == (1, 2) and cls.kind == "sim"
-    t = cls.generate_task(seed=4, tier=1)  # tier 1 records sorted: t0, t2, t4 -> 4 % 3 = 1
+    t = cls.generate_task(seed=4, tier=1)  # tier 1: t0, t2, t4; only t2 is held out for eval
     assert t.hidden["task_record"] == "t2" and t.id == "shop@v3-t1-t2-s4"
     assert t.goal == tasks[2].goal and t.hidden["expected_resolution"] == "refunded"
     assert cls.generate_task(seed=0, tier=3).tier == 2  # nearest tier with tasks
@@ -334,6 +334,52 @@ def test_generate_task_selection_and_names():
         make_environment(shop_spec(), [])
     with pytest.raises(ValueError):
         make_environment(shop_spec(), [shop_task(), shop_task()])
+
+
+def test_evaluation_and_training_seeds_use_different_records():
+    tasks = [shop_task(id=f"t{i}", tier=1 + (i % 2)) for i in range(40)]
+    cls = make_environment(shop_spec(), tasks, name="shop@v1")
+
+    def records(env, seeds):
+        return {env.generate_task(s, tier).hidden["task_record"] for s in seeds for tier in (1, 2)}
+
+    held_out = records(cls, range(200))
+    training = records(cls, range(TRAIN_SEED_MIN, TRAIN_SEED_MIN + 200))
+    assert not held_out & training  # never the same ticket on both sides
+    assert held_out | training == {t.id for t in tasks}
+    assert held_out == {t.id for t in tasks if is_eval_record(t.id)}
+    assert 5 <= len(held_out) <= 15  # about a quarter
+    assert cls.generate_task(TRAIN_SEED_MIN, 1).hidden["task_record"] == cls.train_by_tier[1][0].id
+    assert any("held out for evaluation" in w for w in cls.describe().world)
+
+    # a new version with more tasks keeps every old record on its side
+    grown = make_environment(
+        shop_spec(), tasks + [shop_task(id=f"new{i}") for i in range(20)], name="shop@v2"
+    )
+    assert held_out <= records(grown, range(400))
+    assert not held_out & records(grown, range(TRAIN_SEED_MIN, TRAIN_SEED_MIN + 400))
+
+
+def test_a_run_over_every_tier_reaches_every_record():
+    # tier 3 has 6 held-out and 24 training records: seed % count with the run's stride of 3
+    # would reach only a third of them
+    tasks = [shop_task(id=f"t{i}", tier=1 + (i % 3)) for i in range(90)]
+    spec = shop_spec(tiers=[1, 2, 3])
+    cls = make_environment(spec, tasks)
+    for start, side in ((0, cls.eval_by_tier), (TRAIN_SEED_MIN, cls.train_by_tier)):
+        for i, tier in enumerate(cls.tiers):
+            n = len(side[tier])
+            seen = {
+                cls.generate_task(start + i + 3 * k, tier).hidden["task_record"] for k in range(n)
+            }
+            assert seen == {r.id for r in side[tier]}
+
+
+def test_a_task_set_too_small_to_split_uses_every_record():
+    cls = make_environment(shop_spec(), [shop_task(id="t2")])  # t2 is a held-out record
+    assert cls.generate_task(TRAIN_SEED_MIN, 1).hidden["task_record"] == "t2"
+    assert cls.generate_task(0, 1).hidden["task_record"] == "t2"
+    assert any("too few tasks" in w for w in cls.describe().world)
 
 
 def test_first_observation_hides_records():

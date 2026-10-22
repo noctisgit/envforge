@@ -144,6 +144,8 @@ browser, reusing the same code (`envforge/compute`, `envforge/train`). Logic liv
   `POST .../datasets/preview` builds the dataset in a scratch directory with
   `train.dataset.build_dataset` and returns counts, the train/val split, examples per task,
   and every evaluation run (seeds < 10000) that shares tasks with it (`overlap()`).
+  For a published environment, tasks are compared by task record, and evaluation runs
+  of every version of that environment are checked (see docs/BUILDER.md, held-out tasks).
   Saving writes `data/workspaces/<slug>/sft/<name>/` (train.jsonl, val.jsonl,
   manifest.json; customer-data environments re-sanitised like the export) and a `datasets`
   row with the source runs, filters, counts and manifest.

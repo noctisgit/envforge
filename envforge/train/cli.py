@@ -88,8 +88,16 @@ def dataset_cmd(
             "[yellow]note:[/yellow] a few hundred to a few thousand episodes is a typical SFT "
             "dataset; this is fine for a smoke test."
         )
-    seeds = json.loads((out / "manifest.json").read_text())["tasks"]
-    console.print(f"training tasks (seed ranges): {seeds} — evaluate on seeds outside these.")
+    manifest = json.loads((out / "manifest.json").read_text())
+    if manifest["tasks"]:
+        console.print(
+            f"training tasks (seed ranges): {manifest['tasks']} — evaluate on seeds outside these."
+        )
+    for pack, records in manifest.get("records", {}).items():
+        console.print(
+            f"{pack}: {len(records)} task records — evaluate on seeds 0–99, which use only "
+            "the records this environment holds out."
+        )
 
 
 @train_app.command("check-overlap")
@@ -105,7 +113,7 @@ def check_overlap_cmd(
         hits = ds.overlap(d, rd)
         if hits:
             dirty = True
-            sample = ", ".join(f"{p} t{t} s{s}" for p, t, s in hits[:5])
+            sample = ", ".join(ds.describe_key(k) for k in hits[:5])
             console.print(
                 f"[red]{rd.name}: {len(hits)} task(s) also in training[/red] ({sample} …)"
             )

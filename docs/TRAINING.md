@@ -37,6 +37,14 @@ step to its page. Details in docs/WEB.md.
 Every seed is a different generated task. Keep two disjoint ranges: **train on seeds
 ≥ 10000, evaluate on 0–99**, so the eval never contains a task the student studied.
 
+Environments made with the builder (or `envforge env`) have a fixed list of tickets
+instead, so many seeds land on the same ticket. They hold out about a quarter of their
+tickets for evaluation: seeds below 10000 pick only those, seeds from 10000 only the
+rest. The same two seed ranges therefore work unchanged, and the overlap check compares
+tickets for them (docs/BUILDER.md, held-out tasks). With few tickets, an evaluation of
+100 episodes repeats each held-out ticket several times; that measures consistency, not
+more coverage.
+
 ```bash
 uv run envforge run netops --model anthropic:claude-sonnet-5-5 --episodes 500 --seed-start 10000
 uv run envforge run sipops --model anthropic:claude-sonnet-5-5 --episodes 500 --seed-start 10000

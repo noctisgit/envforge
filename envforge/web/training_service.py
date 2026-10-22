@@ -31,11 +31,12 @@ from statistics import mean
 from typing import Any
 
 from fastapi import HTTPException
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import Session
 
 from envforge import config
 from envforge.compute.base import ComputeError
+from envforge.core.env import TRAIN_SEED_MIN
 from envforge.train import dataset as ds
 from envforge.train import remote
 from envforge.web import compute_service as C
@@ -43,8 +44,6 @@ from envforge.web import crypto
 from envforge.web.models import Adapter, Dataset, GpuBox, Job, Run, TrainingJob, User, Workspace
 from envforge.web.settings import get_settings
 
-#: Training data comes from seeds >= this; evaluation uses seeds below it (0-99 by convention).
-TRAIN_SEED_MIN = 10_000
 ACTIVE_TRAINING = ("queued", "starting", "running", "fetching")
 
 
@@ -147,12 +146,15 @@ def _summary(out_dir: Path, rep: ds.DatasetReport) -> dict[str, Any]:
 
 
 def _overlaps(db: Session, ws: Workspace, out_dir: Path, packs: set[str]) -> list[dict[str, Any]]:
-    """Evaluation runs (seeds < TRAIN_SEED_MIN) of the same packs that share tasks with
-    the dataset, via `train.dataset.overlap`."""
+    """Evaluation runs (seeds < TRAIN_SEED_MIN) of the same packs, or of any version of
+    the same published environment, that share tasks with the dataset, via
+    `train.dataset.overlap`."""
     hits = []
+    bases = {p.split("@", 1)[0] for p in packs}
+    same_env = or_(Run.pack.in_(packs), *(Run.pack.like(f"{b}@%") for b in bases))
     evals = db.scalars(
         select(Run).where(Run.workspace_id == ws.id, Run.deleted_at.is_(None), Run.status == "completed",
-                          Run.seed_start < TRAIN_SEED_MIN, Run.pack.in_(packs))
+                          Run.seed_start < TRAIN_SEED_MIN, same_env)
         .order_by(Run.created_at.desc()).limit(100)
     )  # fmt: skip
     for r in evals:
@@ -161,7 +163,7 @@ def _overlaps(db: Session, ws: Workspace, out_dir: Path, packs: set[str]) -> lis
         found = ds.overlap(out_dir, Path(r.run_dir))
         if found:
             hits.append({"run_id": r.id, "label": r.label, "model": r.model, "tasks": len(found),
-                         "sample": [f"{p} t{t} s{s}" for p, t, s in found[:5]]})  # fmt: skip
+                         "sample": [ds.describe_key(k) for k in found[:5]]})  # fmt: skip
     return hits
 
 

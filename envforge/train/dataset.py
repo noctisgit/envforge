@@ -7,18 +7,25 @@ writes `data/workspaces/<ws>/sft/<name>/`:
     train.jsonl      chat-format examples (train/filter.py) the SFT script reads
     val.jsonl        a held-out slice of *tasks* (never the same task in both files)
     manifest.json    where every example came from: runs, models, and the exact
-                     (pack, tier, seed) tasks used — so evaluation can avoid them
+                     tasks used — so evaluation can avoid them
 
-Why the bookkeeping matters: every seed is a different generated task, so a model
-evaluated on seeds it was trained on can score well by memorising answers. The
-manifest records the training tasks and `overlap()` checks an eval run against it;
-the rule of thumb is *train on seeds ≥ 10000, evaluate on seeds 0–99*.
+Why the bookkeeping matters: a model evaluated on tasks it was trained on can score
+well by memorising answers. The manifest records the training tasks and `overlap()`
+checks an eval run against it; the rule of thumb is *train on seeds ≥ 10000, evaluate
+on seeds 0–99*.
+
+What counts as "the same task" (`task_key`): in a generated pack (netops, sipops, ...)
+every seed is a different task, so (pack, tier, seed) names it. A declarative
+environment picks from a fixed list of task records, so many seeds land on the same
+record; there the record id names it, and versions of one environment ("shop@v2",
+"shop@v3") count as the same environment.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -31,11 +38,32 @@ from envforge.core.registry import get_pack
 from envforge.core.trajectory import Trajectory, TrajectoryStore, load_run
 from envforge.train.filter import dataset_lines, tool_schemas
 
-TaskKey = tuple[str, int, int]  # (pack, tier, seed)
+TaskKey = tuple[str, int, int | str]  # (pack, tier, seed) or (pack, tier, "record:<id>")
+RECORD_PREFIX = "record:"
 
 
 def task_key(t: Trajectory) -> TaskKey:
+    """The task an episode was about: its seed, or its task record for declarative packs."""
+    record = t.task.hidden.get("task_record")
+    if record is not None:
+        return (t.task.pack, t.task.tier, f"{RECORD_PREFIX}{record}")
     return (t.task.pack, t.task.tier, t.task.seed)
+
+
+def _comparable(key: TaskKey) -> TaskKey:
+    """A record key without the version suffix, so v2's records match v3's."""
+    pack, tier, which = key
+    if isinstance(which, str) and which.startswith(RECORD_PREFIX):
+        return (re.sub(r"@v\d+$", "", pack), tier, which)
+    return (pack, tier, which)
+
+
+def describe_key(key: TaskKey) -> str:
+    """'netops t1 s10003' or 'shop@v3 t2 record t-42', for messages."""
+    pack, tier, which = key
+    if isinstance(which, str) and which.startswith(RECORD_PREFIX):
+        return f"{pack} t{tier} record {which.removeprefix(RECORD_PREFIX)}"
+    return f"{pack} t{tier} s{which}"
 
 
 def _better(a: Trajectory, b: Trajectory) -> Trajectory:
@@ -137,8 +165,12 @@ def build_dataset(
             report.by_pack_tier[(k[0], k[1])] += 1
             report.models[t.model] += 1
     seeds: dict[str, list[int]] = {}
+    records: dict[str, list[str]] = {}
     for p, _tier, s in best:
-        seeds.setdefault(p, []).append(s)
+        if isinstance(s, str):
+            records.setdefault(p, []).append(s.removeprefix(RECORD_PREFIX))
+        else:
+            seeds.setdefault(p, []).append(s)
     manifest = {
         "format_version": 1,
         "created_at": datetime.now(UTC).isoformat(),
@@ -157,6 +189,8 @@ def build_dataset(
         "by_pack_tier": {f"{p}/tier{t}": n for (p, t), n in sorted(report.by_pack_tier.items())},
         # every task the model will have seen (train AND val), as compact seed ranges
         "tasks": {p: _ranges(s) for p, s in seeds.items()},
+        # declarative packs: the task records instead of seeds
+        "records": {p: sorted(r) for p, r in records.items()},
         "task_keys": sorted([list(k) for k in best]),
     }
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
@@ -173,5 +207,5 @@ def overlap(dataset_dir: Path, run_dir: Path) -> list[TaskKey]:
     An empty list means the eval is clean. Any overlap means those episodes measure
     memory, not skill — re-run the eval on other seeds (e.g. `--seed-start 0`).
     """
-    seen = {tuple(k) for k in load_manifest(dataset_dir)["task_keys"]}
-    return sorted({task_key(t) for t in load_run(run_dir)} & seen)  # type: ignore[arg-type]
+    seen = {_comparable(tuple(k)) for k in load_manifest(dataset_dir)["task_keys"]}  # type: ignore[arg-type]
+    return sorted({k for t in load_run(run_dir) if _comparable(k := task_key(t)) in seen})

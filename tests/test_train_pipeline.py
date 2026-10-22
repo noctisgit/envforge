@@ -12,9 +12,15 @@ from envforge.compute.base import CommandResult, ComputeBox, ComputeError
 from envforge.compute.vllm import build_docker_run as vllm_docker_run
 from envforge.core.registry import get_pack
 from envforge.core.runner import run_many
+from envforge.declarative.runtime import make_environment
+from envforge.declarative.store import load_spec_and_tasks
 from envforge.models.scripted import ScriptedModel
 from envforge.train import dataset as ds
 from envforge.train import remote
+
+ISP_EXAMPLE = (
+    Path(__file__).resolve().parent.parent / "envforge" / "declarative" / "examples" / "isp_support"
+)
 
 
 def _run(tmp_path: Path, seed_start: int, episodes: int = 6, run_id: str | None = None) -> Path:
@@ -60,6 +66,29 @@ def test_overlap_flags_contaminated_eval_runs(tmp_path):
     assert ds.overlap(out, clean) == []
     hits = ds.overlap(out, dirty)
     assert hits and all(p == "netops" and s >= 10_003 for p, _, s in hits)
+
+
+def test_overlap_compares_task_records_for_declarative_environments(tmp_path):
+    spec, tasks = load_spec_and_tasks(ISP_EXAMPLE)
+    v2 = make_environment(spec, tasks, name="isp-support@v2")
+    v3 = make_environment(spec, tasks, name="isp-support@v3")
+
+    def run(env, seed_start, run_id):
+        return run_many(env, ScriptedModel(), runs_dir=tmp_path / "runs", episodes=12,
+                        tiers=[1, 2, 3], seed_start=seed_start, run_id=run_id)  # fmt: skip
+
+    out = tmp_path / "sft" / "isp"
+    ds.build_dataset([run(v2, 10_000, "teacher")], out, pack_resolver=lambda _name: v2)
+    m = ds.load_manifest(out)
+    assert m["tasks"] == {} and len(m["records"]["isp-support@v2"]) >= 6
+
+    # evaluation seeds use only held-out records, in this version and the next
+    assert ds.overlap(out, run(v2, 0, "eval-v2")) == []
+    assert ds.overlap(out, run(v3, 0, "eval-v3")) == []
+    # the same records under another version and other seeds are still caught
+    hits = ds.overlap(out, run(v3, 10_012, "dirty-v3"))
+    assert hits and all(p == "isp-support@v3" and str(r).startswith("record:") for p, _, r in hits)
+    assert "record " in ds.describe_key(hits[0])
 
 
 def test_dataset_requires_good_episodes(tmp_path):

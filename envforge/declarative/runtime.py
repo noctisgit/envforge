@@ -10,9 +10,16 @@ page) then works unchanged, because the class satisfies the contract in
 
 How a declarative episode works
 -------------------------------
-- `generate_task(seed, tier)` chooses a task record of that tier deterministically
-  (records sorted by id, index = seed % count). The `Task` carries the record id in
-  `hidden["task_record"]`; the full record stays in the class's task table.
+- About a quarter of the records are held out for evaluation (`is_eval_record`, decided
+  by a hash of the record id, so a record keeps its side in every version of the task
+  set). Seeds below `TRAIN_SEED_MIN` (10000) pick only held-out records; seeds from 10000
+  up pick only the rest. Without this, seed 10000 and seed 0 could be the same ticket and
+  a fine-tuned model would be tested on tickets it studied. A task set too small to split
+  (one side empty) uses every record for both.
+- `generate_task(seed, tier)` chooses a record of that tier from its side
+  deterministically (records sorted by id; `record_index` spreads a run's episodes over
+  all of them; seeds count from 10000 on the training side). The `Task` carries the record id in `hidden["task_record"]`; the
+  full record stays in the class's task table.
 - `reset()` deep-copies the record's starting state into a `World` (rules.py). The
   first observation is the ticket plus a list of the systems the agent can query —
   never the records themselves; the agent has to look things up.
@@ -24,10 +31,12 @@ How a declarative episode works
 
 from __future__ import annotations
 
+import hashlib
 import re
 from typing import Any, ClassVar
 
 from envforge.core.env import (
+    TRAIN_SEED_MIN,
     Diagram,
     DiagramEdge,
     DiagramNode,
@@ -381,17 +390,48 @@ def _short(text: str, n: int = 90) -> str:
     return text if len(text) <= n else text[: n - 1] + "…"
 
 
+#: Share of task records held out for evaluation (picked by seeds below TRAIN_SEED_MIN).
+EVAL_SHARE = 0.25
+
+
+def is_eval_record(record_id: str) -> bool:
+    """Whether a task record is held out for evaluation.
+
+    Decided by a hash of the record id alone, so a record stays on the same side in every
+    version of a task set: adding, editing or removing other records never moves it.
+    """
+    h = int(hashlib.sha256(record_id.encode()).hexdigest()[:8], 16)
+    return (h % 10_000) / 10_000 < EVAL_SHARE
+
+
+def record_index(offset: int, n_records: int, n_tiers: int) -> int:
+    """Which of a tier's records a seed picks, so that runs reach every record.
+
+    A run cycles through the tiers, so one tier's episodes are `n_tiers` seeds apart;
+    `seed % n_records` would then skip records whenever the two share a factor (3 tiers
+    over 6 records reaches only 2 of them). Instead the records are read as a grid with
+    `n_tiers` columns: the row is `offset // n_tiers`, the column `offset % n_tiers`.
+    A run over every tier walks one column row by row; a run on one tier walks the rows
+    column by column. Either way consecutive episodes of a tier see different records.
+    """
+    rows = -(-n_records // n_tiers)  # ceil
+    return (offset // n_tiers + (offset % n_tiers) * rows) % n_records
+
+
 class DeclarativeEnvironment(Environment):
     """Base class for environments built by `make_environment`.
 
     Subclasses get these class attributes filled in: `spec`, `task_table` (record id ->
-    TaskRecord) and `tasks_by_tier` (tier -> records sorted by id).
+    TaskRecord), `tasks_by_tier` (tier -> records sorted by id) and the two sides of the
+    split, `eval_by_tier` and `train_by_tier` (tier -> records; tiers with none left out).
     """
 
     kind: ClassVar[str] = "sim"
     spec: ClassVar[EnvSpec]
     task_table: ClassVar[dict[str, TaskRecord]]
     tasks_by_tier: ClassVar[dict[int, list[TaskRecord]]]
+    eval_by_tier: ClassVar[dict[int, list[TaskRecord]]]
+    train_by_tier: ClassVar[dict[int, list[TaskRecord]]]
 
     def __init__(self, task: Task) -> None:
         super().__init__(task)
@@ -405,10 +445,13 @@ class DeclarativeEnvironment(Environment):
     # ---- task generation ---------------------------------------------------------
     @classmethod
     def generate_task(cls, seed: int, tier: int) -> Task:
-        if tier not in cls.tasks_by_tier:  # nearest tier that has tasks (lower on ties)
-            tier = min(cls.tasks_by_tier, key=lambda t: (abs(t - tier), t))
-        records = cls.tasks_by_tier[tier]
-        rec = records[seed % len(records)]
+        training = seed >= TRAIN_SEED_MIN
+        side = cls.train_by_tier if training else cls.eval_by_tier
+        if tier not in side:  # nearest tier with tasks on this side (lower on ties)
+            tier = min(side, key=lambda t: (abs(t - tier), t))
+        records = side[tier]
+        offset = seed - TRAIN_SEED_MIN if training else seed
+        rec = records[record_index(offset, len(records), len(cls.tiers))]
         expected = [c.category for c in rec.success if isinstance(c, ResolutionIs)]
         return Task(
             id=f"{cls.name}-t{rec.tier}-{rec.id}-s{seed}",
@@ -505,11 +548,20 @@ class DeclarativeEnvironment(Environment):
             lo, hi = min(per_task), max(per_task)
             counts.append(f"{c.name} {lo}" if lo == hi else f"{c.name} {lo}–{hi}")
         tiers_text = ", ".join(f"tier {t}: {len(cls.tasks_by_tier[t])}" for t in cls.tasks_by_tier)
+        n_eval = sum(len(recs) for recs in cls.eval_by_tier.values())
+        if cls.eval_by_tier is cls.train_by_tier:
+            split_text = "too few tasks to hold some out: evaluation and training seeds share them"
+        else:
+            split_text = (
+                f"{n_eval} tasks held out for evaluation (seeds below {TRAIN_SEED_MIN}), "
+                f"{len(records) - n_eval} for training data (seeds {TRAIN_SEED_MIN}+)"
+            )
         world = [
             f"{len(spec.collections)} record collections: "
             + ", ".join(c.name for c in spec.collections),
             "records per task: " + ", ".join(counts),
             f"{len(records)} tasks ({tiers_text}), each a real-style ticket with its own records",
+            split_text,
             f"{len(spec.policies)} policies checked by code at the end of every episode",
             f"{len(spec.resolution_categories)} resolution categories",
         ]
@@ -719,7 +771,8 @@ def make_environment(
 
     `name` overrides the pack name (default `spec.name`), e.g. "isp-support@v3" for a
     versioned dataset stored in a database. Tiers are the spec's tiers that have tasks
-    (or, if none overlap, the tiers the tasks actually use).
+    (or, if none overlap, the tiers the tasks actually use). Records are split into an
+    evaluation side and a training side (see the module docstring).
     """
     if not tasks:
         raise ValueError(f"{spec.name}: an environment needs at least one task record")
@@ -733,6 +786,14 @@ def make_environment(
     by_tier = {
         tier: sorted((t for t in tasks if t.tier == tier), key=lambda r: r.id) for tier in tiers
     }
+    eval_by_tier = {t: [r for r in recs if is_eval_record(r.id)] for t, recs in by_tier.items()}
+    train_by_tier = {
+        t: [r for r in recs if not is_eval_record(r.id)] for t, recs in by_tier.items()
+    }
+    eval_by_tier = {t: recs for t, recs in eval_by_tier.items() if recs}
+    train_by_tier = {t: recs for t, recs in train_by_tier.items() if recs}
+    if not eval_by_tier or not train_by_tier:  # too small to split: both sides use everything
+        eval_by_tier = train_by_tier = by_tier
     env_name = name or spec.name
     attrs: dict[str, Any] = {
         "name": env_name,
@@ -743,6 +804,8 @@ def make_environment(
         "spec": spec,
         "task_table": table,
         "tasks_by_tier": by_tier,
+        "eval_by_tier": eval_by_tier,
+        "train_by_tier": train_by_tier,
         "__module__": __name__,
         "__doc__": f"{spec.title}: {spec.description} (declarative, {len(tasks)} tasks)",
     }
