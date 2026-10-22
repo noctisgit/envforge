@@ -42,6 +42,8 @@ export interface Workspace {
   default_episodes: number;
   builder_model: string;
   train_base_model: string;
+  monthly_spend_limit_usd: number | null; // runs + builder, per calendar month (UTC); null = no limit
+  month_spend_usd: number;
 }
 
 export interface Pack {
@@ -96,6 +98,17 @@ export interface BuilderProject {
   uploads: BuilderUpload[];
   builder_model: string;
   privacy: BuilderPrivacy;
+  // a cost estimate waiting for the user's click (only that approves spending) + conversations approved so far
+  extraction: { quote: ExtractionQuote | null; approved: number };
+  spend_left_usd: number | null; // under the workspace's monthly limit; null = no limit
+}
+export interface ExtractionQuote {
+  id: string;
+  conversations: number;
+  model: string;
+  cost_usd: number | null;
+  cost_usd_with_retries: number | null;
+  created_at: string;
 }
 export type PrivacyProfile = "off" | "standard" | "strict";
 export interface ReviewResult {
@@ -418,7 +431,7 @@ export const Api = {
   packs: () => api<Pack[]>("/api/packs"),
   workspaces: () => api<Workspace[]>("/api/workspaces"),
   createWorkspace: (name: string) => api<Workspace>("/api/workspaces", { method: "POST", body: JSON.stringify({ name }) }),
-  updateWorkspace: (id: string, patch: Partial<Pick<Workspace, "name" | "default_model" | "default_pack" | "default_episodes" | "builder_model" | "train_base_model">>) =>
+  updateWorkspace: (id: string, patch: Partial<Pick<Workspace, "name" | "default_model" | "default_pack" | "default_episodes" | "builder_model" | "train_base_model" | "monthly_spend_limit_usd">>) =>
     api<Workspace>(`/api/workspaces/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
 
   // the signed-in user's own account: profile, password, provider keys (shared by all their workspaces)
@@ -447,6 +460,11 @@ export const Api = {
     api<{ messages: BuilderMessage[]; job: { status: string; progress: string } | null }>(`/api/workspaces/${ws}/builder/projects/${id}/messages?after=${after}`),
   sendBuilderMessage: (ws: string, id: string, content: string) =>
     api<{ job_id: string }>(`/api/workspaces/${ws}/builder/projects/${id}/messages`, { method: "POST", body: JSON.stringify({ content }) }),
+  // the user's click on the builder's cost estimate: the only way extraction beyond the free few is approved
+  approveExtraction: (ws: string, id: string, quote_id: string) =>
+    api<{ job_id: string }>(`/api/workspaces/${ws}/builder/projects/${id}/extraction/approve`, { method: "POST", body: JSON.stringify({ quote_id }) }),
+  declineExtraction: (ws: string, id: string) =>
+    api<void>(`/api/workspaces/${ws}/builder/projects/${id}/extraction/quote`, { method: "DELETE" }),
   revisions: (ws: string, id: string) => api<RevisionSummary[]>(`/api/workspaces/${ws}/builder/projects/${id}/revisions`),
   revision: (ws: string, id: string, rid: string) =>
     api<{ id: string; number: number; message: string; spec: Record<string, unknown> | null; validation: Validation | null; n_tasks: number }>(
@@ -652,6 +670,7 @@ export interface GpuBox {
   served_adapters: string[];
   endpoint_url: string | null;
   serve_error: string | null;
+  delete_failed: boolean; // the last removal couldn't reach the box; it can be forgotten instead
   created_at: string;
   job: { id: string; kind: string; status: string; progress: string } | null;
 }
@@ -786,7 +805,9 @@ const post = (body?: unknown): RequestInit => ({ method: "POST", body: body === 
 export const Compute = {
   boxes: (ws: string) => api<BoxesResponse>(`${W(ws)}/gpu-boxes`),
   addBox: (ws: string, body: BoxIn) => api<GpuBox>(`${W(ws)}/gpu-boxes`, post(body)),
-  deleteBox: (ws: string, id: string) => api<void>(`${W(ws)}/gpu-boxes/${id}`, { method: "DELETE" }),
+  // stops vLLM on the box, then forgets it (a job); force forgets it now without touching the machine
+  deleteBox: (ws: string, id: string, force = false) =>
+    api<void>(`${W(ws)}/gpu-boxes/${id}${force ? "?force=true" : ""}`, { method: "DELETE" }),
   checkBox: (ws: string, id: string) => api<GpuBox>(`${W(ws)}/gpu-boxes/${id}/check`, post()),
   serve: (ws: string, id: string, body: { model: string; adapters?: string[]; max_model_len?: number | null; gpu_memory_utilization?: number }) =>
     api<GpuBox>(`${W(ws)}/gpu-boxes/${id}/serve`, post(body)),

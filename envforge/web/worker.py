@@ -167,6 +167,10 @@ def execute(db: Session, run: Run) -> None:
         db.refresh(run)
         if run.status == "cancelled":
             raise _Cancelled()
+        if priced and (left := svc.spend_left(db, ws)) is not None and left <= 0:
+            raise _SpendLimit()  # the workspace's monthly limit: stop between episodes
+
+    priced = provider not in ("scripted", "vllm")
 
     with _Heartbeat(run.id):
         try:
@@ -197,12 +201,21 @@ def execute(db: Session, run: Run) -> None:
             run.run_dir = str(config.runs_dir(ws.slug) / run.id)
             run.metrics = evaluate_run(run.run_dir).model_dump()
             _finish(db, run, "cancelled")
+        except _SpendLimit:
+            run.run_dir = str(config.runs_dir(ws.slug) / run.id)
+            run.metrics = evaluate_run(run.run_dir).model_dump()
+            _finish(db, run, "failed", f"stopped after {run.progress} episode(s): "
+                    + svc.limit_reached_message(ws))  # fmt: skip
         except Exception as e:  # noqa: BLE001
             traceback.print_exc()  # full detail goes to the worker log, not to the user
             _finish(db, run, "failed", _user_error(e))
 
 
 class _Cancelled(Exception):
+    pass
+
+
+class _SpendLimit(Exception):
     pass
 
 

@@ -6,7 +6,7 @@ envforge/web/compute_service.py.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Response
 from sqlalchemy.orm import Session
 
 from envforge.web import compute_service as C
@@ -41,12 +41,14 @@ def create_box(
     return C.box_out(db, C.create_box(db, ws, user, body.model_dump()))
 
 
-@router.delete("/{box_id}", status_code=204)
-def delete_box(
-    ws_id: str, box_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)
-) -> None:
+@router.delete("/{box_id}")
+def delete_box(ws_id: str, box_id: str, force: bool = False, user: User = Depends(current_user),
+               db: Session = Depends(get_db)) -> Response:  # fmt: skip
+    """Stop vLLM on the box, then forget it (202: a job does it). `force=true` forgets
+    the box now without touching the machine (204)."""
     ws = svc.require_workspace(db, user, ws_id)
-    C.delete_box(db, ws, user, C.get_box(db, ws, box_id))
+    job = C.delete_box(db, ws, user, C.get_box(db, ws, box_id), force=force)
+    return Response(status_code=202 if job else 204)
 
 
 @router.post("/{box_id}/check", status_code=202)

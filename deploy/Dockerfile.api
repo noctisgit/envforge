@@ -7,6 +7,11 @@ ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy PYTHONUNBUFFERED=1
 RUN apt-get update \
  && apt-get install -y --no-install-recommends openssh-client \
  && rm -rf /var/lib/apt/lists/*
+# The services run as this unprivileged user, not root (compose's one-off `data-perms`
+# step hands it the data volume). /app stays root-owned and read-only to it.
+RUN groupadd --system --gid 10001 envforge \
+ && useradd --system --uid 10001 --gid envforge --create-home --home-dir /home/envforge \
+    --shell /usr/sbin/nologin envforge
 WORKDIR /app
 COPY pyproject.toml uv.lock README.md alembic.ini ./
 COPY envforge ./envforge
@@ -20,5 +25,6 @@ RUN uv pip install --python /app/.venv/bin/python \
     https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
 ENV PATH="/app/.venv/bin:$PATH" \
     HF_HOME=/data/hf-cache
+USER envforge
 EXPOSE 8000
 CMD ["uvicorn", "envforge.web.app:app", "--host", "0.0.0.0", "--port", "8000"]

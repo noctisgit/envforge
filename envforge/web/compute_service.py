@@ -9,6 +9,7 @@ touches the box runs in the worker (`envforge-worker --kind compute`) as a row i
     box_check  ->  compute.check + gpu_info + box_facts   (GPU, VRAM, driver, disk, vLLM)
     box_serve  ->  compute.serve_vllm + wait_healthy      (optionally with LoRA adapters)
     box_stop   ->  compute.stop_vllm
+    box_delete ->  compute.stop_vllm, then forget the box (its row, key and known_hosts)
 
 Security rules, all enforced here (routers stay thin):
 
@@ -67,7 +68,9 @@ from envforge.web.models import GpuBox, Job, Run, TrainingJob, User, Workspace
 from envforge.web.settings import get_settings
 
 #: Job kinds the compute worker claims.
-COMPUTE_JOB_KINDS = ("box_check", "box_serve", "box_stop", "train_start", "adapter_test")
+COMPUTE_JOB_KINDS = (
+    "box_check", "box_serve", "box_stop", "box_delete", "train_start", "adapter_test"
+)  # fmt: skip
 ACTIVE = ("queued", "running")
 
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,62}$")
@@ -218,6 +221,19 @@ def active_box_job(db: Session, box: GpuBox) -> Job | None:
     return None
 
 
+def _delete_failed(db: Session, box: GpuBox) -> bool:
+    """Whether the box's latest job was a removal that couldn't reach it (the UI then
+    offers to forget the box without stopping vLLM)."""
+    for job in db.scalars(
+        select(Job)
+        .where(Job.workspace_id == box.workspace_id, Job.kind.in_(COMPUTE_JOB_KINDS))
+        .order_by(Job.created_at.desc())
+    ):
+        if (job.payload or {}).get("box_id") == box.id:
+            return job.kind == "box_delete" and job.status == "failed"
+    return False
+
+
 def box_out(db: Session, box: GpuBox) -> dict[str, Any]:
     """What the API returns for a box: no secret, only masked forms."""
     job = active_box_job(db, box)
@@ -245,6 +261,7 @@ def box_out(db: Session, box: GpuBox) -> dict[str, Any]:
         "served_adapters": box.served_adapters or [],
         "endpoint_url": box.endpoint_url,
         "serve_error": box.serve_error,
+        "delete_failed": job is None and _delete_failed(db, box),
         "created_at": box.created_at,
         "job": {"id": job.id, "kind": job.kind, "status": job.status, "progress": job.progress}
         if job
@@ -320,8 +337,13 @@ def create_box(db: Session, ws: Workspace, user: User, data: dict[str, Any]) -> 
     return box
 
 
-def delete_box(db: Session, ws: Workspace, user: User, box: GpuBox) -> None:
-    """Forget a box. Refused while a job is using it. vLLM is not stopped remotely."""
+def delete_box(
+    db: Session, ws: Workspace, user: User, box: GpuBox, *, force: bool = False
+) -> Job | None:
+    """Remove a box and what it runs: queues `box_delete`, which stops vLLM on the machine
+    and then forgets the box. `force` forgets it at once without touching the machine, for
+    a box that can't be reached any more (say, the rental is already gone). Refused while
+    a job or a training run is using the box."""
     require_gpu_admin(user)
     if active_box_job(db, box):
         raise HTTPException(409, "a job is running on this box; wait for it to finish")
@@ -332,6 +354,14 @@ def delete_box(db: Session, ws: Workspace, user: User, box: GpuBox) -> None:
     )  # fmt: skip
     if busy:
         raise HTTPException(409, "a training job is running on this box; cancel it first")
+    if not force:
+        return enqueue_box_job(db, box, user, "box_delete")
+    _forget_box(db, box)
+    return None
+
+
+def _forget_box(db: Session, box: GpuBox) -> None:
+    """Delete the row (and with it the encrypted key) and the pinned host key."""
     db.execute(update(TrainingJob).where(TrainingJob.box_id == box.id).values(box_id=None))
     db.delete(box)
     db.commit()
@@ -744,6 +774,16 @@ def _do_stop(db: Session, job: Job, box: GpuBox) -> None:
     db.commit()
 
 
+def _do_delete(db: Session, job: Job, box: GpuBox) -> None:
+    """Stop vLLM (a no-op if nothing runs), then forget the box. If the box can't be
+    reached, this fails and the box stays, so a running vLLM is never silently orphaned."""
+    _progress(db, job, "stopping vLLM before removing the box")
+    with open_box(db, box) as cb:
+        runtime = resolve_box_runtime(db, box, cb)
+        stop_vllm(cb, box.vllm_port, runtime=runtime)  # type: ignore[arg-type]
+    _forget_box(db, box)
+
+
 def _user_error(e: BaseException) -> str:
     return f"{type(e).__name__}: {e}"[:4000]
 
@@ -760,6 +800,8 @@ def fail_related(db: Session, job: Job, error: str) -> None:
             box.serve_state, box.serve_error = "failed", error
         elif job.kind == "box_check" and box.status == "unknown":
             box.status = "unreachable"
+        elif job.kind == "box_delete":
+            box.serve_error = f"Couldn't stop vLLM, so the box was kept: {error}"
     if job.kind == "train_start" and (tj := db.get(TrainingJob, payload.get("training_job_id"))):
         if tj.status in ("queued", "starting"):
             tj.status, tj.error, tj.finished_at = "failed", error, datetime.now(UTC)
@@ -791,6 +833,8 @@ def process_compute_job(db: Session, job: Job) -> None:
                 )
             elif job.kind == "box_stop":
                 _do_stop(db, job, box)
+            elif job.kind == "box_delete":
+                _do_delete(db, job, box)
             elif job.kind == "train_start":
                 T.run_train_start(db, job, box)
             elif job.kind == "adapter_test":

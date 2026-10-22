@@ -99,8 +99,9 @@ def delete_workspace(db: Session, ws: Workspace, user: User) -> None:
     """Delete a workspace and everything in it: runs, builder projects, members, files.
 
     The caller must already have checked ownership (``require_workspace(owner=True)``).
-    Refused (409) when it is the user's last workspace, or while a run or a builder job
-    in it is queued or running (the worker would be writing into it). Unlike deleting a
+    Refused (409) when it is the user's last workspace, while a run or a builder job
+    in it is queued or running (the worker would be writing into it), or while it still
+    has GPU boxes (removing a box stops vLLM on the machine; this can't). Unlike deleting a
     single run, this also removes the run rows, so the workspace's usage history goes
     with it. There are no ON DELETE cascades in the schema, so children are deleted
     explicitly, leaves first.
@@ -143,6 +144,14 @@ def delete_workspace(db: Session, ws: Workspace, user: User) -> None:
             status.HTTP_409_CONFLICT,
             "this workspace has queued or running work; cancel it (or wait for it to "
             "finish) before deleting the workspace",
+        )
+    from envforge.web.compute_service import list_boxes
+
+    if list_boxes(db, ws):  # removing a box stops vLLM on it; dropping the row would not
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "remove this workspace's GPU boxes first (Settings → GPU boxes); removing a box "
+            "also stops vLLM on it",
         )
 
     # rows, leaves first (env_versions points at env_revisions, everything at env_projects)
@@ -344,6 +353,8 @@ def enqueue_run(
     provider = provider_of(model)
     if provider not in ("scripted", *PROVIDERS):
         raise HTTPException(400, f"unknown provider in model '{model}'")
+    if provider not in ("scripted", "vllm"):  # self-hosted models cost no API spend
+        require_budget(db, ws)
     # a model one of this workspace's GPU boxes serves: the box's endpoint and key are used
     box = box_for_model(db, ws, model) if provider == "vllm" else None
     if (
@@ -421,6 +432,50 @@ def delete_run(db: Session, ws: Workspace, user: User, run: Run) -> None:
     run.deleted_at = datetime.now(UTC)
     run.run_dir = None
     db.commit()
+
+
+# ---- spending limit -------------------------------------------------------------
+
+
+def month_spend(db: Session, ws: Workspace) -> float:
+    """Model API spend in this workspace this calendar month (UTC): evaluation runs plus
+    builder turns (chat and extraction). Unpriced models (vLLM, unknown ids) count as 0."""
+    from envforge.web.models import EnvProject, Job
+
+    start = datetime.now(UTC).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    runs = db.scalar(
+        select(func.coalesce(func.sum(Run.cost_usd), 0.0)).where(
+            Run.workspace_id == ws.id, Run.created_at >= start
+        )
+    )  # fmt: skip
+    builder = db.scalar(
+        select(func.coalesce(func.sum(Job.cost_usd), 0.0))
+        .join(EnvProject, EnvProject.id == Job.project_id)
+        .where(EnvProject.workspace_id == ws.id, Job.created_at >= start)
+    )
+    return float(runs or 0.0) + float(builder or 0.0)
+
+
+def spend_left(db: Session, ws: Workspace, *, pending: float = 0.0) -> float | None:
+    """USD left under the workspace's monthly limit (minus `pending`, spend not yet
+    recorded, like the current builder turn's), or None when there is no limit."""
+    if ws.monthly_spend_limit_usd is None:
+        return None
+    return ws.monthly_spend_limit_usd - month_spend(db, ws) - pending
+
+
+def limit_reached_message(ws: Workspace) -> str:
+    return (
+        f"this workspace reached its monthly spending limit (${ws.monthly_spend_limit_usd:.2f}); "
+        "raise it in Workspace settings, or wait until next month"
+    )
+
+
+def require_budget(db: Session, ws: Workspace) -> None:
+    """409 when the workspace has a monthly spending limit and has reached it."""
+    left = spend_left(db, ws)
+    if left is not None and left <= 0:
+        raise HTTPException(status.HTTP_409_CONFLICT, limit_reached_message(ws))
 
 
 # ---- usage --------------------------------------------------------------------

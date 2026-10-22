@@ -138,6 +138,7 @@ def _request(headers: dict[str, str]):
 def test_client_ip_reads_only_the_configured_header(monkeypatch):
     from envforge.web.security import client_ip
 
+    monkeypatch.setenv("CLIENT_IP_HEADER", "x-forwarded-for")  # not whatever .env says
     get_settings.cache_clear()
     spoof = {"cf-connecting-ip": "1.1.1.1", "x-real-ip": "2.2.2.2"}
     assert client_ip(_request(spoof)) == "10.0.0.9"  # headers a client may send: ignored

@@ -182,15 +182,6 @@ def test_builder_turn_builds_spec_extracts_and_versions(builder):
     tasks = c.get(f"{_base(ws, p)}/revisions/{revs[1]['id']}/tasks").json()
     assert {t["source"]["conversation"] for t in tasks} == {"c1", "c2"}
 
-    # extraction above the free limit needs the user's confirmation
-    set_script([[("extract_tasks", {"n": 10})], []])
-    c.post(f"{_base(ws, p)}/messages", json={"content": "extract more"})
-    _work()
-    tool_msgs = [
-        m for m in c.get(f"{_base(ws, p)}/messages").json()["messages"] if m["role"] == "tool"
-    ]
-    assert "explicit OK" in tool_msgs[-1]["content"]
-
 
 def test_extraction_can_target_conversations(builder):
     c, ws, p, set_script = builder
@@ -551,3 +542,138 @@ def test_publish_and_export_resanitize_planted_pii(builder):
     run_forever(once=True, kind="runs")
     out = c.get(f"/api/workspaces/{ws}/runs/export?runs={r.json()['id']}&format=chat").text
     assert out and "leaky.person@example.com" not in out and "@example.com" not in out
+
+
+# ---- spending: extraction approvals and the monthly limit ---------------------------------
+
+TOPICS = [
+    "My router keeps rebooting every evening", "I was billed twice for March",
+    "The fibre installer never showed up", "How do I change my wifi password",
+    "Upload speed is a tenth of what I pay for", "Please cancel my TV add-on",
+    "My static IP stopped working after the outage", "Email stopped syncing on my phone",
+    "I moved house and need the line transferred", "The modem lights are all red",
+    "Why did my bill go up by ten dollars", "Parental controls block my work VPN",
+]  # fmt: skip
+MANY = "conversation_id,role,message\n" + "".join(
+    f'm{i},customer,"{t}"\nm{i},agent,"Thanks, that is sorted now."\n' for i, t in enumerate(TOPICS)
+)
+
+
+def _tool_contents(c, ws, p) -> list[str]:
+    msgs = c.get(f"{_base(ws, p)}/messages").json()["messages"]
+    return [m["content"] for m in msgs if m["role"] == "tool"]
+
+
+def test_extraction_beyond_the_free_few_needs_the_users_click(builder):
+    c, ws, p, set_script = builder
+    _upload(c, ws, p, text=MANY)
+    model = set_script(
+        [
+            [("update_spec", {"spec": SPEC, "message": "draft"})],
+            [("extract_tasks", {"n": 5})],  # free: up to 5 per turn
+            [("extract_tasks", {"n": 1, "confirmed": True})],  # the model can't approve spend
+            [("estimate_extraction", {"n": 6})],
+            [],
+        ]
+    )
+    c.post(f"{_base(ws, p)}/messages", json={"content": "build it"})
+    _work()
+    assert model.extractions == 5
+    tools = _tool_contents(c, ws, p)
+    assert "without approval" in tools[-2]  # (the API shortens tool results; see the quote)
+    proj = c.get(_base(ws, p)).json()
+    quote = proj["extraction"]["quote"]
+    assert quote["conversations"] == 6 and proj["extraction"]["approved"] == 0
+
+    # only the card approves: a stale estimate is refused, and declining clears it
+    r = c.post(f"{_base(ws, p)}/extraction/approve", json={"quote_id": "stale"})
+    assert r.status_code == 409
+    model = set_script([[("extract_tasks", {"n": 6})], []])
+    r = c.post(f"{_base(ws, p)}/extraction/approve", json={"quote_id": quote["id"]})
+    assert r.status_code == 202, r.text
+    proj = c.get(_base(ws, p)).json()
+    assert proj["extraction"] == {"quote": None, "approved": 6}
+    last_user = [m for m in c.get(f"{_base(ws, p)}/messages").json()["messages"]
+                 if m["role"] == "user"][-1]  # fmt: skip
+    assert last_user["content"].startswith("Approved: extract up to 6 conversations")
+    _work()
+    assert model.extractions == 6
+    assert c.get(_base(ws, p)).json()["extraction"]["approved"] == 0  # used up
+
+    set_script([[("estimate_extraction", {"n": 1, "cluster": 0})], []])  # nothing left: no card
+    c.post(f"{_base(ws, p)}/messages", json={"content": "more?"})
+    _work()
+    assert c.delete(f"{_base(ws, p)}/extraction/quote").status_code == 204
+    assert c.get(_base(ws, p)).json()["extraction"]["quote"] is None
+
+
+def _spend(ws_id: str, user_id: str, usd: float) -> None:
+    """Record builder spend this month, as a finished builder turn would."""
+    from envforge.web.db import session_factory
+    from envforge.web.models import EnvProject, Job
+
+    with session_factory()() as db:
+        project = db.query(EnvProject).filter_by(workspace_id=ws_id).first()
+        db.add(Job(kind="builder_turn", project_id=project.id, created_by=user_id,
+                   status="done", cost_usd=usd))  # fmt: skip
+        db.commit()
+
+
+def test_monthly_spending_limit_blocks_paid_work(builder):
+    c, ws, p, set_script = builder
+    _spend(ws, c.get("/api/auth/me").json()["id"], 3.0)
+    r = c.patch(f"/api/workspaces/{ws}", json={"monthly_spend_limit_usd": 2.0})
+    assert r.status_code == 200
+    assert r.json()["monthly_spend_limit_usd"] == 2.0 and r.json()["month_spend_usd"] == 3.0
+
+    runs = f"/api/workspaces/{ws}/runs"
+    r = c.post(runs, json={"pack": "netops", "model": "anthropic:claude-opus-5-5", "episodes": 1})
+    assert r.status_code == 409 and "spending limit" in r.json()["detail"]
+    r = c.post(runs, json={"pack": "netops", "model": "scripted", "episodes": 1})
+    assert r.status_code == 202  # free models still run
+    r = c.post(f"{_base(ws, p)}/messages", json={"content": "hi"})
+    assert r.status_code == 409 and "spending limit" in r.json()["detail"]
+
+    # an approval that would pass the limit is refused
+    from envforge.web.db import session_factory
+    from envforge.web.models import EnvProject
+
+    c.patch(f"/api/workspaces/{ws}", json={"monthly_spend_limit_usd": 3.5})
+    with session_factory()() as db:
+        db.get(EnvProject, p).extraction_quote = {"id": "q1", "conversations": 20, "cost_usd": 1.0}
+        db.commit()
+    r = c.post(f"{_base(ws, p)}/extraction/approve", json={"quote_id": "q1"})
+    assert r.status_code == 409 and "spending limit" in r.json()["detail"]
+
+    # null removes the limit
+    r = c.patch(f"/api/workspaces/{ws}", json={"monthly_spend_limit_usd": None})
+    assert r.json()["monthly_spend_limit_usd"] is None
+    set_script([[]])
+    assert c.post(f"{_base(ws, p)}/messages", json={"content": "hi"}).status_code == 202
+
+
+def test_a_run_stops_between_episodes_at_the_spending_limit(builder, monkeypatch):
+    from envforge.models import load_model
+    from envforge.web.worker import run_forever
+
+    c, ws, p, _ = builder
+    c.patch(f"/api/workspaces/{ws}", json={"monthly_spend_limit_usd": 1.5})
+    run = c.post(f"/api/workspaces/{ws}/runs",
+                 json={"pack": "netops", "model": "anthropic:claude-opus-5-5", "episodes": 5}).json()  # fmt: skip
+    monkeypatch.setattr("envforge.web.worker.load_model", lambda *a, **k: load_model("scripted"))
+    monkeypatch.setattr("envforge.web.worker.trajectory_cost", lambda traj: 1.0)  # $1/episode
+    run_forever(once=True, kind="runs")
+    r = c.get(f"/api/workspaces/{ws}/runs/{run['id']}").json()
+    assert r["status"] == "failed" and r["progress"] == 2  # $2 > $1.50 after episode 2
+    assert "spending limit" in r["error"]
+
+
+def test_builder_turn_pauses_at_the_spending_limit(builder, monkeypatch):
+    c, ws, p, set_script = builder
+    monkeypatch.setattr("envforge.web.builder_agent.usage_cost", lambda model, usage: 1.0)
+    c.patch(f"/api/workspaces/{ws}", json={"monthly_spend_limit_usd": 0.5})
+    model = set_script([[("get_state", {})], [("get_state", {})], []])
+    assert c.post(f"{_base(ws, p)}/messages", json={"content": "go"}).status_code == 202
+    _work()  # the first model call ($1) passes the $0.50 limit: the turn stops there
+    msgs = c.get(f"{_base(ws, p)}/messages").json()["messages"]
+    assert "Paused" in msgs[-1]["content"] and len(model.script) == 2

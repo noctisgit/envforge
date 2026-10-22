@@ -24,7 +24,7 @@ const SERVE_PILL: Record<GpuBox["serve_state"], string> = {
   stopping: "pill-running",
   failed: "pill-failed",
 };
-const JOB_LABEL: Record<string, string> = { box_check: "Checking", box_serve: "Starting vLLM", box_stop: "Stopping vLLM", train_start: "Starting training", adapter_test: "Testing adapter" };
+const JOB_LABEL: Record<string, string> = { box_check: "Checking", box_serve: "Starting vLLM", box_stop: "Stopping vLLM", box_delete: "Stopping vLLM and removing the box", train_start: "Starting training", adapter_test: "Testing adapter" };
 
 const gib = (mib: number | null | undefined) => (mib ? `${(mib / 1024).toFixed(0)} GB` : "?");
 const ago = (iso: string | null) => (iso ? new Date(iso).toLocaleString() : "never");
@@ -213,14 +213,21 @@ function BoxCard({ box, wsId, defaultModel, canManage, reload }: { box: GpuBox; 
   async function remove() {
     const ok = await confirm({
       title: `Remove GPU box “${box.name}”?`,
-      body:
-        box.serve_state === "serving"
-          ? "envforge forgets the box and its key. vLLM keeps running on the machine until you stop it there or delete the rental."
-          : "envforge forgets the box and its key. Nothing on the machine is changed.",
-      confirmLabel: "Remove box",
+      body: "envforge connects to the box, stops vLLM on it, then forgets the box and its key. Adapters and files on the machine stay; delete the rental to remove them.",
+      confirmLabel: "Stop vLLM and remove",
       tone: "danger",
     });
     if (ok) await act("remove the box", () => Compute.deleteBox(wsId, box.id));
+  }
+
+  async function forget() {
+    const ok = await confirm({
+      title: `Forget “${box.name}” without stopping vLLM?`,
+      body: "envforge couldn't reach the box to stop vLLM. Forgetting it removes the box and its key from envforge only: if vLLM is still running there, stop it on the machine or delete the rental.",
+      confirmLabel: "Forget anyway",
+      tone: "danger",
+    });
+    if (ok) await act("forget the box", () => Compute.deleteBox(wsId, box.id, true));
   }
 
   return (
@@ -245,6 +252,11 @@ function BoxCard({ box, wsId, defaultModel, canManage, reload }: { box: GpuBox; 
             <button className="btn-danger" disabled={busy} onClick={remove}>
               Remove
             </button>
+            {box.delete_failed && (
+              <button className="btn-danger" disabled={busy} onClick={forget}>
+                Forget anyway
+              </button>
+            )}
           </div>
         )}
       </div>

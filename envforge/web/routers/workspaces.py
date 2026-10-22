@@ -42,6 +42,8 @@ def _ws_out(db: Session, ws: Workspace, user: User) -> WorkspaceOut:
         default_episodes=ws.default_episodes,
         builder_model=ws.builder_model,
         train_base_model=ws.train_base_model,
+        monthly_spend_limit_usd=ws.monthly_spend_limit_usd,
+        month_spend_usd=round(svc.month_spend(db, ws), 4),
     )
 
 
@@ -144,7 +146,9 @@ def update_settings(
     db: Session = Depends(get_db),
 ):
     ws = svc.require_workspace(db, user, ws_id, owner=True)
-    for field, value in body.model_dump(exclude_none=True).items():
+    for field, value in body.model_dump(exclude_unset=True).items():
+        if value is None and field != "monthly_spend_limit_usd":
+            continue  # only the spending limit can be cleared (null = no limit)
         setattr(ws, field, value)
     db.commit()
     return _ws_out(db, ws, user)

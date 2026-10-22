@@ -581,6 +581,10 @@ def test_delete_workspace_removes_boxes_and_training_rows(client, fake_boxes, fa
     client.post("/api/workspaces", json={"name": "other"})
     assert client.delete(f"/api/workspaces/{ws['id']}").status_code == 409  # training queued
     _work(4)
+    r = client.delete(f"/api/workspaces/{ws['id']}")
+    assert r.status_code == 409 and "GPU boxes" in r.json()["detail"]  # vLLM must be stopped
+    assert client.delete(f"/api/workspaces/{ws['id']}/gpu-boxes/{box['id']}").status_code == 202
+    _work()
     assert client.delete(f"/api/workspaces/{ws['id']}").status_code == 204
     from envforge.web.models import Adapter, Dataset, GpuBox, TrainingJob
 
@@ -589,15 +593,38 @@ def test_delete_workspace_removes_boxes_and_training_rows(client, fake_boxes, fa
             assert db.query(model).count() == 0
 
 
-def test_delete_box(client, fake_boxes):  # noqa: F811
+def test_delete_box_stops_vllm_first(client, fake_boxes):  # noqa: F811
     _signup(client)
     ws = _ws(client)
+    p = f"/api/workspaces/{ws['id']}/gpu-boxes"
     box = _add_box(client, ws["id"])
-    client.post(f"/api/workspaces/{ws['id']}/gpu-boxes/{box['id']}/check")
-    assert client.delete(f"/api/workspaces/{ws['id']}/gpu-boxes/{box['id']}").status_code == 409
+    client.post(f"{p}/{box['id']}/check")
+    assert client.delete(f"{p}/{box['id']}").status_code == 409  # busy with the check
     _work()
-    assert client.delete(f"/api/workspaces/{ws['id']}/gpu-boxes/{box['id']}").status_code == 204
-    assert client.get(f"/api/workspaces/{ws['id']}/gpu-boxes").json()["boxes"] == []
+    client.post(f"{p}/{box['id']}/serve", json={"model": "Qwen/Qwen2.5-0.5B-Instruct"})
+    _work()
+    assert fake_boxes[box["id"]].serving  # vLLM runs on the machine
+
+    assert client.delete(f"{p}/{box['id']}").status_code == 202
+    listed = client.get(p).json()["boxes"]
+    assert listed[0]["job"]["kind"] == "box_delete"  # still listed until the job ran
+    _work()
+    assert not fake_boxes[box["id"]].serving  # the vLLM container was removed
+    assert client.get(p).json()["boxes"] == []
+    assert not C.known_hosts_path(box["id"]).exists()
+
+
+def test_unreachable_box_is_kept_until_forced(client, fake_boxes):  # noqa: F811
+    _signup(client)
+    ws = _ws(client)
+    p = f"/api/workspaces/{ws['id']}/gpu-boxes"
+    box = _add_box(client, ws["id"], host="down.example.com")
+    assert client.delete(f"{p}/{box['id']}").status_code == 202
+    _work()
+    (b,) = client.get(p).json()["boxes"]  # couldn't stop vLLM: the box is not forgotten
+    assert b["delete_failed"] is True and "Couldn't stop vLLM" in b["serve_error"]
+    assert client.delete(f"{p}/{box['id']}?force=true").status_code == 204
+    assert client.get(p).json()["boxes"] == []
 
 
 # ---- the real SSH path, with subprocess faked -------------------------------------------

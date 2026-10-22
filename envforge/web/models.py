@@ -85,6 +85,8 @@ class Workspace(Base):
     train_base_model: Mapped[str] = mapped_column(
         String(200), default="Qwen/Qwen2.5-7B-Instruct", server_default="Qwen/Qwen2.5-7B-Instruct"
     )
+    # model API spend per calendar month (UTC) across runs and the builder; None = no limit
+    monthly_spend_limit_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     members: Mapped[list[WorkspaceMember]] = relationship(back_populates="workspace")
@@ -211,6 +213,10 @@ class EnvProject(Base):
         DateTime(timezone=True), nullable=True
     )
     privacy_signed_off_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # extraction beyond the free few per turn needs the user's click, not the model's word:
+    # the builder's last cost estimate awaiting approval, and conversations approved so far
+    extraction_quote: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    extraction_allowance: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 

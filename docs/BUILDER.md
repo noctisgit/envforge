@@ -209,9 +209,19 @@ which only a person reviewing the data can judge.
 
 The builder uses the workspace's **Builder model** (Workspace settings; default
 `anthropic:claude-opus-5-5`) with your own provider key. Each chat turn costs a little;
-extraction costs per conversation. The builder may extract up to 5 conversations
-without asking; beyond that it must show an estimate and get your explicit yes — this is
-enforced in code. Builder spend appears on the Usage page.
+extraction costs per conversation. The builder may extract up to 5 conversations per
+turn on its own. For more, `estimate_extraction` puts an **approval card** in the chat
+(conversations, model, estimated cost, cost with retries). Only your click on **Approve**
+(`POST .../extraction/approve`) adds those conversations to what the builder may extract;
+then it continues by itself. A "yes" typed in chat approves nothing, and neither does a
+`confirmed` flag from the model, so text planted in an uploaded conversation can't make it
+spend your money. Builder spend appears on the Usage page.
+
+A workspace can also have a **monthly spending limit** (Workspace settings), covering
+evaluation runs and the builder this calendar month (UTC). At the limit, new runs and
+builder messages are refused, the builder pauses before its next model call, a running run
+stops after its current episode, and an approval that would pass the limit is refused.
+Self-hosted (vLLM) and scripted models don't count.
 
 Extraction takes a spread of conversations over the topic clusters by default. To fill a
 gap, the builder can aim it with `conversation_ids` (ids from your file) or `cluster`. Its

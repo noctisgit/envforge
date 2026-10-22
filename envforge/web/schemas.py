@@ -48,6 +48,8 @@ class WorkspaceSettingsIn(BaseModel):
     default_episodes: int | None = Field(default=None, ge=1, le=1000)
     builder_model: str | None = Field(default=None, min_length=1, max_length=200)
     train_base_model: str | None = Field(default=None, min_length=1, max_length=200)
+    # USD per calendar month across runs and the builder; send null to remove the limit
+    monthly_spend_limit_usd: float | None = Field(default=None, ge=0, le=1_000_000)
 
 
 class WorkspaceOut(BaseModel):
@@ -60,6 +62,8 @@ class WorkspaceOut(BaseModel):
     default_episodes: int
     builder_model: str
     train_base_model: str
+    monthly_spend_limit_usd: float | None = None
+    month_spend_usd: float = 0.0  # model API spend so far this month (UTC)
 
 
 # ---- keys ----

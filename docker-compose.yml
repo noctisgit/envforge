@@ -5,6 +5,10 @@
 #
 # Host ports come from .env: WEB_LISTEN / WEB_PORT (the UI, default 127.0.0.1:3000),
 # API_PORT (8000) and POSTGRES_PORT (5432), the last two bound to 127.0.0.1 only.
+#
+# No long-running service is root: api, worker, builder and compute run as uid 10001
+# (`envforge`, see deploy/Dockerfile.api), web as `node`, postgres as `postgres`. Only the
+# one-off `data-perms` step runs as root, to hand the data volume to uid 10001.
 
 services:
   postgres:
@@ -24,9 +28,21 @@ services:
       timeout: 3s
       retries: 10
 
+  # One-off, at every `up`: makes the data volume owned by uid 10001. It only chowns when
+  # something isn't (a fresh volume, or one from before the services stopped being root).
+  data-perms:
+    build: { context: ., dockerfile: deploy/Dockerfile.api }
+    user: root
+    restart: "no"
+    volumes:
+      - envdata:/data
+    command: >
+      sh -c '[ -z "$$(find /data ! -user 10001 -print -quit)" ] || chown -R 10001:10001 /data'
+
   api:
     build: { context: ., dockerfile: deploy/Dockerfile.api }
     restart: unless-stopped
+    security_opt: ["no-new-privileges:true"]
     env_file: .env
     environment:
       DATABASE_URL: postgresql+psycopg://envforge:${POSTGRES_PASSWORD:-envforge}@postgres:5432/envforge
@@ -35,6 +51,7 @@ services:
       - envdata:/data
     depends_on:
       postgres: { condition: service_healthy }
+      data-perms: { condition: service_completed_successfully }
     ports:
       - "127.0.0.1:${API_PORT:-8000}:8000" # the UI reaches the API inside Docker; this is for dev
     # One process on purpose: login rate limits live in memory (envforge/web/security.py),
@@ -46,6 +63,10 @@ services:
   worker:
     build: { context: ., dockerfile: deploy/Dockerfile.api }
     restart: unless-stopped
+    security_opt: ["no-new-privileges:true"]
+    # The Docker socket below is reached through its group, not as root. DOCKER_GID is the
+    # socket's group id on the host (install.sh sets it: stat -c %g /var/run/docker.sock).
+    group_add: ["${DOCKER_GID:-0}"]
     env_file: .env
     environment:
       DATABASE_URL: postgresql+psycopg://envforge:${POSTGRES_PASSWORD:-envforge}@postgres:5432/envforge
@@ -54,11 +75,13 @@ services:
     volumes:
       - envdata:/data
       # Sandbox packs (repofix) start locked-down sibling containers through the host's
-      # Docker daemon. This makes the worker root-equivalent on the host, so run it on a
-      # box you control. Drop this line to run sim packs only.
+      # Docker daemon. Access to the socket is root-equivalent on the host (even though the
+      # worker runs as uid 10001), so run it on a box you control. Drop this line to run
+      # sim packs only.
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       postgres: { condition: service_healthy }
+      data-perms: { condition: service_completed_successfully }
     command: envforge-worker --poll 2 --kind runs
 
   # Environment builder: chat turns and upload processing (parse + redact). Separate from
@@ -66,6 +89,7 @@ services:
   builder:
     build: { context: ., dockerfile: deploy/Dockerfile.api }
     restart: unless-stopped
+    security_opt: ["no-new-privileges:true"]
     env_file: .env
     environment:
       DATABASE_URL: postgresql+psycopg://envforge:${POSTGRES_PASSWORD:-envforge}@postgres:5432/envforge
@@ -74,6 +98,7 @@ services:
       - envdata:/data
     depends_on:
       postgres: { condition: service_healthy }
+      data-perms: { condition: service_completed_successfully }
     command: envforge-worker --poll 1 --kind builder
 
   # GPU boxes: readiness checks, vLLM serving and LoRA training over SSH, plus polling
@@ -82,6 +107,7 @@ services:
   compute:
     build: { context: ., dockerfile: deploy/Dockerfile.api }
     restart: unless-stopped
+    security_opt: ["no-new-privileges:true"]
     env_file: .env
     environment:
       DATABASE_URL: postgresql+psycopg://envforge:${POSTGRES_PASSWORD:-envforge}@postgres:5432/envforge
@@ -90,6 +116,7 @@ services:
       - envdata:/data
     depends_on:
       postgres: { condition: service_healthy }
+      data-perms: { condition: service_completed_successfully }
     command: envforge-worker --poll 2 --kind compute
 
   web:
@@ -100,6 +127,7 @@ services:
         NEXT_PUBLIC_AUTH_PROVIDER: ${NEXT_PUBLIC_AUTH_PROVIDER:-local}
         NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: ${NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY:-}
     restart: unless-stopped
+    security_opt: ["no-new-privileges:true"]
     environment:
       API_URL: http://api:8000
       CLERK_SECRET_KEY: ${CLERK_SECRET_KEY:-}

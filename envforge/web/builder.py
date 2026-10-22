@@ -725,6 +725,40 @@ def review_summary(project: EnvProject) -> dict[str, Any] | None:
     }
 
 
+# ---- extraction approvals ---------------------------------------------------------------
+
+
+def approve_extraction(db: Session, ws: Workspace, project: EnvProject, quote_id: str) -> dict:
+    """The user's click on the builder's cost estimate: adds its conversations to what the
+    builder may extract. Refused when the estimate is stale or would pass the workspace's
+    monthly spending limit. Returns the approved quote."""
+    from envforge.web.services import spend_left
+
+    quote = project.extraction_quote
+    if not quote or quote.get("id") != quote_id:
+        raise HTTPException(
+            409, "that estimate is no longer current; ask the builder for a new one"
+        )
+    cost = quote.get("cost_usd_with_retries") or quote.get("cost_usd") or 0.0
+    left = spend_left(db, ws)
+    if left is not None and cost > left:
+        raise HTTPException(
+            409,
+            f"approving would pass this workspace's monthly spending limit: about ${cost:.2f} "
+            f"needed, ${max(left, 0):.2f} left this month (Workspace settings)",
+        )
+    project.extraction_allowance = (project.extraction_allowance or 0) + int(quote["conversations"])
+    project.extraction_quote = None
+    db.commit()
+    return quote
+
+
+def decline_extraction(db: Session, project: EnvProject) -> None:
+    """Dismiss the pending estimate; nothing is approved."""
+    project.extraction_quote = None
+    db.commit()
+
+
 # ---- jobs (run by `envforge-worker --kind builder`) ------------------------------------
 
 

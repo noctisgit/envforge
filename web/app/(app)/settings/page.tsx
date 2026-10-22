@@ -27,6 +27,7 @@ export default function WorkspaceSettingsPage() {
   const [episodes, setEpisodes] = useState(10);
   const [builderModel, setBuilderModel] = useState("");
   const [trainBase, setTrainBase] = useState("");
+  const [limit, setLimit] = useState(""); // USD per month; empty = no limit
   const [saving, setSaving] = useState(false);
   const [newWs, setNewWs] = useState("");
   const [createErr, setCreateErr] = useState<string | null>(null);
@@ -46,6 +47,7 @@ export default function WorkspaceSettingsPage() {
     setEpisodes(ws.default_episodes);
     setBuilderModel(ws.builder_model);
     setTrainBase(ws.train_base_model);
+    setLimit(ws.monthly_spend_limit_usd === null ? "" : String(ws.monthly_spend_limit_usd));
   }, [ws]);
 
   if (!ws) return null;
@@ -63,6 +65,7 @@ export default function WorkspaceSettingsPage() {
         default_episodes: episodes,
         builder_model: builderModel,
         train_base_model: trainBase,
+        monthly_spend_limit_usd: limit.trim() === "" ? null : Number(limit),
       });
       await reload();
       toast.success("Settings saved", `Defaults for ${name || ws!.name} are updated.`);
@@ -208,6 +211,28 @@ export default function WorkspaceSettingsPage() {
                 </p>
               </div>
             </div>
+          </div>
+
+          <div className="space-y-2 border-t pt-4" style={{ borderColor: "var(--line)" }}>
+            <label className="label" htmlFor="ws-limit">
+              Monthly spending limit (USD)
+            </label>
+            <input
+              id="ws-limit"
+              className="input md:max-w-xs"
+              type="number"
+              min={0}
+              step="0.01"
+              placeholder="no limit"
+              value={limit}
+              onChange={(e) => setLimit(e.target.value)}
+              disabled={!isOwner}
+              aria-describedby="ws-limit-hint"
+            />
+            <p id="ws-limit-hint" className="hint">
+              ${ws.month_spend_usd.toFixed(2)} spent this month (UTC) on model APIs: runs and the builder. At the limit, new runs and builder messages are refused, a running
+              run stops after its current episode and the builder pauses. Self-hosted (vLLM) and scripted models don&apos;t count. Leave empty for no limit.
+            </p>
           </div>
 
           {isOwner && (

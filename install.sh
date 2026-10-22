@@ -154,6 +154,11 @@ if [ -z "$(env_get APP_SECRET_KEY)" ]; then
     env_set APP_SECRET_KEY "$(random_secret 64)"
     ok "generated APP_SECRET_KEY (keep .env safe: it also decrypts saved API keys)"
 fi
+# The run worker runs as a normal user and reaches the Docker socket through its group
+# (sandbox packs). BSD/macOS stat has no -c: Docker Desktop's socket is root-group, so 0.
+if [ -z "$(env_get DOCKER_GID)" ]; then
+    env_set DOCKER_GID "$(stat -c %g /var/run/docker.sock 2>/dev/null || echo 0)"
+fi
 db_volume_exists=0
 if docker volume ls --format '{{.Name}}' | grep -qx "$(basename "$PWD" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-')_pgdata"; then
     db_volume_exists=1

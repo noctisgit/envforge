@@ -131,7 +131,11 @@ browser, reusing the same code (`envforge/compute`, `envforge/train`). Logic liv
   fingerprint), the vLLM API key (generated when left empty, sent to vLLM on stdin) and
   an optional Hugging Face token. **Check**, **Serve** and **Stop** are jobs for the
   compute worker; a check stores GPU model, VRAM, driver/CUDA, free disk, vLLM presence,
-  reachability and the time.
+  reachability and the time. **Remove** is a job too: it stops vLLM on the box, then
+  forgets the box (row, key, pinned host key). If the box can't be reached the removal
+  fails and the box stays, so a running vLLM is never orphaned silently; **Forget anyway**
+  (`?force=true`) then removes it from envforge without touching the machine. A workspace
+  with GPU boxes can't be deleted until they are removed.
 - **Serving boxes in the model picker.** While a box serves, `GET .../models` lists
   `vllm:<model>` (and `vllm:<adapter>` for LoRA adapters) for that workspace. Queuing a run
   with one of them records `runs.gpu_box_id`; the worker then takes the endpoint and key
@@ -261,8 +265,15 @@ users, workspaces, encrypted keys, and run status/metrics/usage. Back up both:
 docker compose exec -T postgres pg_dump -U envforge envforge > backup-$(date +%F).sql
 ```
 
-The worker mounts `/var/run/docker.sock` so sandbox packs can start sibling containers.
-That makes the worker root-equivalent on the host; drop the mount to run sim packs only.
+No long-running container runs as root: api, worker, builder and compute run as uid 10001
+(`envforge`), web as `node`, and they get `no-new-privileges`. The one-off `data-perms`
+service (root) hands the `envdata` volume to uid 10001 on `up`; it only chowns when some file
+isn't owned by it yet, such as on the first start after upgrading from root containers.
+
+The worker mounts `/var/run/docker.sock` so sandbox packs can start sibling containers. It
+reaches the socket through the socket's group (`DOCKER_GID` in `.env`, set by `install.sh`
+from `stat -c %g /var/run/docker.sock`). Socket access is still root-equivalent on the host;
+drop the mount to run sim packs only.
 Scale workers with `docker compose up -d --scale worker=3` (claiming is race-free).
 
 ## Schema changes
@@ -285,7 +296,9 @@ Commit the generated file under `envforge/web/migrations/versions/`.
 | GET | `/api/auth/me` | current user |
 | GET | `/api/packs` | available environment packs |
 | GET/POST | `/api/workspaces` | list / create |
-| GET/PATCH | `/api/workspaces/{id}` | detail / defaults (owner) |
+| GET/PATCH | `/api/workspaces/{id}` | detail / defaults and `monthly_spend_limit_usd` (owner; `null` = no limit) |
+| POST | `/api/workspaces/{id}/builder/projects/{p}/extraction/approve` | approve the builder's cost estimate `{quote_id}` (only this approves extraction beyond 5 per turn) |
+| DELETE | `/api/workspaces/{id}/builder/projects/{p}/extraction/quote` | dismiss the estimate |
 | GET/PUT/DELETE | `/api/me/keys[/{provider}]` | your provider keys (checked on save) |
 | PATCH | `/api/me` | your display name |
 | POST | `/api/me/password` | change password (signs out other sessions) |
@@ -303,7 +316,7 @@ Commit the generated file under `envforge/web/migrations/versions/`.
 | GET | `/api/workspaces/{id}/usage?days=30` | workspace usage by day, model, member |
 | GET | `/api/auth/me/usage?days=30` | your usage across your workspaces |
 | GET/POST | `/api/workspaces/{id}/gpu-boxes` | list (keys masked, `can_manage`) / add a GPU box (admin) |
-| DELETE | `/api/workspaces/{id}/gpu-boxes/{box}` | forget a box (admin) |
+| DELETE | `/api/workspaces/{id}/gpu-boxes/{box}` | stop vLLM on the box, then forget it (202, a job); `?force=true` forgets it now without touching the machine (204) (admin) |
 | POST | `/api/workspaces/{id}/gpu-boxes/{box}/check` | queue a readiness check (admin) |
 | POST | `/api/workspaces/{id}/gpu-boxes/{box}/serve` | queue vLLM serving `{model, adapters?, max_model_len?}` (admin) |
 | POST | `/api/workspaces/{id}/gpu-boxes/{box}/stop` | queue stopping vLLM (admin) |

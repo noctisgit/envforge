@@ -20,6 +20,7 @@ import {
   importBuilderUrl,
   uploadBuilderFile,
   type BuilderMessage,
+  type ExtractionQuote,
   type BuilderProject,
   type PackDetail,
   type RevisionDiff,
@@ -270,6 +271,21 @@ function Chat({ wsId, project, onChange, onOpenRevisions }: { wsId: string; proj
         {messages.map((m) => (
           <ChatMessage key={m.id} m={m} onOpenRevisions={onOpenRevisions} />
         ))}
+        {!busy && project.extraction?.quote && (
+          <ApprovalCard
+            wsId={wsId}
+            project={project}
+            quote={project.extraction.quote}
+            onDone={(started) => {
+              if (started) {
+                wasBusy.current = true;
+                setJob({ status: "queued", progress: "Thinking" });
+                poll();
+              }
+              onChange();
+            }}
+          />
+        )}
         {busy && (
           <div className="flex items-center gap-2 text-xs" style={{ color: "var(--muted)" }}>
             <span className="inline-block h-2 w-2 animate-pulse rounded-full" style={{ background: "var(--accent)" }} />
@@ -313,6 +329,52 @@ function Chat({ wsId, project, onChange, onOpenRevisions }: { wsId: string; proj
         </div>
       </div>
     </section>
+  );
+}
+
+const usd = (v: number | null | undefined) => (typeof v === "number" ? `$${v < 1 ? v.toFixed(3) : v.toFixed(2)}` : "unknown");
+
+/** The builder's cost estimate. Only this click approves extraction beyond the free few per turn:
+ *  a "yes" typed in chat (or text planted in an uploaded conversation) can't spend money. */
+function ApprovalCard({ wsId, project, quote, onDone }: { wsId: string; project: BuilderProject; quote: ExtractionQuote; onDone: (started: boolean) => void }) {
+  const toast = useToast();
+  const [busy, setBusy] = useState(false);
+  const left = project.spend_left_usd;
+  const worst = quote.cost_usd_with_retries ?? quote.cost_usd;
+  const overLimit = left !== null && typeof worst === "number" && worst > left;
+
+  async function act(approve: boolean) {
+    setBusy(true);
+    try {
+      if (approve) await Api.approveExtraction(wsId, project.id, quote.id);
+      else await Api.declineExtraction(wsId, project.id);
+      onDone(approve);
+    } catch (e) {
+      toast.error(approve ? "Couldn't approve" : "Couldn't dismiss", e);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="inset-card space-y-2 p-3" role="group" aria-label="Approve extraction cost">
+      <div className="font-medium">
+        Extract {quote.conversations} conversation{quote.conversations === 1 ? "" : "s"} for about {usd(quote.cost_usd)}?
+      </div>
+      <div className="hint">
+        With {quote.model}; up to {usd(quote.cost_usd_with_retries)} if some need retries. Billed to your own API key.
+        {left !== null && ` ${usd(Math.max(left, 0))} left of this workspace's monthly limit.`}
+      </div>
+      {overLimit && <div className="hint" style={{ color: "var(--bad)" }}>This would pass the workspace's monthly spending limit; raise it in Workspace settings first.</div>}
+      <div className="flex flex-wrap gap-2">
+        <button className="btn btn-sm" disabled={busy || overLimit} onClick={() => act(true)}>
+          Approve {usd(quote.cost_usd)}
+        </button>
+        <button className="btn-ghost btn-sm" disabled={busy} onClick={() => act(false)}>
+          Not now
+        </button>
+      </div>
+    </div>
   );
 }
 

@@ -35,6 +35,10 @@ class MessageIn(BaseModel):
     content: str = Field(min_length=1, max_length=20000)
 
 
+class ApproveIn(BaseModel):
+    quote_id: str = Field(min_length=1, max_length=64)
+
+
 class SpecIn(BaseModel):
     spec: dict[str, Any]
     message: str = Field(default="Edited the spec by hand", max_length=500)
@@ -161,6 +165,9 @@ def _project_out(db: Session, ws, p: EnvProject, user: User) -> dict:
         "uploads": [_upload_out(u) for u in B.list_uploads(db, p)],
         "builder_model": ws.builder_model,
         "privacy": _privacy_out(p),
+        # a cost estimate waiting for the user's click, and conversations approved so far
+        "extraction": {"quote": p.extraction_quote, "approved": p.extraction_allowance or 0},
+        "spend_left_usd": svc.spend_left(db, ws),
     }
 
 
@@ -301,6 +308,11 @@ def post_message(
 ):
     ws = svc.require_workspace(db, user, ws_id)
     p = B.get_project(db, ws, pid)
+    return _start_turn(db, ws, p, user, body.content)
+
+
+def _start_turn(db: Session, ws, p: EnvProject, user: User, content: str) -> dict:
+    """Post a user message and queue the builder's turn on it."""
     provider = svc.provider_of(ws.builder_model)
     if provider == "scripted" or not (
         svc.user_has_key(db, user.id, provider) or svc.get_settings().ALLOW_SERVER_KEYS
@@ -309,11 +321,36 @@ def post_message(
             400, f"the builder model is {ws.builder_model}: add a {provider} key on your Profile or pick "
             "another builder model in Workspace settings"
         )  # fmt: skip
+    svc.require_budget(db, ws)
     if not p.purpose.strip():
-        p.purpose = body.content[:4000]
-    B.add_message(db, p, "user", body.content)
+        p.purpose = content[:4000]
+    B.add_message(db, p, "user", content)
     job = B.enqueue_job(db, "builder_turn", p, user)
     return {"job_id": job.id}
+
+
+@router.post("/builder/projects/{pid}/extraction/approve", status_code=202)
+def approve_extraction(ws_id: str, pid: str, body: ApproveIn, user: User = Depends(current_user),
+                       db: Session = Depends(get_db)):  # fmt: skip
+    """The user approves the builder's cost estimate (only a click does: never the model);
+    the builder then continues with the approved conversations."""
+    ws = svc.require_workspace(db, user, ws_id)
+    p = B.get_project(db, ws, pid)
+    if B.active_job(db, p):
+        raise HTTPException(409, "the builder is still working; approve once it has finished")
+    q = B.approve_extraction(db, ws, p, body.quote_id)
+    cost = q.get("cost_usd")
+    note = f" (estimated ${cost:.2f})" if isinstance(cost, (int, float)) else ""
+    return _start_turn(db, ws, p, user, f"Approved: extract up to {q['conversations']} "
+                       f"conversations{note}. Please continue.")  # fmt: skip
+
+
+@router.delete("/builder/projects/{pid}/extraction/quote", status_code=204)
+def decline_extraction(
+    ws_id: str, pid: str, user: User = Depends(current_user), db: Session = Depends(get_db)
+) -> None:
+    ws = svc.require_workspace(db, user, ws_id)
+    B.decline_extraction(db, B.get_project(db, ws, pid))
 
 
 # ---- revisions -----------------------------------------------------------------------------

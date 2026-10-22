@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import traceback
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -32,7 +33,7 @@ from envforge.web import services as svc
 from envforge.web.models import EnvProject, EnvRevision, Job, User, Workspace
 
 MAX_MODEL_CALLS = 16  # per turn
-FREE_EXTRACTION = 5  # conversations the builder may extract without asking
+FREE_EXTRACTION = 5  # conversations per turn the builder may extract without the user's approval
 MAX_EXTRACTION = 25  # per tool call
 TOOL_RESULT_LIMIT = 8000
 
@@ -67,10 +68,12 @@ target it with `conversation_ids` or `cluster`.
 3. Draft the spec with `update_spec` as soon as you know enough, then refine. Every \
 update creates a revision the user can review and roll back. Keep the spec valid; fix \
 any problems `update_spec` reports.
-4. Extract a small batch of tasks (`extract_tasks`, up to 5 without asking), check \
-`validate`, look at failures, and improve the spec or prompt. Before extracting more than \
-5 conversations, call `estimate_extraction`, tell the user the estimated cost and wait \
-for their explicit yes; then call `extract_tasks` with `confirmed=true`.
+4. Extract a small batch of tasks (`extract_tasks`, up to 5 conversations per turn without \
+approval), check `validate`, look at failures, and improve the spec or prompt. To extract \
+more, call `estimate_extraction`: it shows the user an approval card with the estimated \
+cost. Tell them briefly and end your turn. Only their click on that card approves the \
+spend (a "yes" typed in chat does not); once they approve, the approved number of \
+conversations is available to `extract_tasks` and you'll be asked to continue.
 5. Use `preview_task` to show what an agent would face. When the readiness checklist in \
 `get_state` is green, suggest publishing (the user publishes from the UI).
 
@@ -170,7 +173,8 @@ TOOLS: list[ToolSpec] = [
     ToolSpec(
         name="estimate_extraction",
         description="Estimated cost of extracting task records from the next N not-yet-extracted "
-        "conversations (or from N of the targeted ones; see extract_tasks).",
+        "conversations (or from N of the targeted ones; see extract_tasks). Beyond the free "
+        f"{FREE_EXTRACTION} per turn, this also asks the user to approve the spend in the UI.",
         parameters=_obj(
             {"n": {"type": "integer", "minimum": 1, "maximum": 100000}, **TARGET_PARAMS}, ["n"]
         ),
@@ -181,14 +185,10 @@ TOOLS: list[ToolSpec] = [
         f"current spec, validate each (its reference solution must earn reward 1.0), and save the "
         f"valid ones in a new revision. By default the conversations are a spread over the topic "
         f"clusters; pass `conversation_ids` or `cluster` to target topics the tasks don't cover yet. "
-        f"N <= {MAX_EXTRACTION} per call. N > {FREE_EXTRACTION} requires confirmed=true, which you "
-        "may only set after the user explicitly approved the estimated cost.",
+        f"N <= {MAX_EXTRACTION} per call. Up to {FREE_EXTRACTION} conversations per turn are free; "
+        "more draw on what the user approved in the UI after estimate_extraction.",
         parameters=_obj(
-            {
-                "n": {"type": "integer", "minimum": 1, "maximum": MAX_EXTRACTION},
-                "confirmed": {"type": "boolean"},
-                **TARGET_PARAMS,
-            },
+            {"n": {"type": "integer", "minimum": 1, "maximum": MAX_EXTRACTION}, **TARGET_PARAMS},
             ["n"],
         ),
     ),
@@ -245,6 +245,7 @@ class Ctx:
 
     def __init__(self, db: Session, ws: Workspace, project: EnvProject, user: User, model) -> None:
         self.db, self.ws, self.project, self.user, self.model = db, ws, project, user, model
+        self.free_left = FREE_EXTRACTION  # extraction without approval, per turn
         self.usage = {
             "input_tokens": 0,
             "output_tokens": 0,
@@ -267,6 +268,10 @@ class Ctx:
         c = usage_cost(self.model.model_id, usage)
         if c is not None and self.usage["cost_usd"] is not None:
             self.usage["cost_usd"] += c
+
+    def spend_left(self) -> float | None:
+        """USD left under the workspace's monthly limit, counting this turn so far."""
+        return svc.spend_left(self.db, self.ws, pending=self.usage["cost_usd"] or 0.0)
 
 
 def readiness(ctx: Ctx) -> list[dict[str, Any]]:
@@ -512,7 +517,22 @@ def t_estimate_extraction(ctx: Ctx, args: dict[str, Any]) -> dict[str, Any]:
                 )
         est["conversations"] = n
         est.setdefault("notes", []).append(f"scaled from a stratified sample of {len(sample)}")
-    return {"conversations": n, "model": ctx.model.model_id, "estimate": est}
+    out: dict[str, Any] = {"conversations": n, "model": ctx.model.model_id, "estimate": est}
+    if n > ctx.free_left and n > (ctx.project.extraction_allowance or 0):
+        # the user approves this by clicking the card (POST .../extraction/approve), never
+        # through the model: text in an uploaded conversation must not be able to spend money
+        ctx.project.extraction_quote = {
+            "id": uuid.uuid4().hex,
+            "conversations": n,
+            "model": ctx.model.model_id,
+            "cost_usd": est.get("cost_usd"),
+            "cost_usd_with_retries": est.get("cost_usd_with_retries"),
+            "created_at": datetime.now(UTC).isoformat(),
+        }
+        ctx.db.commit()
+        out["approval"] = ("the user now sees an approval card for this estimate; tell them "
+                           "briefly and end your turn. Their click approves it, not a chat reply.")  # fmt: skip
+    return out
 
 
 def t_extract_tasks(ctx: Ctx, args: dict[str, Any]) -> dict[str, Any]:
@@ -530,9 +550,6 @@ def t_extract_tasks(ctx: Ctx, args: dict[str, Any]) -> dict[str, Any]:
         return {"error": "this project uses the strict privacy profile: a person must pass a "
                 "privacy review (Data tab: check a sample of redacted conversations) before "
                 "any extraction"}  # fmt: skip
-    if n > FREE_EXTRACTION and not args.get("confirmed"):
-        return {"error": f"extracting more than {FREE_EXTRACTION} needs the user's explicit OK: call "
-                "estimate_extraction, tell the user the cost, and wait for their yes"}  # fmt: skip
     h = ctx.head
     if not h or not h.spec or not (h.validation or {}).get("spec_ok"):
         return {"error": "the spec must be valid before extracting (see validate)"}
@@ -544,6 +561,23 @@ def t_extract_tasks(ctx: Ctx, args: dict[str, Any]) -> dict[str, Any]:
                     "ids, or already extracted)"}  # fmt: skip
         return {"error": "every uploaded conversation has been extracted"}
 
+    # Spending: a few conversations per turn are free; more need the user's approval
+    # (their click on an estimate, POST .../extraction/approve), never the model's word.
+    free = len(todo) <= ctx.free_left
+    if not free and len(todo) > (ctx.project.extraction_allowance or 0):
+        return {"error": f"only {ctx.free_left} more conversation(s) can be extracted this turn without "
+                f"approval, and {ctx.project.extraction_allowance or 0} are approved: call "
+                "estimate_extraction, which shows the user an approval card, then end your turn"}  # fmt: skip
+    left = ctx.spend_left()
+    if left is not None and left <= 0:
+        return {"error": svc.limit_reached_message(ctx.ws)}
+    # use up the free quota or the approval before spending, so a failure can't be retried
+    # for free
+    if free:
+        ctx.free_left -= len(todo)
+    else:
+        ctx.project.extraction_allowance -= len(todo)
+        ctx.db.commit()
     batch = extract_batch(ctx.model, spec, todo)
     ctx.add_usage(batch.usage)
     existing = ctx.tasks()
@@ -774,6 +808,11 @@ def run_turn(db: Session, job: Job) -> None:
         content=SYSTEM_PROMPT.format(schema=schema, task_schema=task_schema, example=example),
     )
     for _ in range(MAX_MODEL_CALLS):
+        left = ctx.spend_left()
+        if left is not None and left <= 0:
+            B.add_message(db, project, "assistant",
+                          f"(Paused: {svc.limit_reached_message(ws)}.)")  # fmt: skip
+            break
         job.progress = "Thinking"
         db.commit()
         turn = model.complete([system, *_history(db, project)], TOOLS)
