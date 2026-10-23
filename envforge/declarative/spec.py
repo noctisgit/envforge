@@ -138,7 +138,8 @@ class ToolDef(BaseModel):
 # ---- checks (success conditions and policy rules) ----------------------------------
 #
 # `where` matches records field by field. A key may carry an operator suffix:
-# "amount__gt": 100, "amount__lte": 50, "status__ne": "closed", "status__in": [...].
+# "amount__gt": 100, "amount__lte": 50, "status__ne": "closed", "status__in": [...],
+# "value__contains": "news" (free text: the words appear anywhere, ignoring case and punctuation).
 
 
 class FieldEquals(BaseModel):
@@ -162,8 +163,15 @@ class NoRecord(BaseModel):
 
 
 class ResolutionIs(BaseModel):
+    """The ticket was resolved as `category`, or as one of `also` where the guidelines allow
+    more than one outcome (e.g. faq_answered or request_denied for an unverifiable customer)."""
+
     check: Literal["resolution"] = "resolution"
     category: str
+    also: list[str] = Field(default_factory=list)
+
+    def categories(self) -> list[str]:
+        return [self.category, *self.also]
 
 
 class ToolCalled(BaseModel):

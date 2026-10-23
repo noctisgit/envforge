@@ -6,7 +6,8 @@ Three small pieces, all pure and deterministic (no randomness, no clocks):
                      record key, the log of tool calls that took effect, the recorded
                      resolution, and which records the agent changed or created
 - `matches(...)`     `where`-style matching with operator suffixes
-                     ("amount__gt": 50, "status__in": ["open", "pending"], ...)
+                     ("amount__gt": 50, "status__in": ["open", "pending"],
+                     "value__contains": "news", ...)
 - `evaluate_check()` turns one `Check` from spec.py into a `CheckResult`
                      (passed? + a human sentence + which records it is about)
 
@@ -17,6 +18,7 @@ arguments; the runtime uses it when applying `set` / `add` / `find` effects.
 from __future__ import annotations
 
 import copy
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -34,7 +36,7 @@ from envforge.declarative.spec import (
 )
 
 # operator suffixes allowed on `where` keys, e.g. "amount__lte"
-OPERATORS = ("gt", "gte", "lt", "lte", "ne", "in")
+OPERATORS = ("gt", "gte", "lt", "lte", "ne", "in", "contains")
 
 RecordKey = tuple[str, str]  # (collection name, record key as a string)
 
@@ -64,9 +66,21 @@ def values_equal(a: Any, b: Any) -> bool:
     return a == b
 
 
+def normalize_text(v: Any) -> str:
+    """Lower case, with runs of punctuation, underscores and spaces collapsed to one space:
+    "Credit_Card!" and "credit card" both become "credit card"."""
+    return " ".join(re.sub(r"[\W_]+", " ", format_value(v).lower()).split())
+
+
 def compare(actual: Any, op: str, expected: Any) -> bool:
     """Apply one operator. Ordering operators need two numbers or two strings
-    (ISO dates compare correctly as strings); anything else simply doesn't match."""
+    (ISO dates compare correctly as strings); anything else simply doesn't match.
+
+    `contains` is for free text the agent writes itself (a reason, a note): it matches when
+    the expected words appear anywhere in the value, ignoring case and punctuation.
+    """
+    if op == "contains":
+        return actual is not None and normalize_text(expected) in normalize_text(actual)
     if op == "eq":
         return values_equal(actual, expected)
     if op == "ne":
@@ -101,7 +115,8 @@ def matches(record: dict[str, Any], where: dict[str, Any]) -> bool:
 
 def where_text(where: dict[str, Any]) -> str:
     """Render a `where` dict as "customer_id = C-1, amount > 50" for humans."""
-    symbols = {"eq": "=", "ne": "≠", "gt": ">", "gte": "≥", "lt": "<", "lte": "≤", "in": "in"}
+    symbols = {"eq": "=", "ne": "≠", "gt": ">", "gte": "≥", "lt": "<", "lte": "≤", "in": "in",
+               "contains": "contains"}  # fmt: skip
     parts = []
     for key, value in where.items():
         name, op = split_operator(key)
@@ -226,7 +241,7 @@ def describe_check(check: Check) -> str:
     if isinstance(check, NoRecord):
         return f"{check.collection} has no record with {where_text(check.where)}"
     if isinstance(check, ResolutionIs):
-        return f"ticket resolved as {check.category}"
+        return "ticket resolved as " + " or ".join(check.categories())
     if isinstance(check, ToolCalled):
         args = f" with {where_text(check.args)}" if check.args else ""
         return f"{check.tool} was called{args}"
@@ -290,7 +305,7 @@ def evaluate_check(check: Check, world: World, spec: EnvSpec) -> CheckResult:
         return CheckResult(ok, desc, detail, refs | set(hits))
 
     if isinstance(check, ResolutionIs):
-        ok = world.resolution == check.category
+        ok = world.resolution in check.categories()
         detail = "" if ok else f"resolution is {world.resolution or '(not resolved)'}"
         return CheckResult(ok, desc, detail)
 

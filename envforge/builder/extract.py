@@ -184,9 +184,11 @@ def record_schema(spec: EnvSpec) -> dict[str, Any]:
         "description": (
             "One success check. Fields by type: field_equals{collection,key,field,value}; "
             "record_exists{collection,where}; no_record{collection,where}; "
-            "resolution{category}; tool_called{tool,args}; tool_not_called{tool,args}; "
+            "resolution{category, also?}; tool_called{tool,args}; tool_not_called{tool,args}; "
             "only_touch_customer{}. `where` maps field -> value; a key may end in "
-            "__gt/__gte/__lt/__lte/__ne/__in."
+            "__gt/__gte/__lt/__lte/__ne/__in, or __contains for free text the agent writes "
+            "(a reason or note: match key words, not a whole sentence). `also` lists other "
+            "categories that count as correct, only where the guidelines allow several."
         ),
         "properties": {
             "check": {"type": "string", "enum": check_types},
@@ -196,6 +198,10 @@ def record_schema(spec: EnvSpec) -> dict[str, Any]:
             "value": {"type": ["string", "number", "boolean", "null"]},
             "where": {"type": "object"},
             "category": {"type": "string", "enum": list(spec.resolution_categories)},
+            "also": {
+                "type": "array",
+                "items": {"type": "string", "enum": list(spec.resolution_categories)},
+            },
             "tool": {"type": "string", "enum": [t.name for t in spec.tools]},
             "args": {"type": "object"},
         },
@@ -510,8 +516,10 @@ def check_record(spec: EnvSpec, record: TaskRecord) -> list[str]:
             for wkey in c["where"]:
                 if wkey.split("__")[0] not in known:
                     errors.append(f"success[{i}] filters on unknown field '{coll_name}.{wkey}'")
-        if c["check"] == "resolution" and c["category"] not in spec.resolution_categories:
-            errors.append(f"success[{i}] uses unknown resolution category '{c['category']}'")
+        if c["check"] == "resolution":
+            for category in [c["category"], *c.get("also", [])]:
+                if category not in spec.resolution_categories:
+                    errors.append(f"success[{i}] uses unknown resolution category '{category}'")
         if c["check"] in ("tool_called", "tool_not_called") and c["tool"] not in tools:
             errors.append(f"success[{i}] names unknown tool '{c['tool']}'")
 

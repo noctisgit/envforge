@@ -173,6 +173,16 @@ def test_where_operators():
     assert matches({"a__b": 1}, {"a__b": 1})  # unknown suffix is part of the field name
 
 
+def test_contains_matches_key_words_in_free_text():
+    note = {"value": "How heard: the NEWS, customer thinks the subscription was removed"}
+    assert matches(note, {"value__contains": "news"})
+    assert matches(note, {"value__contains": "the news customer"})  # punctuation ignored
+    assert matches({"value": "refund to Credit-Card"}, {"value__contains": "credit_card"})
+    assert matches({"value": "$99 charged"}, {"value__contains": 99})
+    assert not matches(note, {"value__contains": "spouse"})
+    assert not matches({"value": None}, {"value__contains": "news"})
+
+
 def test_resolve_value():
     assert resolve_value("$amount", {"amount": 5}) == 5
     assert resolve_value("$missing", {}) is None
@@ -201,6 +211,8 @@ def test_each_check_type():
     assert not ok(ToolCalled(tool="ask", args={"topic": "other"}))
     assert not ok(ToolNotCalled(tool="ask"))
     assert ok(ResolutionIs(category="refunded"))
+    assert ok(ResolutionIs(category="denied", also=["refunded"]))  # another accepted outcome
+    assert not ok(ResolutionIs(category="denied", also=["escalated"]))
     w.touched[("orders", "O2")] = "changed"  # someone else's order
     assert not ok(OnlyTouchCustomer())
 
@@ -445,12 +457,16 @@ def test_validate_spec_ok_and_planted_errors():
     spec.policies.append(
         Policy(id="q", text="", check=NoRecord(collection="orders", where={"total__foo": 1}))
     )
+    spec.policies.append(
+        Policy(id="r", text="", check=ResolutionIs(category="refunded", also=["vanished"]))
+    )
     spec.tools = [t for t in spec.tools if t.name != "resolve"]
     problems = "\n".join(validate_spec(spec))
     for expected in ["duplicate tool 'get_order'", "orders has no field 'colour'",
                      "'nope' is not a parameter", "unknown collection 'ghosts'",
                      "enum parameter 'kind' has no enum", "owner_field 'owner' is not a field",
                      "unknown tool 'teleport'", "unknown operator '__foo'",
+                     "'vanished' is not a resolution category",
                      "no tool has a resolve effect"]:  # fmt: skip
         assert expected in problems, expected
 

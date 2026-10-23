@@ -103,9 +103,11 @@ def check_problems(spec: EnvSpec, check: Check, label: str) -> list[str]:
     if isinstance(check, RecordExists | NoRecord):
         return _where_problems(spec, check.collection, check.where, label)
     if isinstance(check, ResolutionIs):
-        if check.category not in spec.resolution_categories:
-            return [f"{label}: '{check.category}' is not a resolution category"]
-        return []
+        return [
+            f"{label}: '{c}' is not a resolution category"
+            for c in check.categories()
+            if c not in spec.resolution_categories
+        ]
     if isinstance(check, ToolCalled | ToolNotCalled):
         tool = tools.get(check.tool)
         if tool is None:
