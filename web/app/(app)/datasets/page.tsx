@@ -230,8 +230,9 @@ function DatasetsInner() {
               </div>
               {kind === "preference" && (
                 <p className="hint mt-2">
-                  The failed side should come from the model you want to improve: run your adapter on training seeds ({TRAIN_SEED}+) and pick that run together
-                  with a teacher run on the same seeds.
+                  Best: pick only a run of the model you want to improve, made with several attempts per task at temperature &gt; 0 (Runs → sampling, training
+                  seeds {TRAIN_SEED}+). Its own successes and failures on the same task then pair up, so the only difference is the decision. Adding a teacher run
+                  supplies successes on tasks your model never solves, but teaches the teacher&apos;s style too.
                 </p>
               )}
             </fieldset>

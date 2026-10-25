@@ -455,6 +455,15 @@ def test_follow_pod_survives_progress_bar_carriage_returns():
     assert reads[1].startswith("tail -n +2 ") and reads[2].startswith("tail -n +3 ")  # real lines
 
 
+def test_events_after_a_progress_bar_on_the_same_line_are_read():
+    line = (
+        ' 5%|▍  | 3/63 [02:17<45:30, 45.52s/it]ENVFORGE {"event": "log", "step": 3, "loss": 0.64}'
+    )
+    assert remote.parse_events(line + "\nnoise ENVFORGE nope\n") == [
+        {"event": "log", "step": 3, "loss": 0.64}
+    ]
+
+
 def test_follow_pod_reports_failure_code():
     box = FakePodBox(exists=True, logs=["Traceback\n"], exit_code=1)
     events = list(remote.follow(box, "v1", sleep=lambda s: None, runtime="pod"))

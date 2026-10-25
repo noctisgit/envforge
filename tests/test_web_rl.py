@@ -191,3 +191,23 @@ def test_preference_dataset_filters_are_checked(client, bad):  # noqa: F811
     ws = _ws(client)
     r = client.post(f"/api/workspaces/{ws['id']}/datasets/preview", json={"run_ids": ["x"], **bad})
     assert r.status_code == 422
+
+
+def test_runs_take_attempts_per_task_and_temperature(client):  # noqa: F811
+    from envforge.core.trajectory import load_run
+    from envforge.web.worker import run_forever
+
+    _signup(client)
+    ws = _ws(client)
+    url = f"/api/workspaces/{ws['id']}/runs"
+    body = {"model": "scripted", "pack": "netops", "episodes": 6, "seed_start": 10_000}
+    assert client.post(url, json={**body, "repeats": 33}).status_code == 422
+    r = client.post(url, json={**body, "repeats": 3, "temperature": 0.8})
+    assert r.status_code == 202, r.text
+    assert r.json()["repeats"] == 3 and r.json()["temperature"] == 0.8
+    assert run_forever(once=True, kind="runs") == 1
+    with dbmod.session_factory()() as db:
+        from envforge.web.models import Run
+
+        row = db.get(Run, r.json()["id"])
+        assert [t.task.seed for t in load_run(row.run_dir)] == [10_000] * 3 + [10_001] * 3

@@ -51,6 +51,7 @@ def create_run(
         max_steps=body.max_steps,
         temperature=body.temperature,
         label=body.label,
+        repeats=body.repeats,
     )
     return _out(run)
 

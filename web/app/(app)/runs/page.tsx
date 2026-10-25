@@ -49,6 +49,10 @@ export default function RunsPage() {
   const [tiers, setTiers] = useState<number[]>([]);
   const [label, setLabel] = useState("");
   const [seedStart, setSeedStart] = useState(0);
+  // sampling: several varied attempts per task (on-policy preference pairs, GRPO-style data)
+  const [showSampling, setShowSampling] = useState(false);
+  const [repeats, setRepeats] = useState(1);
+  const [temperature, setTemperature] = useState(0);
   const [busy, setBusy] = useState(false);
   const [picked, setPicked] = useState<string[]>([]);
   const [filter, setFilter] = useState<Filter>("all");
@@ -114,7 +118,7 @@ export default function RunsPage() {
     e.preventDefault();
     setBusy(true);
     try {
-      const run = await Api.createRun(ws!.id, { model, pack, episodes, tiers, label, seed_start: seedStart });
+      const run = await Api.createRun(ws!.id, { model, pack, episodes, tiers, label, seed_start: seedStart, repeats, temperature });
       setLabel("");
       toast({
         tone: "success",
@@ -308,6 +312,35 @@ export default function RunsPage() {
             <button className="btn btn-field w-full" disabled={busy || !model.trim()}>
               Queue run
             </button>
+          </div>
+          <div className="md:col-span-6 2xl:col-span-12">
+            <button type="button" className="hint underline" onClick={() => setShowSampling((x) => !x)} aria-expanded={showSampling}>
+              {showSampling ? "Hide" : "Show"} sampling{repeats > 1 || temperature > 0 ? ` (${repeats} attempts per task, temperature ${temperature})` : ""}
+            </button>
+            {showSampling && (
+              <div className="mt-3 grid grid-cols-2 items-start gap-4 md:grid-cols-6 2xl:grid-cols-12">
+                <div className="md:col-span-2">
+                  <label className="label" htmlFor="run-repeats">
+                    Attempts per task
+                  </label>
+                  <input id="run-repeats" className="input" type="number" min={1} max={32} value={repeats} onChange={(e) => setRepeats(Math.max(1, Math.min(32, Number(e.target.value))))} />
+                  <p className="hint mt-1">
+                    {repeats > 1 ? `${episodes} episodes = ${Math.ceil(episodes / repeats)} tasks × ${repeats} attempts` : "each episode is a different task"}
+                  </p>
+                </div>
+                <div className="md:col-span-2">
+                  <label className="label" htmlFor="run-temp">
+                    Temperature
+                  </label>
+                  <input id="run-temp" className="input" type="number" min={0} max={2} step={0.1} value={temperature} onChange={(e) => setTemperature(Math.max(0, Math.min(2, Number(e.target.value))))} />
+                  <p className="hint mt-1">0 = the model&apos;s single best guess; 0.7–1 makes repeated attempts differ</p>
+                </div>
+                <p className="hint md:col-span-2 2xl:col-span-8 self-center">
+                  Several varied attempts at the same training task give pairs of your model&apos;s own success and failure: the best data for DPO. Keep evaluation runs at 1
+                  attempt and temperature 0.
+                </p>
+              </div>
+            )}
           </div>
         </form>
       </Panel>

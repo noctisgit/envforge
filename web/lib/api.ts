@@ -310,6 +310,7 @@ export interface Run {
   seed_start: number;
   max_steps: number | null;
   temperature: number;
+  repeats?: number; // attempts per task in a row (sampled when temperature > 0)
   label: string;
   status: "queued" | "running" | "completed" | "failed" | "cancelled";
   progress: number;

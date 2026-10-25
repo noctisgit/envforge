@@ -93,6 +93,9 @@ class RunIn(BaseModel):
     max_steps: int | None = Field(default=None, ge=1, le=200)
     temperature: float = Field(default=0.0, ge=0, le=2)
     label: str = Field(default="", max_length=200)
+    # attempts per task in a row (same seed); with temperature > 0 they differ, which is
+    # what on-policy preference pairs and GRPO groups are made of
+    repeats: int = Field(default=1, ge=1, le=32)
 
 
 class RunOut(BaseModel):
@@ -105,6 +108,7 @@ class RunOut(BaseModel):
     seed_start: int
     max_steps: int | None
     temperature: float
+    repeats: int = 1
     label: str
     status: str
     progress: int

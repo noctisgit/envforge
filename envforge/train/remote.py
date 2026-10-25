@@ -362,12 +362,16 @@ def status(box: ComputeBox, name: str, *, runtime: Runtime = "docker") -> TrainS
 
 
 def parse_events(log_text: str) -> list[dict[str, Any]]:
-    """Pull sft.py's `ENVFORGE {json}` progress lines out of mixed container output."""
+    """Pull the scripts' `ENVFORGE {json}` progress lines out of mixed container output.
+
+    An event can start mid-line: a progress bar leaves the cursor at the end of its line,
+    so the next print continues it ("… 45.52s/it]ENVFORGE {...}")."""
     events = []
     for line in log_text.splitlines():
-        if line.startswith("ENVFORGE "):
+        at = line.find("ENVFORGE {")
+        if at >= 0:
             try:
-                events.append(json.loads(line[len("ENVFORGE ") :]))
+                events.append(json.loads(line[at + len("ENVFORGE ") :]))
             except json.JSONDecodeError:
                 continue
     return events
