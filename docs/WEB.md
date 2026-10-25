@@ -334,6 +334,7 @@ Commit the generated file under `envforge/web/migrations/versions/`.
 | GET/POST | `/api/workspaces/{id}/gpu-boxes` | list (keys masked, `can_manage`) / add a GPU box (admin) |
 | GET | `/api/workspaces/{id}/gpu-boxes/ssh-key` | the workspace's public SSH key (created on first ask by someone who may manage boxes; `null` until then) |
 | POST | `/api/workspaces/{id}/gpu-boxes/ssh-key/rotate` | replace the workspace key pair (admin) |
+| POST | `/api/workspaces/{id}/gpu-boxes/{box}/vllm-key` | set the key vLLM requires `{key}` (admin; only while vLLM is stopped; never returned) |
 | DELETE | `/api/workspaces/{id}/gpu-boxes/{box}` | stop vLLM on the box, then forget it (202, a job); `?force=true` forgets it now without touching the machine (204) (admin) |
 | POST | `/api/workspaces/{id}/gpu-boxes/{box}/check` | queue a readiness check (admin) |
 | POST | `/api/workspaces/{id}/gpu-boxes/{box}/serve` | queue vLLM serving `{model, adapters?, max_model_len?}` (admin) |

@@ -29,6 +29,10 @@ class BoxIn(BaseModel):
     hourly_usd: float | None = Field(default=None, ge=0, le=1000)
 
 
+class VllmKeyIn(BaseModel):
+    key: str = Field(min_length=16, max_length=500)
+
+
 class ServeIn(BaseModel):
     model: str = Field(min_length=1, max_length=200)
     adapters: list[str] = Field(default_factory=list, max_length=16)

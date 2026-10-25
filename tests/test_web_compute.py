@@ -821,3 +821,36 @@ def test_training_stops_vllm_to_free_the_gpu(client, fake_boxes, fast_polls):  #
     b = client.get(f"{p}/gpu-boxes").json()["boxes"][0]
     assert not fake.serving and b["serve_state"] == "stopped" and b["endpoint_url"] is None
     assert "netops-v1" in fake.trainings
+
+
+def test_vllm_key_can_be_changed_while_stopped_and_is_never_returned(client, fake_boxes):  # noqa: F811
+    from envforge.web import crypto
+    from envforge.web.models import GpuBox
+
+    _signup(client)
+    ws = _ws(client)
+    box = _add_box(client, ws["id"])
+    url = f"/api/workspaces/{ws['id']}/gpu-boxes/{box['id']}"
+    assert box["vllm_key_generated"] is True
+    new = "my-own-vllm-key-1234567890"
+    r = client.post(f"{url}/vllm-key", json={"key": new})
+    assert r.status_code == 200, r.text
+    assert r.json()["vllm_key"] == "…7890" and r.json()["vllm_key_generated"] is False
+    assert new not in r.text and new not in client.get(f"/api/workspaces/{ws['id']}/gpu-boxes").text
+    with dbmod.session_factory()() as db:
+        assert crypto.decrypt(db.get(GpuBox, box["id"]).vllm_key_ciphertext) == new
+    for bad in ("short-key", "has a space in the middle!!"):
+        assert client.post(f"{url}/vllm-key", json={"key": bad}).status_code in (400, 422)
+
+    # the next serve hands vLLM the new key (on stdin, never in argv)
+    client.post(f"{url}/serve", json={"model": "Qwen/Qwen2.5-0.5B-Instruct"})
+    _work()
+    fake = fake_boxes[box["id"]]
+    assert any(i and f"VLLM_API_KEY={new}" in i for i in fake.inputs)
+    assert not any(new in c for c in fake.commands)
+    # while vLLM serves, the key can't change (runs would send one the server doesn't know)
+    r = client.post(f"{url}/vllm-key", json={"key": "another-key-0987654321"})
+    assert r.status_code == 409 and "stop vLLM" in r.json()["detail"]
+
+    _second_user(client)  # someone else: not their workspace's box
+    assert client.post(f"{url}/vllm-key", json={"key": new}).status_code == 404

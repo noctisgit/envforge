@@ -509,6 +509,28 @@ def enqueue_box_job(
     return job
 
 
+def set_vllm_key(db: Session, ws: Workspace, user: User, box: GpuBox, key: str) -> GpuBox:
+    """Replace the key vLLM requires (e.g. one you know, to call the endpoint with curl).
+
+    vLLM gets its key when it starts, so this is only allowed while it is stopped: changed
+    under a running server, envforge's own runs would send a key the server doesn't know.
+    The key is stored encrypted and never returned, like the one generated at creation.
+    """
+    require_gpu_admin(user)
+    key = (key or "").strip()
+    if len(key) < 16 or any(c.isspace() for c in key):
+        raise HTTPException(400, "vLLM API key: at least 16 characters, no spaces")
+    if box.serve_state not in ("stopped", "failed") or active_box_job(db, box):
+        raise HTTPException(
+            409, f"stop vLLM on {box.name} first: the key is handed to vLLM when it starts"
+        )
+    box.vllm_key_ciphertext = crypto.encrypt(key)
+    box.vllm_key_masked = crypto.mask(key)
+    box.vllm_key_generated = False
+    db.commit()
+    return box
+
+
 def request_check(db: Session, ws: Workspace, user: User, box: GpuBox) -> Job:
     require_gpu_admin(user)
     return enqueue_box_job(db, box, user, "box_check")

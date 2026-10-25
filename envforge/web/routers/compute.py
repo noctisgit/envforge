@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from envforge.web import compute_service as C
 from envforge.web import services as svc
 from envforge.web.auth import current_user
-from envforge.web.compute_schemas import BoxIn, ServeIn
+from envforge.web.compute_schemas import BoxIn, ServeIn, VllmKeyIn
 from envforge.web.db import get_db
 from envforge.web.models import User
 from envforge.web.settings import get_settings
@@ -91,6 +91,14 @@ def serve(ws_id: str, box_id: str, body: ServeIn, user: User = Depends(current_u
     C.request_serve(db, ws, user, box, model=body.model, adapters=body.adapters,
                     max_model_len=body.max_model_len, gpu_memory_utilization=body.gpu_memory_utilization)  # fmt: skip
     return C.box_out(db, box)
+
+
+@router.post("/{box_id}/vllm-key")
+def set_vllm_key(ws_id: str, box_id: str, body: VllmKeyIn, user: User = Depends(current_user),
+                 db: Session = Depends(get_db)) -> dict:  # fmt: skip
+    """Replace the key vLLM requires (admin; only while vLLM is stopped). Never returned."""
+    ws = svc.require_workspace(db, user, ws_id)
+    return C.box_out(db, C.set_vllm_key(db, ws, user, C.get_box(db, ws, box_id), body.key))
 
 
 @router.post("/{box_id}/stop", status_code=202)

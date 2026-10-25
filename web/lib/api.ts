@@ -866,6 +866,8 @@ export const Compute = {
   serve: (ws: string, id: string, body: { model: string; adapters?: string[]; max_model_len?: number | null; gpu_memory_utilization?: number }) =>
     api<GpuBox>(`${W(ws)}/gpu-boxes/${id}/serve`, post(body)),
   stop: (ws: string, id: string) => api<GpuBox>(`${W(ws)}/gpu-boxes/${id}/stop`, post()),
+  // replace the key vLLM requires (only while it is stopped); the key is never sent back
+  setVllmKey: (ws: string, id: string, key: string) => api<GpuBox>(`${W(ws)}/gpu-boxes/${id}/vllm-key`, post({ key })),
   // the workspace's SSH key: created on first ask by someone who may manage boxes (null until then)
   sshKey: (ws: string) => api<{ key: WorkspaceSshKey | null }>(`${W(ws)}/gpu-boxes/ssh-key`),
   rotateSshKey: (ws: string) => api<{ key: WorkspaceSshKey | null }>(`${W(ws)}/gpu-boxes/ssh-key/rotate`, post()),
