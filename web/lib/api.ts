@@ -654,6 +654,7 @@ export interface GpuBox {
   user: string;
   runtime: "docker" | "pod" | "auto";
   detected_runtime: "docker" | "pod" | null;
+  ssh_key_source: "workspace" | "custom"; // the workspace's SSH key, or one pasted for this box
   ssh_key_fingerprint: string; // masked
   vllm_key: string | null; // masked
   vllm_key_generated: boolean;
@@ -661,6 +662,7 @@ export interface GpuBox {
   vllm_port: number;
   endpoint_host: string | null;
   bind: string | null;
+  vllm_access: "direct" | "tunnel"; // tunnel = vLLM reached through an SSH port forward
   hourly_usd: number | null;
   status: "unknown" | "ok" | "degraded" | "unreachable";
   check_result: BoxCheck | null;
@@ -674,6 +676,11 @@ export interface GpuBox {
   created_at: string;
   job: { id: string; kind: string; status: string; progress: string } | null;
 }
+export interface WorkspaceSshKey {
+  public_key: string; // one line, for RunPod / Vast "SSH public keys"
+  fingerprint: string;
+  created_at: string | null;
+}
 export interface BoxesResponse {
   boxes: GpuBox[];
   can_manage: boolean;
@@ -684,11 +691,12 @@ export interface BoxIn {
   host: string;
   port: number;
   user: string;
-  ssh_private_key: string;
+  ssh_private_key?: string | null; // empty: the workspace SSH key
   runtime: "docker" | "pod" | "auto";
   vllm_port: number;
   endpoint_host?: string | null;
   bind?: string | null;
+  vllm_access?: "direct" | "tunnel" | null; // null: picked from the host
   vllm_api_key?: string | null;
   hf_token?: string | null;
   hourly_usd?: number | null;
@@ -812,6 +820,9 @@ export const Compute = {
   serve: (ws: string, id: string, body: { model: string; adapters?: string[]; max_model_len?: number | null; gpu_memory_utilization?: number }) =>
     api<GpuBox>(`${W(ws)}/gpu-boxes/${id}/serve`, post(body)),
   stop: (ws: string, id: string) => api<GpuBox>(`${W(ws)}/gpu-boxes/${id}/stop`, post()),
+  // the workspace's SSH key: created on first ask by someone who may manage boxes (null until then)
+  sshKey: (ws: string) => api<{ key: WorkspaceSshKey | null }>(`${W(ws)}/gpu-boxes/ssh-key`),
+  rotateSshKey: (ws: string) => api<{ key: WorkspaceSshKey | null }>(`${W(ws)}/gpu-boxes/ssh-key/rotate`, post()),
 
   datasetSources: (ws: string) => api<DatasetSource[]>(`${W(ws)}/datasets/sources`),
   previewDataset: (ws: string, f: DatasetFilters) => api<DatasetPreview>(`${W(ws)}/datasets/preview`, post(f)),

@@ -664,3 +664,140 @@ def test_ssh_box_uses_only_the_stored_key_and_removes_it(client, monkeypatch):  
     assert f"UserKnownHostsFile={C.known_hosts_path(box['id'])}" in argv
     assert seen["argv"][-2] == "root@100.64.0.7"
     assert seen["timeout"] == get_settings().COMPUTE_SSH_TIMEOUT_S  # never unbounded
+
+
+# ---- without Tailscale: the workspace SSH key and vLLM through an SSH tunnel -------------
+
+
+def _public_of(private_key: str) -> str:
+    from cryptography.hazmat.primitives import serialization
+
+    key = serialization.load_ssh_private_key(private_key.encode(), password=None)
+    return (
+        key.public_key()
+        .public_bytes(serialization.Encoding.OpenSSH, serialization.PublicFormat.OpenSSH)
+        .decode()
+    )
+
+
+def test_box_without_a_key_logs_in_with_the_workspace_key(client, monkeypatch):  # noqa: F811
+    from envforge.compute.base import CommandResult
+    from envforge.web import crypto
+    from envforge.web.models import GpuBox, Workspace
+
+    _signup(client)
+    ws = _ws(client)
+    url = f"/api/workspaces/{ws['id']}/gpu-boxes"
+    r = client.post(url, json={"name": "pod-1", "host": "100.64.0.8"})
+    assert r.status_code == 201, r.text
+    box = r.json()
+    assert box["ssh_key_source"] == "workspace"
+    key = client.get(f"{url}/ssh-key").json()["key"]
+    assert key["public_key"].startswith("ssh-ed25519 ") and key["public_key"].endswith(
+        f"envforge-{ws['slug']}"
+    )
+    assert box["ssh_key_fingerprint"] == C.mask_fingerprint(key["fingerprint"])
+    for text in (r.text, client.get(url).text, client.get(f"{url}/ssh-key").text):
+        assert "PRIVATE KEY" not in text
+
+    seen: dict = {}
+
+    def fake_runner(argv, *, input=None, timeout=None):
+        seen["key"] = Path(argv[argv.index("-i") + 1]).read_text()
+        return CommandResult(0, "ok\n", "")
+
+    monkeypatch.setattr(C, "subprocess_runner", fake_runner)
+    with dbmod.session_factory()() as db:
+        row = db.get(GpuBox, box["id"])
+        assert row.ssh_key_ciphertext is None
+        with C.open_box(db, row) as cb:
+            cb.run(["true"])
+        stored = crypto.decrypt(db.get(Workspace, ws["id"]).ssh_key_ciphertext)
+    assert seen["key"] == stored
+    assert _public_of(stored) == " ".join(key["public_key"].split()[:2])
+
+
+def test_workspace_key_rotation_and_who_sees_it(client, monkeypatch):  # noqa: F811
+    _signup(client)  # admin
+    ws_a = _ws(client)
+    url_a = f"/api/workspaces/{ws_a['id']}/gpu-boxes"
+    first = client.get(f"{url_a}/ssh-key").json()["key"]
+    again = client.get(f"{url_a}/ssh-key").json()["key"]
+    assert again["public_key"] == first["public_key"]  # created once, then stable
+    rotated = client.post(f"{url_a}/ssh-key/rotate").json()["key"]
+    assert rotated["public_key"] != first["public_key"]
+
+    ws_b = _second_user(client)  # not an admin, GPU boxes admin-only: no key is created
+    url_b = f"/api/workspaces/{ws_b['id']}/gpu-boxes"
+    assert client.get(f"{url_b}/ssh-key").json()["key"] is None
+    assert client.post(f"{url_b}/ssh-key/rotate").status_code == 403
+    assert client.get(f"{url_a}/ssh-key").status_code == 404  # another workspace's key
+    assert client.post(f"{url_a}/ssh-key/rotate").status_code == 404
+
+    monkeypatch.setenv("GPU_BOXES_ADMIN_ONLY", "false")
+    get_settings.cache_clear()
+    try:
+        key_b = client.get(f"{url_b}/ssh-key").json()["key"]
+        assert key_b and key_b["public_key"] != rotated["public_key"]  # one key per workspace
+    finally:
+        get_settings.cache_clear()
+
+
+def test_default_vllm_access_follows_the_host():
+    assert C.default_vllm_access("100.64.0.7") == "direct"  # tailnet
+    assert C.default_vllm_access("gpu-1") == "direct"  # MagicDNS short name / ssh alias
+    assert C.default_vllm_access("gpu-1.tail1234.ts.net") == "direct"
+    assert C.default_vllm_access("10.0.0.5") == "direct"
+    assert C.default_vllm_access("1.2.3.4") == "tunnel"  # a rented pod's public address
+    assert C.default_vllm_access("pod.example.com") == "tunnel"
+
+
+def test_tunnel_box_serves_and_runs_through_the_tunnel(client, fake_boxes):  # noqa: F811
+    import contextlib
+
+    from envforge.web.models import GpuBox, Run
+    from envforge.web.worker import run_forever
+
+    _signup(client)
+    ws = _ws(client)
+    url = f"/api/workspaces/{ws['id']}/gpu-boxes"
+    r = client.post(url, json={"name": "pod-1", "host": "1.2.3.4", "port": 22007,
+                               "vllm_api_key": "tunnel-key-1234"})  # fmt: skip
+    assert r.status_code == 201, r.text
+    box = r.json()
+    assert box["vllm_access"] == "tunnel" and box["ssh_key_source"] == "workspace"
+    assert (
+        client.post(
+            f"{url}/{box['id']}/serve", json={"model": "Qwen/Qwen2.5-0.5B-Instruct"}
+        ).status_code
+        == 202
+    )
+    _work()
+    b = client.get(url).json()["boxes"][0]
+    assert b["serve_state"] == "serving", b["serve_error"]
+    assert b["endpoint_url"] == "http://127.0.0.1:8000/v1"  # box-local: only the tunnel reaches it
+    fake = fake_boxes[box["id"]]
+    assert (
+        fake.tunnels == [("127.0.0.1", 8000)] and fake.open_tunnels == 0
+    )  # health check went through it
+    run_cmd = next(c for c in fake.commands if "docker run" in c)
+    assert "127.0.0.1:8000:8000" in run_cmd  # vLLM published on the box's loopback only
+
+    r = client.post(f"/api/workspaces/{ws['id']}/runs",
+                    json={"model": "vllm:Qwen/Qwen2.5-0.5B-Instruct", "episodes": 1})  # fmt: skip
+    assert r.status_code == 202, r.text
+    with dbmod.session_factory()() as db:
+        run = db.get(Run, r.json()["id"])
+        with pytest.raises(RuntimeError, match="SSH tunnel"):
+            C.endpoint_for_run(db, run)  # needs a stack to hold the tunnel open
+        with contextlib.ExitStack() as stack:
+            assert C.endpoint_for_run(db, run, stack) == (
+                "tunnel-key-1234",
+                "http://127.0.0.1:8000/v1",
+            )
+            assert fake.open_tunnels == 1
+        assert fake.open_tunnels == 0
+        assert db.get(GpuBox, box["id"]).vllm_access == "tunnel"
+    # the worker opens the tunnel for the run and closes it when the run ends
+    assert run_forever(once=True, kind="runs") == 1
+    assert len(fake.tunnels) == 3 and fake.open_tunnels == 0

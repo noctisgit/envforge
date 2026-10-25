@@ -11,6 +11,7 @@ heartbeats the run, and any worker fails runs whose heartbeat went stale.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import threading
 import time
@@ -126,6 +127,12 @@ def reap_stale(db: Session) -> int:
 
 
 def execute(db: Session, run: Run) -> None:
+    # anything the run holds open (a GPU box's SSH tunnel) closes when the run ends
+    with contextlib.ExitStack() as stack:
+        _execute(db, run, stack)
+
+
+def _execute(db: Session, run: Run, stack: contextlib.ExitStack) -> None:
     ws = db.get(Workspace, run.workspace_id)
     assert ws is not None
     provider = svc.provider_of(run.model)
@@ -135,7 +142,7 @@ def execute(db: Session, run: Run) -> None:
         elif run.gpu_box_id:  # served by one of the workspace's GPU boxes
             from envforge.web.compute_service import endpoint_for_run
 
-            api_key, base_url = endpoint_for_run(db, run)
+            api_key, base_url = endpoint_for_run(db, run, stack)
         else:
             api_key, base_url = svc.resolve_key(db, run.created_by, provider)
         model = load_model(

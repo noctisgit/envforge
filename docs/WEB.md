@@ -125,11 +125,14 @@ browser, reusing the same code (`envforge/compute`, `envforge/train`). Logic liv
 `envforge/web/compute_service.py` and `training_service.py`; the routers are thin.
 
 - **GPU boxes** (Settings → GPU boxes). A box row holds host, SSH port, user, runtime
-  (docker / pod / auto), the vLLM port, an optional endpoint host / bind address, an
-  optional $/hour, and three secrets, all Fernet-encrypted like provider keys: the SSH
-  private key (validated, no passphrase; responses show only a masked `SHA256:` public
-  fingerprint), the vLLM API key (generated when left empty, sent to vLLM on stdin) and
-  an optional Hugging Face token. **Check**, **Serve** and **Stop** are jobs for the
+  (docker / pod / auto), the vLLM port, an optional endpoint host / bind address, how the
+  worker reaches vLLM (`direct`, or `tunnel` through an SSH port forward; picked from the
+  host when left empty), an optional $/hour, and secrets, all Fernet-encrypted like provider
+  keys: the SSH private key, the vLLM API key (generated when left empty, sent to vLLM on
+  stdin) and an optional Hugging Face token. The SSH key is either pasted for that box
+  (validated, no passphrase) or, by default, the **workspace SSH key**: a key pair generated
+  per workspace on first use, whose public half the page shows for adding once to
+  RunPod / Vast. Responses show public keys and masked `SHA256:` fingerprints only. **Check**, **Serve** and **Stop** are jobs for the
   compute worker; a check stores GPU model, VRAM, driver/CUDA, free disk, vLLM presence,
   reachability and the time. **Remove** is a job too: it stops vLLM on the box, then
   forgets the box (row, key, pinned host key). If the box can't be reached the removal
@@ -318,6 +321,8 @@ Commit the generated file under `envforge/web/migrations/versions/`.
 | GET | `/api/workspaces/{id}/usage?days=30` | workspace usage by day, model, member |
 | GET | `/api/auth/me/usage?days=30` | your usage across your workspaces |
 | GET/POST | `/api/workspaces/{id}/gpu-boxes` | list (keys masked, `can_manage`) / add a GPU box (admin) |
+| GET | `/api/workspaces/{id}/gpu-boxes/ssh-key` | the workspace's public SSH key (created on first ask by someone who may manage boxes; `null` until then) |
+| POST | `/api/workspaces/{id}/gpu-boxes/ssh-key/rotate` | replace the workspace key pair (admin) |
 | DELETE | `/api/workspaces/{id}/gpu-boxes/{box}` | stop vLLM on the box, then forget it (202, a job); `?force=true` forgets it now without touching the machine (204) (admin) |
 | POST | `/api/workspaces/{id}/gpu-boxes/{box}/check` | queue a readiness check (admin) |
 | POST | `/api/workspaces/{id}/gpu-boxes/{box}/serve` | queue vLLM serving `{model, adapters?, max_model_len?}` (admin) |

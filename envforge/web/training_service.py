@@ -125,7 +125,9 @@ def _summary(out_dir: Path, rep: ds.DatasetReport) -> dict[str, Any]:
         p = out_dir / split
         if p.exists():
             for line in p.read_text(encoding="utf-8").splitlines():
-                tid = json.loads(line).get("meta", {}).get("task_id", "?")
+                meta = json.loads(line).get("meta", {})
+                # a declarative task is its record, not the seed that picked it
+                tid = meta.get("task_record") or meta.get("task_id", "?")
                 per_task[tid] = per_task.get(tid, 0) + 1
     counts = list(per_task.values()) or [0]
     return {

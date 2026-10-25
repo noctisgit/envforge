@@ -11,7 +11,7 @@ turns kept trajectories into files a trainer can read:
     {"messages": [{"role": "system", ...}, {"role": "user", ...},
                   {"role": "assistant", "content": "...", "tool_calls": [...]},
                   {"role": "tool", "tool_call_id": "...", "content": "..."}, ...],
-     "tools": [...], "meta": {"run_id": ..., "episode": ..., "task_id": ..., "reward": ...}}
+     "tools": [...], "meta": {"run_id": ..., "episode": ..., "task_id": ..., "task_record": ..., "reward": ...}}
 
 The selection itself (`filter_trajectories`) lives in core/evaluate.py because the
 evaluator and the CLI share it.
@@ -67,6 +67,8 @@ def to_chat_example(t: Trajectory, tools: list[dict[str, Any]] | None = None) ->
             "episode": t.episode,
             "model": t.model,
             "task_id": t.task.id,
+            # declarative packs: the task record (one chat, whatever seed picked it)
+            "task_record": t.task.hidden.get("task_record"),
             "tier": t.task.tier,
             "reward": t.reward,
         },

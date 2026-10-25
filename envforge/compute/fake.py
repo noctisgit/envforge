@@ -39,6 +39,29 @@ class _Response(io.BytesIO):
         self.close()
 
 
+class _FakeTunnel:
+    """Stands in for an SSH tunnel: the "local" URL keeps the remote port, so `urlopen`
+    still knows which server is meant."""
+
+    def __init__(self, box: FakeGPUBox, remote_host: str, remote_port: int) -> None:
+        self.box, self.remote_host, self.remote_port = box, remote_host, remote_port
+
+    def url(self, path: str = "/v1") -> str:
+        return f"http://127.0.0.1:{self.remote_port}{path}"
+
+    def __enter__(self) -> _FakeTunnel:
+        if self.box.unreachable:
+            from envforge.compute.base import ComputeError
+
+            raise ComputeError("ssh tunnel exited: ssh: connect to host: Connection timed out")
+        self.box.tunnels.append((self.remote_host, self.remote_port))
+        self.box.open_tunnels += 1
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.box.open_tunnels -= 1
+
+
 class FakeGPUBox(ComputeBox):
     """A scripted GPU box (docker runtime). See the module docstring."""
 
@@ -65,6 +88,10 @@ class FakeGPUBox(ComputeBox):
         self.serving: dict[int, dict[str, Any]] = {}  # port -> {"model", "adapters"}
         self.trainings: dict[str, dict[str, Any]] = {}  # adapter name -> state
         self.adapters: set[str] = set()  # finished adapters on the "disk"
+        self.tunnels: list[
+            tuple[str, int]
+        ] = []  # (remote host, remote port) of every tunnel opened
+        self.open_tunnels = 0
         self.closed = False
 
     # ------------------------------------------------------------------ helpers
@@ -209,6 +236,9 @@ class FakeGPUBox(ComputeBox):
         manifest = {"base_model": "fake", "n_train": 10, "global_step": 4,
                     "final_train_loss": 0.5, "final_eval_loss": 0.61}  # fmt: skip
         (out / "envforge_manifest.json").write_text(json.dumps(manifest))
+
+    def tunnel(self, remote_port: int, remote_host: str = "127.0.0.1") -> _FakeTunnel:
+        return _FakeTunnel(self, remote_host, remote_port)
 
     def close(self) -> None:
         self.closed = True

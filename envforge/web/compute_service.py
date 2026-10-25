@@ -1,8 +1,16 @@
 """GPU boxes in the browser: storage, access rules, and the worker jobs that drive them.
 
 A *GPU box* row holds what `envforge compute ...` takes as flags (host, SSH port, user,
-runtime) plus the SSH private key, encrypted with the same Fernet helper as provider
-keys. The API only ever returns the key's (masked) public fingerprint. Everything that
+runtime) plus how to log in: either its own SSH private key, or (the default) the
+*workspace SSH key*, a key pair envforge generates per workspace whose public half you
+paste once into RunPod/Vast so every new pod accepts it. Private keys are encrypted with
+the same Fernet helper as provider keys; the API only returns public keys and (masked)
+fingerprints.
+
+How the control plane reaches vLLM on a box (`vllm_access`): `direct` talks to
+`http://<endpoint host>:<port>/v1` (Tailscale, or a port the provider opens); `tunnel`
+forwards a local port over the box's SSH connection (compute/tunnel.py), so a pod needs
+nothing but SSH reachable and vLLM listens on 127.0.0.1 only. Everything that
 touches the box runs in the worker (`envforge-worker --kind compute`) as a row in the
 `jobs` table, reusing `envforge.compute` unchanged:
 
@@ -23,6 +31,8 @@ Security rules, all enforced here (routers stay thin):
   as an argv list (`shlex`-quoted by `ComputeBox.run`).
 - The decrypted SSH key exists only inside `open_box`: a mode-600 file in a private
   temporary directory, removed when the job's connection closes. It is never logged.
+- The workspace SSH key belongs to one workspace: a box only ever logs in with its own
+  key or its own workspace's key, so one workspace's key never opens another's pods.
 - A box created by a non-admin must resolve to a public address (private ranges and
   the tailnet are admin-only, like vLLM base URLs); checked when saved and again
   before every connection and on its endpoint URL.
@@ -144,7 +154,12 @@ def ssh_key_fingerprint(private_key: str) -> str:
     blob = key.public_key().public_bytes(
         serialization.Encoding.OpenSSH, serialization.PublicFormat.OpenSSH
     )
-    raw = base64.b64decode(blob.split()[1])
+    return public_key_fingerprint(blob.decode())
+
+
+def public_key_fingerprint(public_key: str) -> str:
+    """`SHA256:...` of an OpenSSH public key line (`ssh-ed25519 AAAA... comment`)."""
+    raw = base64.b64decode(public_key.split()[1])
     digest = base64.b64encode(hashlib.sha256(raw).digest()).decode().rstrip("=")
     return f"SHA256:{digest}"
 
@@ -195,6 +210,86 @@ def _creator_is_admin(db: Session, box: GpuBox) -> bool:
     return bool(u and u.is_admin)
 
 
+# ---- the workspace SSH key ---------------------------------------------------------------
+
+
+def _new_key_pair(comment: str) -> tuple[str, str]:
+    """(OpenSSH private key, `ssh-ed25519 AAAA... comment` public line), no passphrase."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ed25519
+
+    key = ed25519.Ed25519PrivateKey.generate()
+    private = key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.OpenSSH,
+        serialization.NoEncryption(),
+    ).decode()
+    public = (
+        key.public_key()
+        .public_bytes(serialization.Encoding.OpenSSH, serialization.PublicFormat.OpenSSH)
+        .decode()
+    )
+    return private, f"{public} envforge-{comment}"
+
+
+def _store_workspace_key(db: Session, ws: Workspace) -> None:
+    private, public = _new_key_pair(ws.slug)
+    ws.ssh_key_ciphertext = crypto.encrypt(private)
+    ws.ssh_public_key = public
+    ws.ssh_key_created_at = datetime.now(UTC)
+    db.commit()
+
+
+def workspace_key_out(ws: Workspace) -> dict[str, Any] | None:
+    if not ws.ssh_public_key:
+        return None
+    return {
+        "public_key": ws.ssh_public_key,
+        "fingerprint": public_key_fingerprint(ws.ssh_public_key),
+        "created_at": ws.ssh_key_created_at,
+    }
+
+
+def workspace_ssh_key(db: Session, ws: Workspace, user: User) -> dict[str, Any] | None:
+    """The workspace's public SSH key, generated the first time someone who may manage
+    GPU boxes asks for it. Members who can't manage boxes see it once it exists."""
+    if not ws.ssh_public_key and can_manage(user):
+        _store_workspace_key(db, ws)
+    return workspace_key_out(ws)
+
+
+def rotate_workspace_key(db: Session, ws: Workspace, user: User) -> dict[str, Any] | None:
+    """Replace the key pair. Pods that only know the old public key stop accepting the
+    boxes that use the workspace key until the new one is added to the provider."""
+    require_gpu_admin(user)
+    _store_workspace_key(db, ws)
+    return workspace_key_out(ws)
+
+
+def _box_private_key(db: Session, box: GpuBox) -> str:
+    """The key this box logs in with: its own, or its workspace's. Worker only."""
+    if box.ssh_key_ciphertext:
+        return crypto.decrypt(box.ssh_key_ciphertext)
+    ws = db.get(Workspace, box.workspace_id)
+    if ws is None or not ws.ssh_key_ciphertext:
+        raise ComputeError(
+            "this box logs in with the workspace SSH key, but the workspace has none yet; "
+            "open Settings → GPU boxes to create it"
+        )
+    return crypto.decrypt(ws.ssh_key_ciphertext)
+
+
+def default_vllm_access(host: str) -> str:
+    """`direct` for tailnet / private addresses and names (Tailscale MagicDNS, ssh aliases),
+    `tunnel` for public ones, where only the provider's SSH port is reliably reachable."""
+    bare = host.strip("[]")
+    try:
+        ip = ipaddress.ip_address(bare)
+    except ValueError:
+        return "direct" if bare.endswith(".ts.net") or "." not in bare else "tunnel"
+    return "tunnel" if ip.is_global else "direct"
+
+
 def get_box(db: Session, ws: Workspace, box_id: str) -> GpuBox:
     """The box with this id *in this workspace*, or 404."""
     box = db.get(GpuBox, box_id)
@@ -237,6 +332,11 @@ def _delete_failed(db: Session, box: GpuBox) -> bool:
 def box_out(db: Session, box: GpuBox) -> dict[str, Any]:
     """What the API returns for a box: no secret, only masked forms."""
     job = active_box_job(db, box)
+    if box.ssh_key_ciphertext:
+        fingerprint = box.ssh_key_fingerprint or ""
+    else:
+        ws = db.get(Workspace, box.workspace_id)
+        fingerprint = public_key_fingerprint(ws.ssh_public_key) if ws and ws.ssh_public_key else ""
     return {
         "id": box.id,
         "name": box.name,
@@ -245,13 +345,15 @@ def box_out(db: Session, box: GpuBox) -> dict[str, Any]:
         "user": box.user,
         "runtime": box.runtime,
         "detected_runtime": box.detected_runtime,
-        "ssh_key_fingerprint": mask_fingerprint(box.ssh_key_fingerprint),
+        "ssh_key_source": "custom" if box.ssh_key_ciphertext else "workspace",
+        "ssh_key_fingerprint": mask_fingerprint(fingerprint),
         "vllm_key": box.vllm_key_masked,
         "vllm_key_generated": box.vllm_key_generated,
         "hf_token": box.hf_token_masked,
         "vllm_port": box.vllm_port,
         "endpoint_host": box.endpoint_host,
         "bind": box.bind,
+        "vllm_access": box.vllm_access,
         "hourly_usd": box.hourly_usd,
         "status": box.status,
         "check_result": box.check_result,
@@ -293,7 +395,11 @@ def create_box(db: Session, ws: Workspace, user: User, data: dict[str, Any]) -> 
         hourly = data.get("hourly_usd")
         if hourly is not None and not 0 <= float(hourly) <= 1000:
             raise ValueError("$/hour must be between 0 and 1000")
-        fingerprint = ssh_key_fingerprint(data.get("ssh_private_key") or "")
+        private_key = (data.get("ssh_private_key") or "").strip()
+        fingerprint = ssh_key_fingerprint(private_key) if private_key else None
+        vllm_access = data.get("vllm_access") or default_vllm_access(host)
+        if vllm_access not in ("direct", "tunnel"):
+            raise ValueError("vLLM access must be direct or tunnel")
         vllm_key = (data.get("vllm_api_key") or "").strip()
         hf_token = (data.get("hf_token") or "").strip()
         for label, value in (("vLLM API key", vllm_key), ("Hugging Face token", hf_token)):
@@ -310,6 +416,8 @@ def create_box(db: Session, ws: Workspace, user: User, data: dict[str, Any]) -> 
     if db.scalar(select(GpuBox).where(GpuBox.workspace_id == ws.id, GpuBox.name == name)):
         raise HTTPException(409, f"a box named {name} already exists in this workspace")
 
+    if not private_key and not ws.ssh_key_ciphertext:
+        _store_workspace_key(db, ws)  # no key pasted: log in with the workspace's
     generated = not vllm_key
     vllm_key = vllm_key or secrets.token_urlsafe(32)
     box = GpuBox(
@@ -319,7 +427,7 @@ def create_box(db: Session, ws: Workspace, user: User, data: dict[str, Any]) -> 
         port=port,
         user=user_name,
         runtime=runtime,
-        ssh_key_ciphertext=crypto.encrypt(data["ssh_private_key"].strip() + "\n"),
+        ssh_key_ciphertext=crypto.encrypt(private_key + "\n") if private_key else None,
         ssh_key_fingerprint=fingerprint,
         vllm_key_ciphertext=crypto.encrypt(vllm_key),
         vllm_key_masked=crypto.mask(vllm_key),
@@ -329,6 +437,7 @@ def create_box(db: Session, ws: Workspace, user: User, data: dict[str, Any]) -> 
         vllm_port=vllm_port,
         endpoint_host=endpoint_host,
         bind=bind,
+        vllm_access=vllm_access,
         hourly_usd=float(hourly) if hourly is not None else None,
         created_by=user.id,
     )
@@ -493,8 +602,31 @@ def box_for_model(db: Session, ws: Workspace, model_spec: str) -> GpuBox | None:
     return None
 
 
-def endpoint_for_run(db: Session, run: Run) -> tuple[str, str]:
-    """(api_key, base_url) for a run on a box endpoint. Worker only: decrypts the key."""
+def _tunnel_target(box: GpuBox) -> str:
+    """Where vLLM listens as seen from the box itself: its bind address, or loopback."""
+    if not box.bind or box.bind in ("0.0.0.0", "::", "[::]"):
+        return "127.0.0.1"
+    return box.bind
+
+
+@contextlib.contextmanager
+def box_base_url(box: GpuBox, cb: ComputeBox) -> Iterator[str]:
+    """The base URL the control plane uses for the box's vLLM while the block runs: the
+    stored endpoint, or (vllm_access=tunnel) a local port forwarded over `cb`'s SSH."""
+    if box.vllm_access == "tunnel":
+        with cb.tunnel(box.vllm_port, _tunnel_target(box)) as t:
+            yield t.url("/v1")
+    else:
+        yield box.endpoint_url or ""
+
+
+def endpoint_for_run(
+    db: Session, run: Run, stack: contextlib.ExitStack | None = None
+) -> tuple[str, str]:
+    """(api_key, base_url) for a run on a box endpoint. Worker only: decrypts the key.
+
+    A tunnel box needs `stack`: the SSH connection and the tunnel are entered on it, so
+    they stay open until the caller closes the stack (when the run ends)."""
     box = db.get(GpuBox, run.gpu_box_id) if run.gpu_box_id else None
     if box is None or box.workspace_id != run.workspace_id:
         raise PermissionError("the GPU box this run was queued on no longer exists")
@@ -505,9 +637,15 @@ def endpoint_for_run(db: Session, run: Run) -> tuple[str, str]:
         or (model_id != box.served_model and model_id not in (box.served_adapters or []))
     ):
         raise RuntimeError(f"GPU box {box.name} is not serving {model_id} any more; serve it again")
-    base_url = box.endpoint_url
-    if not _creator_is_admin(db, box):
-        base_url = _url_allowed(base_url)  # re-check: DNS can change
+    if box.vllm_access == "tunnel":
+        if stack is None:
+            raise RuntimeError(f"GPU box {box.name} is reached through an SSH tunnel (worker only)")
+        cb = stack.enter_context(open_box(db, box))  # re-checks a non-admin's host
+        base_url = stack.enter_context(box_base_url(box, cb))
+    else:
+        base_url = box.endpoint_url
+        if not _creator_is_admin(db, box):
+            base_url = _url_allowed(base_url)  # re-check: DNS can change
     return crypto.decrypt(box.vllm_key_ciphertext or ""), base_url
 
 
@@ -548,7 +686,7 @@ def _ssh_box(db: Session, box: GpuBox) -> Iterator[ComputeBox]:
     key_file = tmp / "id"
     try:
         key_file.touch(mode=0o600)
-        key_file.write_text(crypto.decrypt(box.ssh_key_ciphertext))
+        key_file.write_text(_box_private_key(db, box))
         options = {
             "UserKnownHostsFile": str(kh),
             "IdentitiesOnly": "yes",  # only this key, never the worker's agent or files
@@ -721,13 +859,15 @@ def serve_on_box(
                 cb.run(["mkdir", "-p", ADAPTERS_DIR], timeout=60, check=True)
                 cb.put(local, f"{ADAPTERS_DIR}/", recursive=True)
         _progress(db, job, f"starting vLLM with {model}")
+        tunnel = box.vllm_access == "tunnel"
         server = serve_vllm(
             cb,
             model,
             port=box.vllm_port,
             api_key=api_key,
             hf_token=hf_token,
-            bind=box.bind,
+            # through a tunnel nothing else needs to reach vLLM: listen on loopback only
+            bind=box.bind or ("127.0.0.1" if tunnel else None),
             endpoint_host=box.endpoint_host,
             lora_adapters=adapters,
             max_lora_rank=max_lora_rank,
@@ -735,9 +875,12 @@ def serve_on_box(
             gpu_memory_utilization=gpu_memory_utilization,
             runtime=runtime,  # type: ignore[arg-type]
         )
-        box.endpoint_url = server.base_url
+        # a tunnel box's endpoint is the box-local address the tunnel forwards to
+        box.endpoint_url = (
+            f"http://{_tunnel_target(box)}:{box.vllm_port}/v1" if tunnel else server.base_url
+        )
         db.commit()
-        if not _creator_is_admin(db, box):
+        if not tunnel and not _creator_is_admin(db, box):
             _url_allowed(server.base_url)
         _progress(db, job, "loading weights (the first start downloads them)")
 
@@ -747,13 +890,14 @@ def serve_on_box(
             return vllm_status(cb, box.vllm_port, runtime=runtime, probe=False).running  # type: ignore[arg-type]
 
         try:
-            ids = wait_healthy(
-                server.base_url,
-                timeout=get_settings().SERVE_HEALTH_TIMEOUT_S,
-                api_key=api_key,
-                is_alive=alive,
-                urlopen=getattr(cb, "urlopen", None),
-            )
+            with box_base_url(box, cb) as base_url:
+                ids = wait_healthy(
+                    base_url,
+                    timeout=get_settings().SERVE_HEALTH_TIMEOUT_S,
+                    api_key=api_key,
+                    is_alive=alive,
+                    urlopen=getattr(cb, "urlopen", None),
+                )
         except (ComputeError, TimeoutError) as e:
             tail = ""
             with contextlib.suppress(Exception):

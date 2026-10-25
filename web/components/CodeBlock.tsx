@@ -5,7 +5,7 @@
 
 import { useState } from "react";
 
-export function CodeBlock({ code, label }: { code: string; label?: string }) {
+export function CodeBlock({ code, label, wrap = false }: { code: string; label?: string; wrap?: boolean }) {
   const [copied, setCopied] = useState(false);
   async function copy() {
     try {
@@ -20,7 +20,7 @@ export function CodeBlock({ code, label }: { code: string; label?: string }) {
     <div className="min-w-0">
       {label && <div className="label">{label}</div>}
       <div className="relative">
-        <pre className="code-block overflow-x-auto pr-16 leading-5" style={{ whiteSpace: "pre", overflowWrap: "normal" }}>
+        <pre className="code-block overflow-x-auto pr-16 leading-5" style={wrap ? { whiteSpace: "pre-wrap", overflowWrap: "anywhere" } : { whiteSpace: "pre", overflowWrap: "normal" }}>
           {code}
         </pre>
         <button type="button" className="btn-ghost btn-sm absolute top-2 right-2" style={{ background: "var(--code-bg)" }} onClick={copy} aria-label={label ? `Copy ${label}` : "Copy"}>

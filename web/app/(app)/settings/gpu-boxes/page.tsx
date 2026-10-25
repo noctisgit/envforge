@@ -1,18 +1,20 @@
 "use client";
 
 // Settings → GPU boxes: the machines this workspace serves open models on and trains
-// LoRA adapters on. Add one (SSH key stored encrypted; only its fingerprint comes back),
-// check it, start / stop vLLM. Every action is a worker job; the page polls while one runs.
+// LoRA adapters on. Add one (logging in with the workspace SSH key, or a pasted key stored
+// encrypted; only fingerprints come back), check it, start / stop vLLM. Every action is a
+// worker job; the page polls while one runs.
 
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
+import { CodeBlock } from "@/components/CodeBlock";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { HubModelPicker } from "@/components/HubModelPicker";
 import { invalidateModelCache } from "@/components/ModelPicker";
 import { Empty, Page, PageHeader, Panel } from "@/components/Page";
 import { SettingsTabs } from "@/components/SettingsTabs";
 import { useToast } from "@/components/Toast";
-import { Compute, type BoxIn, type BoxesResponse, type GpuBox } from "@/lib/api";
+import { Compute, type BoxIn, type BoxesResponse, type GpuBox, type WorkspaceSshKey } from "@/lib/api";
 import { usePoll } from "@/lib/poll";
 import { useWorkspace } from "@/lib/workspace";
 
@@ -29,13 +31,76 @@ const JOB_LABEL: Record<string, string> = { box_check: "Checking", box_serve: "S
 const gib = (mib: number | null | undefined) => (mib ? `${(mib / 1024).toFixed(0)} GB` : "?");
 const ago = (iso: string | null) => (iso ? new Date(iso).toLocaleString() : "never");
 
-const BLANK: BoxIn = { name: "", host: "", port: 22, user: "root", ssh_private_key: "", runtime: "auto", vllm_port: 8000 };
+const BLANK: BoxIn = { name: "", host: "", port: 22, user: "root", ssh_private_key: "", runtime: "auto", vllm_port: 8000, vllm_access: null };
+
+// The workspace's own SSH key: paste the public half into the provider once and every new
+// pod accepts it, so adding a box needs only its address.
+function WorkspaceKeyPanel({ wsId, canManage }: { wsId: string; canManage: boolean }) {
+  const toast = useToast();
+  const confirm = useConfirm();
+  const [key, setKey] = useState<WorkspaceSshKey | null | undefined>(undefined);
+  useEffect(() => {
+    setKey(undefined);
+    Compute.sshKey(wsId)
+      .then((r) => setKey(r.key))
+      .catch((e) => toast.error("Couldn't load the workspace SSH key", e));
+  }, [wsId, toast]);
+
+  async function rotate() {
+    const ok = await confirm({
+      title: "Replace the workspace SSH key?",
+      body: "Boxes that log in with the workspace key will be refused by pods that only have the old public key. Add the new one to RunPod / Vast, then start new pods (or add it to running ones).",
+      confirmLabel: "Replace key",
+      tone: "danger",
+    });
+    if (!ok) return;
+    try {
+      setKey((await Compute.rotateSshKey(wsId)).key);
+      toast.success("New workspace SSH key", "Add the new public key to your GPU provider.");
+    } catch (ex) {
+      toast.error("Couldn't replace the key", ex);
+    }
+  }
+
+  if (key === undefined || (key === null && !canManage)) return null;
+  return (
+    <Panel title="Workspace SSH key" hint="Add this public key to your GPU provider once; every new pod then lets envforge in, with nothing to paste per box.">
+      {key === null ? (
+        <p className="hint">No key yet.</p>
+      ) : (
+        <div className="space-y-3">
+          <CodeBlock code={key.public_key} label="Public key" wrap />
+          <ul className="hint list-disc space-y-1 pl-5">
+            <li>
+              <b>RunPod:</b> Settings → SSH Public Keys → paste, save. Pods started from then on accept it (expose TCP port 22 if you don&apos;t use Tailscale).
+            </li>
+            <li>
+              <b>Vast:</b> Account → Keys → add SSH key.
+            </li>
+            <li>
+              <b>Your own VM:</b> append it to <span className="mono">~/.ssh/authorized_keys</span>.
+            </li>
+          </ul>
+          <div className="flex flex-wrap items-center gap-3">
+            <span className="mono hint [overflow-wrap:anywhere]">{key.fingerprint}</span>
+            {canManage && (
+              <button type="button" className="btn-ghost btn-sm" onClick={rotate}>
+                Replace key
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+    </Panel>
+  );
+}
 
 function AddBoxForm({ wsId, onDone, onCancel }: { wsId: string; onDone: () => void; onCancel?: () => void }) {
   const toast = useToast();
   const [f, setF] = useState<BoxIn>(BLANK);
   const [hourly, setHourly] = useState("");
   const [advanced, setAdvanced] = useState(false);
+  const [ownKey, setOwnKey] = useState(false);
   const [busy, setBusy] = useState(false);
   const set = <K extends keyof BoxIn>(k: K, v: BoxIn[K]) => setF((x) => ({ ...x, [k]: v }));
 
@@ -45,6 +110,7 @@ function AddBoxForm({ wsId, onDone, onCancel }: { wsId: string; onDone: () => vo
     try {
       await Compute.addBox(wsId, {
         ...f,
+        ssh_private_key: ownKey ? f.ssh_private_key : null,
         endpoint_host: f.endpoint_host || null,
         bind: f.bind || null,
         vllm_api_key: f.vllm_api_key || null,
@@ -71,7 +137,7 @@ function AddBoxForm({ wsId, onDone, onCancel }: { wsId: string; onDone: () => vo
         </div>
         <div className="sm:col-span-2 lg:col-span-1">
           <label className="label" htmlFor="box-host">Host</label>
-          <input id="box-host" className="input mono" required placeholder="gpu-1.tailnet.ts.net or 100.x.y.z" value={f.host} onChange={(e) => set("host", e.target.value.trim())} />
+          <input id="box-host" className="input mono" required placeholder="100.x.y.z (Tailscale) or the pod's public IP" value={f.host} onChange={(e) => set("host", e.target.value.trim())} />
         </div>
         <div>
           <label className="label" htmlFor="box-port">SSH port</label>
@@ -83,21 +149,32 @@ function AddBoxForm({ wsId, onDone, onCancel }: { wsId: string; onDone: () => vo
         </div>
       </div>
       <div>
-        <label className="label" htmlFor="box-key">SSH private key</label>
-        <textarea
-          id="box-key"
-          className="input mono h-28 text-xs"
-          required
-          spellCheck={false}
-          autoComplete="off"
-          placeholder={"-----BEGIN OPENSSH PRIVATE KEY-----\n…"}
-          value={f.ssh_private_key}
-          onChange={(e) => set("ssh_private_key", e.target.value)}
-        />
-        <p className="hint mt-1">
-          Use a dedicated key without a passphrase, authorised only on this box. It&apos;s stored encrypted and only the worker decrypts it; this page will only
-          ever show its fingerprint.
-        </p>
+        <label className="label" htmlFor="box-login">SSH login</label>
+        <select id="box-login" className="input" value={ownKey ? "own" : "workspace"} onChange={(e) => setOwnKey(e.target.value === "own")}>
+          <option value="workspace">Workspace SSH key (added to your provider once)</option>
+          <option value="own">A private key for this box only</option>
+        </select>
+        {ownKey ? (
+          <>
+            <textarea
+              id="box-key"
+              aria-label="SSH private key"
+              className="input mono mt-2 h-28 text-xs"
+              required
+              spellCheck={false}
+              autoComplete="off"
+              placeholder={"-----BEGIN OPENSSH PRIVATE KEY-----\n…"}
+              value={f.ssh_private_key ?? ""}
+              onChange={(e) => set("ssh_private_key", e.target.value)}
+            />
+            <p className="hint mt-1">
+              Use a dedicated key without a passphrase, authorised only on this box. It&apos;s stored encrypted and only the worker decrypts it; this page will
+              only ever show its fingerprint.
+            </p>
+          </>
+        ) : (
+          <p className="hint mt-1">The box must accept the workspace public key shown above (RunPod / Vast add it to every pod once it&apos;s in your account).</p>
+        )}
       </div>
       <div className="grid grid-cols-1 items-start gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <div>
@@ -106,6 +183,14 @@ function AddBoxForm({ wsId, onDone, onCancel }: { wsId: string; onDone: () => vo
             <option value="auto">auto-detect</option>
             <option value="docker">docker (VM / bare metal)</option>
             <option value="pod">pod (RunPod / Vast, envforge GPU image)</option>
+          </select>
+        </div>
+        <div className="sm:col-span-2">
+          <label className="label" htmlFor="box-access">How envforge reaches vLLM</label>
+          <select id="box-access" className="input" value={f.vllm_access ?? ""} onChange={(e) => set("vllm_access", (e.target.value || null) as BoxIn["vllm_access"])}>
+            <option value="">auto: direct on Tailscale, SSH tunnel for a public IP</option>
+            <option value="direct">direct (Tailscale, or an open port)</option>
+            <option value="tunnel">SSH tunnel (only the SSH port is reachable)</option>
           </select>
         </div>
         <div>
@@ -147,7 +232,7 @@ function AddBoxForm({ wsId, onDone, onCancel }: { wsId: string; onDone: () => vo
             Cancel
           </button>
         )}
-        <button className="btn" disabled={busy || !f.name || !f.host || !f.ssh_private_key}>
+        <button className="btn" disabled={busy || !f.name || !f.host || (ownKey && !f.ssh_private_key)}>
           {busy ? "Adding…" : "Add box"}
         </button>
       </div>
@@ -240,7 +325,8 @@ function BoxCard({ box, wsId, defaultModel, canManage, reload }: { box: GpuBox; 
             <span className={`pill ${SERVE_PILL[box.serve_state]}`}>vLLM {box.serve_state}</span>
           </div>
           <div className="mono hint mt-1 [overflow-wrap:anywhere]">
-            {box.user}@{box.host}:{box.port} · key {box.ssh_key_fingerprint} · checked {ago(box.checked_at)}
+            {box.user}@{box.host}:{box.port} · {box.ssh_key_source === "workspace" ? "workspace key" : "key"} {box.ssh_key_fingerprint}
+            {box.vllm_access === "tunnel" && " · vLLM via SSH tunnel"} · checked {ago(box.checked_at)}
             {box.hourly_usd !== null && ` · $${box.hourly_usd}/h`}
           </div>
         </div>
@@ -277,7 +363,10 @@ function BoxCard({ box, wsId, defaultModel, canManage, reload }: { box: GpuBox; 
               <span className="mono">{box.served_model}</span>
               {box.served_adapters.length > 0 && <span className="hint"> + LoRA {box.served_adapters.join(", ")}</span>}
             </div>
-            <div className="mono text-sm [overflow-wrap:anywhere]">{box.endpoint_url}</div>
+            <div className="mono text-sm [overflow-wrap:anywhere]">
+              {box.endpoint_url}
+              {box.vllm_access === "tunnel" && <span className="hint"> on the box, reached through an SSH tunnel</span>}
+            </div>
             <p className="hint">
               In the model picker as <span className="mono">vllm:{box.served_model}</span>
               {box.served_adapters.map((a) => (
@@ -366,7 +455,7 @@ export default function GpuBoxesPage() {
         description={
           <>
             GPU boxes are the machines <span className="mono">{ws.name}</span> serves open models and trains adapters on. Rent one (RunPod, Vast, Lambda…), reach
-            it over Tailscale or SSH, and add it here. docs/COMPUTE.md has the details.
+            it over Tailscale or plain SSH, and add it here. docs/COMPUTE.md has the details.
           </>
         }
         actions={
@@ -405,6 +494,8 @@ export default function GpuBoxesPage() {
           </div>
         </Panel>
       ) : null}
+
+      {data && <WorkspaceKeyPanel wsId={ws.id} canManage={canManage} />}
 
       {adding && canManage && (
         <Panel title="Add a GPU box" hint="Host, SSH access and (optionally) what it costs per hour, for training cost estimates.">

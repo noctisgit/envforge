@@ -1,4 +1,5 @@
-"""/api/workspaces/{ws}/gpu-boxes — add, list, delete, check, serve and stop GPU boxes.
+"""/api/workspaces/{ws}/gpu-boxes — add, list, delete, check, serve and stop GPU boxes,
+plus the workspace SSH key boxes log in with by default.
 
 Thin: every rule (workspace scoping, admin-only, validation, key handling) lives in
 envforge/web/compute_service.py.
@@ -31,6 +32,25 @@ def list_boxes(
         "can_manage": C.can_manage(user),
         "admin_only": get_settings().GPU_BOXES_ADMIN_ONLY,
     }
+
+
+@router.get("/ssh-key")
+def workspace_ssh_key(
+    ws_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)
+) -> dict:
+    """The workspace's public SSH key, to add once to RunPod/Vast (created on first ask by
+    someone who may manage boxes; null until then)."""
+    ws = svc.require_workspace(db, user, ws_id)
+    return {"key": C.workspace_ssh_key(db, ws, user)}
+
+
+@router.post("/ssh-key/rotate")
+def rotate_ssh_key(
+    ws_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)
+) -> dict:
+    """Replace the workspace key pair (admin). Pods must then be given the new public key."""
+    ws = svc.require_workspace(db, user, ws_id)
+    return {"key": C.rotate_workspace_key(db, ws, user)}
 
 
 @router.post("", status_code=201)

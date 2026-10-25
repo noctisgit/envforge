@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Protocol
 
 from envforge.compute.base import CommandResult, ComputeBox, ComputeError, to_shell
+from envforge.compute.tunnel import SSHTunnel
 
 log = logging.getLogger(__name__)
 
@@ -147,6 +148,38 @@ class SSHBox(ComputeBox):
             self.destination,
             remote_command,
         ]
+
+    def forward_argv(self, local_port: int, remote_host: str, remote_port: int) -> list[str]:
+        """The argv for `ssh -N -L 127.0.0.1:<local>:<remote_host>:<remote_port>`: no remote
+        command, just the forward. It exits (instead of half-working) if the forward fails."""
+        if not _HOST_RE.match(remote_host) or remote_host.startswith("-"):
+            raise ValueError(f"invalid tunnel host: {remote_host!r}")
+        for p in (local_port, remote_port):
+            if not 1 <= int(p) <= 65535:
+                raise ValueError(f"invalid tunnel port: {p!r}")
+        host = (
+            f"[{remote_host}]"
+            if ":" in remote_host and not remote_host.startswith("[")
+            else remote_host
+        )
+        return [
+            "ssh",
+            *self._common_args(),
+            "-o",
+            "ExitOnForwardFailure=yes",
+            "-p",
+            str(self.port),
+            "-N",
+            "-L",
+            f"127.0.0.1:{int(local_port)}:{host}:{int(remote_port)}",
+            "--",
+            self.destination,
+        ]
+
+    def tunnel(self, remote_port: int, remote_host: str = "127.0.0.1") -> SSHTunnel:
+        """Forward a free local port to `remote_host:remote_port` on the box while the
+        `with` block runs; use `tunnel.url("/v1")` as the base URL. See tunnel.py."""
+        return SSHTunnel(lambda local: self.forward_argv(local, remote_host, remote_port))
 
     def _scp_remote(self, remote: str) -> str:
         if not _REMOTE_PATH_RE.match(remote) or remote.startswith("-"):

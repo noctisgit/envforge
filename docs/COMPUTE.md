@@ -21,7 +21,8 @@ workloads as background processes inside it (`--runtime pod`). See section 6.
 the RunPod, Vast or cloud APIs. Rent the box in their web console, then point envforge at it.
 
 **In the browser.** Everything below can also be done from the web app: Settings → GPU
-boxes adds a box (its SSH key stored encrypted), runs the readiness checks (GPU, VRAM,
+boxes adds a box (logging in with the workspace SSH key, or a key you paste, stored
+encrypted), runs the readiness checks (GPU, VRAM,
 driver/CUDA, free disk, vLLM), and starts / stops vLLM; a serving box shows up in the model
 picker as `vllm:<model>` for that workspace. Those actions are admin-only by default
 (`GPU_BOXES_ADMIN_ONLY`) and run in `envforge-worker --kind compute` using this same code.
@@ -388,6 +389,7 @@ Without Tailscale, you reach the pod through whatever public IP:port the provide
 22, which changes every time. vLLM then has to be exposed too (the RunPod HTTP proxy, or a
 mapped port, protected only by `--api-key`) or reached through an ssh tunnel
 (`ssh -L 8000:127.0.0.1:8000 root@<ip> -p <port>`, then `VLLM_BASE_URL=http://127.0.0.1:8000/v1`).
+The web app does the tunnel for you: see "Without Tailscale, in the web app" below.
 
 With Tailscale, `VLLM_BASE_URL=http://gpu-1:8000/v1` simply works from the control plane, and
 the web worker if it's on the tailnet, while the endpoint stays private. Pods can't create the
@@ -402,6 +404,29 @@ networking** mode. In that mode, incoming tailnet connections are handed to the 
 
 Outgoing connections from the pod *into* the tailnet would need Tailscale's SOCKS5 proxy.
 envforge doesn't need them, because the control plane always connects to the pod.
+
+### Without Tailscale, in the web app
+
+Two things make a pod with nothing but its SSH port usable from the browser:
+
+- **The workspace SSH key.** Settings → GPU boxes shows a public key envforge generated for
+  the workspace (the private half is stored encrypted; only the worker decrypts it). Add it
+  **once** to RunPod (Settings → SSH Public Keys) or Vast (Account → Keys): every pod you
+  start from then on gets it as `PUBLIC_KEY`, which the image's entrypoint installs. Adding a
+  box then takes only the pod's address and port, nothing to paste. **Replace key** makes a
+  new pair (pods that only know the old public key stop accepting it). Each workspace has its
+  own key, so one workspace's key never opens another's pods. Pasting a private key for a
+  single box still works.
+- **vLLM through an SSH tunnel** (`vllm_access: tunnel`, the default for a public host). On
+  **Serve**, vLLM listens on the pod's `127.0.0.1` only. The worker reaches it by forwarding a
+  free local port over the box's SSH connection (`envforge/compute/tunnel.py`: `ssh -N -L
+  127.0.0.1:<free>:127.0.0.1:8000`), for the health check after starting and for the whole of
+  every evaluation run, then closes it. If the tunnel drops mid-run it is restarted on the same
+  local port. Nothing but SSH has to be reachable, and the API key and prompts travel inside SSH.
+
+In the Add box form: host = the "SSH over exposed TCP" IP from RunPod's Connect dialog (or
+Vast's IP), SSH port = its mapped port, SSH login = workspace key, vLLM access = auto (it
+picks the tunnel for a public IP and direct for a `100.x` / `*.ts.net` / short name).
 
 ### Bandwidth: what moves where
 

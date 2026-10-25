@@ -81,6 +81,9 @@ def test_overlap_compares_task_records_for_declarative_environments(tmp_path):
     ds.build_dataset([run(v2, 10_000, "teacher")], out, pack_resolver=lambda _name: v2)
     m = ds.load_manifest(out)
     assert m["tasks"] == {} and len(m["records"]["isp-support@v2"]) >= 6
+    rows = [json.loads(x) for f in ("train.jsonl", "val.jsonl") if (out / f).exists()
+            for x in (out / f).read_text().splitlines()]  # fmt: skip
+    assert rows and all(r["meta"]["task_record"] for r in rows)  # what the UI counts tasks by
 
     # evaluation seeds use only held-out records, in this version and the next
     assert ds.overlap(out, run(v2, 0, "eval-v2")) == []

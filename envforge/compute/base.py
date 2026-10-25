@@ -21,6 +21,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
+from typing import Any
 
 
 class ComputeError(RuntimeError):
@@ -87,6 +88,12 @@ class ComputeBox(ABC):
     @abstractmethod
     def get(self, remote: str, local: str | Path, *, recursive: bool = False) -> None:
         """Copy `remote` (on the box) to `local` (on the control plane)."""
+
+    def tunnel(self, remote_port: int, remote_host: str = "127.0.0.1") -> Any:
+        """A context manager forwarding a local port to `remote_host:remote_port` on the
+        box; it yields an object whose `.url("/v1")` is the local URL to use. Boxes that
+        can't forward ports (the default) raise ComputeError."""
+        raise ComputeError(f"{type(self).__name__} can't forward ports")
 
     def close(self) -> None:  # noqa: B027 - optional hook, a no-op by default
         """Release any open connection. Safe to call more than once."""

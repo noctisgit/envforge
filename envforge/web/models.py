@@ -87,6 +87,13 @@ class Workspace(Base):
     )
     # model API spend per calendar month (UTC) across runs and the builder; None = no limit
     monthly_spend_limit_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # the workspace's own SSH key for GPU boxes: generated on first use, private half as a
+    # Fernet token (only the worker decrypts it), public half shown for pasting into RunPod/Vast
+    ssh_key_ciphertext: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ssh_public_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ssh_key_created_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     members: Mapped[list[WorkspaceMember]] = relationship(back_populates="workspace")
@@ -349,9 +356,10 @@ class GpuBox(Base):
     user: Mapped[str] = mapped_column(String(64), default="root")
     runtime: Mapped[str] = mapped_column(String(8), default="auto")  # docker | pod | auto
     detected_runtime: Mapped[str | None] = mapped_column(String(8), nullable=True)
-    # secrets: Fernet tokens; only the fingerprint / masked tail ever leaves the worker
-    ssh_key_ciphertext: Mapped[str] = mapped_column(Text)
-    ssh_key_fingerprint: Mapped[str] = mapped_column(String(80))
+    # secrets: Fernet tokens; only the fingerprint / masked tail ever leaves the worker.
+    # No key of its own (NULL) = the box uses the workspace's SSH key.
+    ssh_key_ciphertext: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ssh_key_fingerprint: Mapped[str | None] = mapped_column(String(80), nullable=True)
     vllm_key_ciphertext: Mapped[str | None] = mapped_column(Text, nullable=True)
     vllm_key_masked: Mapped[str | None] = mapped_column(String(16), nullable=True)
     vllm_key_generated: Mapped[bool] = mapped_column(default=True, server_default="true")
@@ -361,6 +369,9 @@ class GpuBox(Base):
     vllm_port: Mapped[int] = mapped_column(Integer, default=8000)
     endpoint_host: Mapped[str | None] = mapped_column(String(255), nullable=True)
     bind: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # direct = http://<endpoint host>:<port> (Tailscale, or an open port);
+    # tunnel = through an SSH port forward, so nothing but SSH has to be reachable
+    vllm_access: Mapped[str] = mapped_column(String(8), default="direct", server_default="direct")
     hourly_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
     # last check: unknown | ok | degraded | unreachable
     status: Mapped[str] = mapped_column(String(16), default="unknown", server_default="unknown")

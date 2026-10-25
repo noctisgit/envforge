@@ -16,11 +16,14 @@ class BoxIn(BaseModel):
     host: str = Field(min_length=1, max_length=255)
     port: int = Field(default=22, ge=1, le=65535)
     user: str = Field(default="root", min_length=1, max_length=64)
-    ssh_private_key: str = Field(min_length=32, max_length=20_000)
+    # empty: log in with the workspace's SSH key (Settings → GPU boxes shows its public half)
+    ssh_private_key: str | None = Field(default=None, max_length=20_000)
     runtime: Literal["docker", "pod", "auto"] = "auto"
     vllm_port: int = Field(default=8000, ge=1, le=65535)
     endpoint_host: str | None = Field(default=None, max_length=255)
     bind: str | None = Field(default=None, max_length=64)
+    # how the control plane reaches vLLM; None picks from the host (tailnet: direct, public: tunnel)
+    vllm_access: Literal["direct", "tunnel"] | None = None
     vllm_api_key: str | None = Field(default=None, max_length=500)
     hf_token: str | None = Field(default=None, max_length=500)
     hourly_usd: float | None = Field(default=None, ge=0, le=1000)
