@@ -268,11 +268,19 @@ def tail_log(box: ComputeBox, name: str, lines: int = 200, *, check: bool = True
     return box.run(command, timeout=60, check=check).stdout
 
 
+#: What a carriage return comes back as from read_log_lines (ASCII "record separator").
+CR_MARK = "\x1e"
+
+
 def read_log_lines(box: ComputeBox, name: str, start: int = 0) -> str:
     """The log from line `start` (0-based) to the end; empty if there is no log yet.
 
     Reading by *line* number (not byte offset) keeps every read on a character
     boundary, so multi-byte UTF-8 (progress bars love those) never gets split.
+
+    Progress bars redraw a line with carriage returns. Those come back as CR_MARK: the
+    local subprocess reads output in text mode, which would turn each "\r" into a newline,
+    so the caller would count more lines than `tail` does and skip the next ones.
     """
-    command = shlex.join(["tail", "-n", f"+{int(start) + 1}", log_path(name)]) + " 2>/dev/null"
-    return box.run(command + " || true", timeout=120).stdout
+    path = shlex.join(["tail", "-n", f"+{int(start) + 1}", log_path(name)])
+    return box.run(f"{path} 2>/dev/null | tr '\\r' '\\036' || true", timeout=120).stdout

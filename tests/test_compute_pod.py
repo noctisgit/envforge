@@ -343,7 +343,12 @@ class FakePodBox(ComputeBox):
             start = int(re.match(r"tail -n \+(\d+)", cmd).group(1)) - 1
             text = self._log_now()
             self.polls += 1
-            return CommandResult(0, "".join(text.splitlines(keepends=True)[start:]))
+            lines = text.split("\n")  # tail counts "\n" only
+            out = "\n".join(lines[start:]) if start < len(lines) else ""
+            if " | tr '" in cmd:  # the reader's carriage-return mapping (not "|| true")
+                out = out.replace("\r", "\x1e")
+            # like the real subprocess runner (text mode): any carriage return left is a newline
+            return CommandResult(0, out.replace("\r\n", "\n").replace("\r", "\n"))
         if "setsid nohup" in cmd:
             self.exists = True
             return CommandResult(0, "77\n")
@@ -429,6 +434,25 @@ def test_follow_pod_reads_only_new_complete_lines():
     reads = [c for c in box.calls if c.startswith("tail -n +")]
     assert reads[0].startswith("tail -n +1 /root/envforge/logs/train-v1.log")
     assert reads[1].startswith("tail -n +3 ")  # 2 complete lines consumed; partial re-read
+
+
+def test_follow_pod_survives_progress_bar_carriage_returns():
+    """Progress bars redraw a line with "\r". The text-mode subprocess layer turns those into
+    newlines; if the poller counted them as lines, the next `tail -n +K` would skip events
+    (a real bug: whole training runs ended with an empty loss history)."""
+    e = lambda **kw: "ENVFORGE " + json.dumps(kw) + "\n"  # noqa: E731
+    bars = "Loading 0%\rLoading 50%\rLoading 100%\r"
+    logs = [
+        bars + e(event="start", total_steps=3),
+        bars + e(event="start", total_steps=3) + " 33%\r 66%\r" + e(event="log", step=1, loss=0.7),
+        bars + e(event="start", total_steps=3) + " 33%\r 66%\r" + e(event="log", step=1, loss=0.7)
+        + e(event="log", step=2, loss=0.6) + "100%\r" + e(event="done", final_train_loss=0.5),
+    ]  # fmt: skip
+    box = FakePodBox(exists=True, logs=logs, exit_code=0)
+    events = list(remote.follow(box, "v1", sleep=lambda s: None, runtime="pod"))
+    assert [ev["event"] for ev in events] == ["start", "log", "log", "done", "exit"]
+    reads = [c for c in box.calls if c.startswith("tail -n +")]
+    assert reads[1].startswith("tail -n +2 ") and reads[2].startswith("tail -n +3 ")  # real lines
 
 
 def test_follow_pod_reports_failure_code():

@@ -30,6 +30,7 @@ import {
   type TrainMethod,
   type TrainParams,
 } from "@/lib/api";
+import { finalName, typingName } from "@/lib/names";
 import { usePoll } from "@/lib/poll";
 import { useWorkspace } from "@/lib/workspace";
 
@@ -333,7 +334,8 @@ function TrainingInner() {
         dataset_id: method === "grpo" ? null : datasetId,
         box_id: boxId,
         base_model: base,
-        adapter_name: adapterName || undefined,
+        // empty: the suggestion the field shows (the server alone would use the dataset's name)
+        adapter_name: finalName(adapterName, nameMax) || suggestedName || undefined,
         init_adapter: method === "sft" ? null : initAdapter,
         pack: method === "grpo" ? pack : null,
         ...numbers,
@@ -359,7 +361,8 @@ function TrainingInner() {
           : method !== "sft" && adapters.length === 0
             ? "adapter"
             : null;
-  const suggestedName = method === "grpo" ? (init ? `${init.name}-grpo` : "") : method === "dpo" ? (init ? `${init.name}-dpo` : "") : (dataset?.name ?? "");
+  const nameMax = method === "grpo" ? 58 : 63; // GRPO saves rounds as <name>-r<k>
+  const suggestedName = finalName(method === "grpo" ? (init ? `${init.name}-grpo` : "") : method === "dpo" ? (init ? `${init.name}-dpo` : "") : (dataset?.name ?? ""), nameMax);
   const canStart = !busy && !!boxId && !!base && (method === "grpo" ? !!initAdapter && !!pack : !!datasetId) && (method === "sft" || !!initAdapter);
 
   return (
@@ -504,12 +507,12 @@ function TrainingInner() {
                     <input
                       id="tr-name"
                       className="input mono"
-                      maxLength={method === "grpo" ? 58 : 63}
+                      maxLength={nameMax}
                       placeholder={suggestedName || "netops-v1"}
                       value={adapterName}
-                      onChange={(e) => setAdapterName(e.target.value.toLowerCase().replace(/[^a-z0-9._-]/g, "-"))}
+                      onChange={(e) => setAdapterName(typingName(e.target.value, nameMax))}
                     />
-                    <p className="hint mt-1">Served as vllm:{adapterName || suggestedName || "<name>"}</p>
+                    <p className="hint mt-1">Served as vllm:{finalName(adapterName, nameMax) || suggestedName || "<name>"}</p>
                   </div>
                 </div>
                 {method === "grpo" && (

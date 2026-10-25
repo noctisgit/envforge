@@ -395,13 +395,15 @@ def poll_once(
     if check_runtime(runtime) == "pod":
         st = status(box, name, runtime="pod")
         chunk = process.read_log_lines(box, process_name(name), start=cursor)
-        lines = chunk.split("\n")
+        lines = chunk.split("\n")  # the log's own lines: carriage returns are CR_MARK here
         partial = lines.pop()  # text after the last newline ("" if none)
         cursor += len(lines)
         # a last line without a newline may still be being written: parse it at the end
         if not st.running and partial:
             lines.append(partial)
-        return parse_events("\n".join(lines)), cursor, st
+        # a progress bar's redraws end with "\r": an event may follow one on the same line
+        text = "\n".join(lines).replace(process.CR_MARK, "\n")
+        return parse_events(text), cursor, st
     st = status(box, name)
     r = box.run(["docker", "logs", container_name(name)], timeout=300)
     events = parse_events(r.stdout + r.stderr)

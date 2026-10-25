@@ -15,15 +15,10 @@ import { Empty, Page, PageHeader, Panel, StatCard, StatGrid } from "@/components
 import { useToast } from "@/components/Toast";
 import { Compute, downloadFile, type DatasetKind, type DatasetPreview, type DatasetRow, type DatasetSource } from "@/lib/api";
 import { TRAIN_SEED } from "@/lib/journey";
+import { finalName, typingName } from "@/lib/names";
 import { useWorkspace } from "@/lib/workspace";
 
 const pct = (x: number | null) => (x === null ? "–" : `${Math.round(x * 100)}%`);
-const slug = (s: string) =>
-  s
-    .toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 63);
 
 function Preview({ p, loading }: { p: DatasetPreview | null; loading: boolean }) {
   if (!p) return <p className="hint">{loading ? "Building a preview…" : "Pick at least one run to see what the dataset would contain."}</p>;
@@ -94,6 +89,7 @@ function DatasetsInner() {
   const [preview, setPreview] = useState<DatasetPreview | null>(null);
   const [previewing, setPreviewing] = useState(false);
   const [name, setName] = useState("");
+  const [nameEdited, setNameEdited] = useState(false); // once you type, no more suggestions
   const [saving, setSaving] = useState(false);
   const [showIneligible, setShowIneligible] = useState(false);
 
@@ -144,10 +140,10 @@ function DatasetsInner() {
 
   // suggest a name from the environment
   useEffect(() => {
-    if (name || picked.length === 0 || !sources) return;
+    if (name || nameEdited || picked.length === 0 || !sources) return;
     const first = sources.find((s) => s.id === picked[0]);
-    if (first) setName(slug(`${first.pack}-${kind === "preference" ? "pairs" : "v"}${(datasets?.length ?? 0) + 1}`));
-  }, [picked, sources, datasets, name, kind]);
+    if (first) setName(finalName(`${first.pack}-${kind === "preference" ? "pairs" : "v"}${(datasets?.length ?? 0) + 1}`));
+  }, [picked, sources, datasets, name, nameEdited, kind]);
 
   if (!ws) return null;
 
@@ -155,9 +151,10 @@ function DatasetsInner() {
     e.preventDefault();
     setSaving(true);
     try {
-      const d = await Compute.saveDataset(ws!.id, { name, run_ids: picked, min_reward: minReward, val_frac: valPct / 100, best_per_task: bestPerTask, kind, max_pairs_per_task: maxPairs });
+      const d = await Compute.saveDataset(ws!.id, { name: finalName(name), run_ids: picked, min_reward: minReward, val_frac: valPct / 100, best_per_task: bestPerTask, kind, max_pairs_per_task: maxPairs });
       toast.success("Dataset saved", `${d.name}: ${d.n_train} training and ${d.n_val} validation ${kind === "preference" ? "pairs" : "examples"}.`);
       setName("");
+      setNameEdited(false);
       setPicked([]);
       await load();
     } catch (ex) {
@@ -321,9 +318,19 @@ function DatasetsInner() {
                 <label className="label" htmlFor="ds-name">
                   Name
                 </label>
-                <input id="ds-name" className="input mono" maxLength={63} placeholder="netops-v1" value={name} onChange={(e) => setName(slug(e.target.value))} />
+                <input
+                  id="ds-name"
+                  className="input mono"
+                  maxLength={63}
+                  placeholder="netops-v1"
+                  value={name}
+                  onChange={(e) => {
+                    setNameEdited(true);
+                    setName(typingName(e.target.value));
+                  }}
+                />
               </div>
-              <button className="btn btn-field" disabled={saving || !name || picked.length === 0 || !preview?.kept}>
+              <button className="btn btn-field" disabled={saving || !finalName(name) || picked.length === 0 || !preview?.kept}>
                 {saving ? "Saving…" : "Save dataset"}
               </button>
             </div>
