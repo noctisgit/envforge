@@ -79,7 +79,8 @@ from envforge.web.settings import get_settings
 
 #: Job kinds the compute worker claims.
 COMPUTE_JOB_KINDS = (
-    "box_check", "box_serve", "box_stop", "box_delete", "train_start", "adapter_test"
+    "box_check", "box_serve", "box_stop", "box_delete", "train_start", "adapter_test",
+    "grpo_rollout", "grpo_train",
 )  # fmt: skip
 ACTIVE = ("queued", "running")
 
@@ -480,6 +481,17 @@ def _forget_box(db: Session, box: GpuBox) -> None:
 # ---- jobs (API side) ------------------------------------------------------------------
 
 
+def refuse_while_training(db: Session, box: GpuBox) -> None:
+    """409 while a training job uses the box: serving there would fight it for GPU memory
+    (and a GRPO run serves and stops vLLM itself)."""
+    busy = db.scalar(select(TrainingJob).where(
+        TrainingJob.box_id == box.id, TrainingJob.status.in_(("starting", "running", "fetching"))))  # fmt: skip
+    if busy is not None:
+        raise HTTPException(
+            409, f"{box.name} is training {busy.adapter_name}; wait for it to finish or cancel it"
+        )
+
+
 def enqueue_box_job(
     db: Session, box: GpuBox, user: User, kind: str, payload: dict | None = None
 ) -> Job:
@@ -523,6 +535,7 @@ def request_serve(
     from envforge.web.models import Adapter
 
     require_gpu_admin(user)
+    refuse_while_training(db, box)
     try:
         model = check_model_id(model)
     except ValueError as e:
@@ -817,6 +830,27 @@ def _do_check(db: Session, job: Job, box: GpuBox) -> None:
     db.commit()
 
 
+def ensure_adapter_on_box(db: Session, cb: ComputeBox, box: GpuBox, name: str, job: Job) -> None:
+    """Upload a workspace adapter's local copy unless the box already has it. Adapters
+    that only exist on the box (a GRPO run's intermediate rounds) are found there first."""
+    from envforge.web.models import Adapter
+
+    remote = f"{ADAPTERS_DIR}/{name}"
+    if cb.run(["test", "-f", f"{remote}/adapter_config.json"], timeout=60).ok:
+        return
+    a = db.scalar(
+        select(Adapter).where(Adapter.workspace_id == box.workspace_id, Adapter.name == name)
+    )
+    if a is None:
+        raise ValueError(f"adapter {name} no longer exists")
+    local = Path(a.path)
+    if not (local / "adapter_config.json").is_file():
+        raise ValueError(f"adapter {name} is not on the box and has no local copy to upload")
+    _progress(db, job, f"uploading adapter {name}")
+    cb.run(["mkdir", "-p", ADAPTERS_DIR], timeout=60, check=True)
+    cb.put(local, f"{ADAPTERS_DIR}/", recursive=True)
+
+
 def serve_on_box(
     db: Session,
     job: Job,
@@ -830,7 +864,6 @@ def serve_on_box(
 ) -> list[str]:
     """Start vLLM on the box and wait until it answers. Uploads any adapter the box
     doesn't have yet from the workspace's local copy. Returns the served model ids."""
-    from envforge.web.models import Adapter
 
     model = check_model_id(model)
     box.serve_state, box.serve_error = "starting", None
@@ -841,23 +874,7 @@ def serve_on_box(
     with open_box(db, box) as cb:
         runtime = resolve_box_runtime(db, box, cb)
         for name in adapters:
-            a = db.scalar(
-                select(Adapter).where(
-                    Adapter.workspace_id == box.workspace_id, Adapter.name == name
-                )
-            )
-            if a is None:
-                raise ValueError(f"adapter {name} no longer exists")
-            remote = f"{ADAPTERS_DIR}/{a.name}"
-            if not cb.run(["test", "-f", f"{remote}/adapter_config.json"], timeout=60).ok:
-                local = Path(a.path)
-                if not (local / "adapter_config.json").is_file():
-                    raise ValueError(
-                        f"adapter {name} is not on the box and has no local copy to upload"
-                    )
-                _progress(db, job, f"uploading adapter {name}")
-                cb.run(["mkdir", "-p", ADAPTERS_DIR], timeout=60, check=True)
-                cb.put(local, f"{ADAPTERS_DIR}/", recursive=True)
+            ensure_adapter_on_box(db, cb, box, name, job)
         _progress(db, job, f"starting vLLM with {model}")
         tunnel = box.vllm_access == "tunnel"
         server = serve_vllm(
@@ -946,9 +963,12 @@ def fail_related(db: Session, job: Job, error: str) -> None:
             box.status = "unreachable"
         elif job.kind == "box_delete":
             box.serve_error = f"Couldn't stop vLLM, so the box was kept: {error}"
-    if job.kind == "train_start" and (tj := db.get(TrainingJob, payload.get("training_job_id"))):
-        if tj.status in ("queued", "starting"):
+    training_kinds = ("train_start", "grpo_rollout", "grpo_train")
+    if job.kind in training_kinds and (tj := db.get(TrainingJob, payload.get("training_job_id"))):
+        if tj.status in ("queued", "starting", "running"):
             tj.status, tj.error, tj.finished_at = "failed", error, datetime.now(UTC)
+        if job.kind == "grpo_rollout" and box is not None and box.serve_state == "starting":
+            box.serve_state, box.serve_error = "failed", error
     db.commit()
 
 
@@ -983,6 +1003,10 @@ def process_compute_job(db: Session, job: Job) -> None:
                 T.run_train_start(db, job, box)
             elif job.kind == "adapter_test":
                 T.run_adapter_test(db, job, box)
+            elif job.kind == "grpo_rollout":
+                T.run_grpo_rollout(db, job, box)
+            elif job.kind == "grpo_train":
+                T.run_grpo_train(db, job, box)
             else:
                 raise ValueError(f"unknown compute job kind {job.kind}")
         job.status = "done"

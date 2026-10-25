@@ -2,7 +2,9 @@
 `envforge.train` unchanged:
 
     datasets       train.dataset.build_dataset + overlap   (rejection sampling, manifest)
+                   train.preference.build_preference_dataset (kind="preference": DPO pairs)
     training jobs  train.remote.start_training + poll_once + fetch_adapter
+                   method sft | dpo (one run of a script on the box) | grpo (a loop, below)
     adapters       served with vLLM --lora-modules via compute_service.serve_on_box
 
 Datasets are built on the API side (local files only, no GPU). Training starts as a
@@ -24,7 +26,7 @@ import json
 import shutil
 import tarfile
 import tempfile
-from dataclasses import asdict, fields
+from dataclasses import asdict, dataclass, fields
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from statistics import mean
@@ -39,6 +41,7 @@ from envforge.compute.base import ComputeError
 from envforge.compute.vllm import stop_vllm
 from envforge.core.env import TRAIN_SEED_MIN
 from envforge.train import dataset as ds
+from envforge.train import preference as pref
 from envforge.train import remote
 from envforge.web import compute_service as C
 from envforge.web import crypto
@@ -112,6 +115,13 @@ def _pack_resolver(db: Session, ws: Workspace):
     return lambda name: resolve_pack(db, ws, name, include_deleted=True)
 
 
+def _check_kind(kind: str, max_pairs_per_task: int) -> None:
+    if kind not in ("sft", "preference"):
+        raise HTTPException(400, "kind must be sft or preference")
+    if not 1 <= max_pairs_per_task <= 32:
+        raise HTTPException(400, "pairs per task must be between 1 and 32")
+
+
 def _check_filters(min_reward: float, val_frac: float) -> None:
     if not 0 <= min_reward <= 1:
         raise HTTPException(400, "min reward must be between 0 and 1")
@@ -119,8 +129,37 @@ def _check_filters(min_reward: float, val_frac: float) -> None:
         raise HTTPException(400, "validation split must be between 0 and 0.5")
 
 
-def _summary(out_dir: Path, rep: ds.DatasetReport) -> dict[str, Any]:
+def _pref_summary(out_dir: Path, rep: pref.PreferenceReport) -> dict[str, Any]:
+    """Counts the UI shows for preference pairs: pairs, split, how many tasks could pair."""
+    models: dict[str, int] = {}
+    for split in ("train.jsonl", "val.jsonl"):
+        p = out_dir / split
+        if p.exists():
+            for line in p.read_text(encoding="utf-8").splitlines():
+                meta = json.loads(line).get("meta", {})
+                for side in ("chosen", "rejected"):
+                    key = f"{side}: {meta.get(side, {}).get('model', '?')}"
+                    models[key] = models.get(key, 0) + 1
+    return {
+        "kind": "preference",
+        "episodes_seen": rep.episodes_seen,
+        "kept": rep.pairs,
+        "n_train": rep.n_train,
+        "n_val": rep.n_val,
+        "tasks": rep.tasks_with_pairs,
+        "chosen_episodes": rep.chosen_episodes,
+        "rejected_episodes": rep.rejected_episodes,
+        "tasks_without_rejected": rep.tasks_without_rejected,
+        "tasks_without_chosen": rep.tasks_without_chosen,
+        "by_pack_tier": {f"{p} · tier {t}": n for (p, t), n in sorted(rep.by_pack_tier.items())},
+        "models": models,
+    }
+
+
+def _summary(out_dir: Path, rep: ds.DatasetReport | pref.PreferenceReport) -> dict[str, Any]:
     """Counts the UI shows: split, examples per task, per pack/tier, models."""
+    if isinstance(rep, pref.PreferenceReport):
+        return _pref_summary(out_dir, rep)
     per_task: dict[str, int] = {}
     for split in ("train.jsonl", "val.jsonl"):
         p = out_dir / split
@@ -171,7 +210,17 @@ def _overlaps(db: Session, ws: Workspace, out_dir: Path, packs: set[str]) -> lis
 
 
 def _build(db: Session, ws: Workspace, runs: list[Run], out_dir: Path, *, min_reward: float,
-           val_frac: float, best_per_task: bool) -> ds.DatasetReport:  # fmt: skip
+           val_frac: float, best_per_task: bool, kind: str = "sft",
+           max_pairs_per_task: int = 4) -> ds.DatasetReport | pref.PreferenceReport:  # fmt: skip
+    if kind == "preference":
+        return pref.build_preference_dataset(
+            [Path(r.run_dir) for r in runs if r.run_dir],
+            out_dir,
+            chosen_min_reward=min_reward,
+            max_pairs_per_task=max_pairs_per_task,
+            val_frac=val_frac,
+            pack_resolver=_pack_resolver(db, ws),
+        )
     return ds.build_dataset(
         [Path(r.run_dir) for r in runs if r.run_dir],
         out_dir,
@@ -183,9 +232,11 @@ def _build(db: Session, ws: Workspace, runs: list[Run], out_dir: Path, *, min_re
 
 
 def preview_dataset(db: Session, ws: Workspace, *, run_ids: list[str], min_reward: float = 1.0,
-                    val_frac: float = 0.05, best_per_task: bool = True) -> dict[str, Any]:  # fmt: skip
+                    val_frac: float = 0.05, best_per_task: bool = True, kind: str = "sft",
+                    max_pairs_per_task: int = 4) -> dict[str, Any]:  # fmt: skip
     """What saving would produce, built in a scratch directory and thrown away."""
     _check_filters(min_reward, val_frac)
+    _check_kind(kind, max_pairs_per_task)
     runs = _validated_runs(db, ws, run_ids)
     packs = {r.pack for r in runs}
     scratch = config.workspace_dir(ws.slug) / "tmp"
@@ -201,6 +252,8 @@ def preview_dataset(db: Session, ws: Workspace, *, run_ids: list[str], min_rewar
                 min_reward=min_reward,
                 val_frac=val_frac,
                 best_per_task=best_per_task,
+                kind=kind,
+                max_pairs_per_task=max_pairs_per_task,
             )
         except ValueError as e:
             return {"kept": 0, "n_train": 0, "n_val": 0, "tasks": 0, "packs": sorted(packs),
@@ -212,7 +265,17 @@ def preview_dataset(db: Session, ws: Workspace, *, run_ids: list[str], min_rewar
         warnings.append(
             f"{len(overlap)} evaluation run(s) share tasks with this dataset; evaluate on other seeds."
         )
-    if summary["kept"] < 200:
+    if kind == "preference":
+        if summary["kept"] < 50:
+            warnings.append(
+                "DPO works best with a hundred or more pairs; this is fine for a smoke test."
+            )
+        if summary["tasks_without_chosen"]:
+            warnings.append(
+                f"{summary['tasks_without_chosen']} task(s) were never solved, so they have no chosen "
+                "side: a teacher run on the same training seeds would supply one."
+            )
+    elif summary["kept"] < 200:
         warnings.append(
             "A few hundred to a few thousand examples is a typical SFT dataset; this is fine for a smoke test."
         )
@@ -237,13 +300,15 @@ def _sanitize_files(db: Session, ws: Workspace, out_dir: Path, packs: set[str]) 
 
 
 def save_dataset(db: Session, ws: Workspace, user: User, *, name: str, run_ids: list[str],
-                 min_reward: float = 1.0, val_frac: float = 0.05, best_per_task: bool = True) -> Dataset:  # fmt: skip
+                 min_reward: float = 1.0, val_frac: float = 0.05, best_per_task: bool = True,
+                 kind: str = "sft", max_pairs_per_task: int = 4) -> Dataset:  # fmt: skip
     """Build and keep a named dataset under data/workspaces/<slug>/sft/<name>/."""
     try:
         name = remote.check_name(name.strip())
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
     _check_filters(min_reward, val_frac)
+    _check_kind(kind, max_pairs_per_task)
     if db.scalar(select(Dataset).where(Dataset.workspace_id == ws.id, Dataset.name == name)):
         raise HTTPException(409, f"a dataset named {name} already exists")
     runs = _validated_runs(db, ws, run_ids)
@@ -255,19 +320,24 @@ def save_dataset(db: Session, ws: Workspace, user: User, *, name: str, run_ids: 
     if out.exists():  # left over from a CLI build or a deleted row: not ours to merge into
         shutil.rmtree(out)
     try:
-        rep = _build(
-            db, ws, runs, out, min_reward=min_reward, val_frac=val_frac, best_per_task=best_per_task
-        )
+        rep = _build(db, ws, runs, out, min_reward=min_reward, val_frac=val_frac,
+                     best_per_task=best_per_task, kind=kind, max_pairs_per_task=max_pairs_per_task)  # fmt: skip
     except ValueError as e:
         shutil.rmtree(out, ignore_errors=True)
         raise HTTPException(400, str(e)) from e
     _sanitize_files(db, ws, out, packs)
     summary = _summary(out, rep)
+    filters: dict[str, Any] = {"min_reward": min_reward, "val_frac": val_frac}
+    if kind == "preference":
+        filters["max_pairs_per_task"] = max_pairs_per_task
+    else:
+        filters["best_per_task"] = best_per_task
     row = Dataset(
         workspace_id=ws.id,
         name=name,
+        kind=kind,
         source_runs=[r.id for r in runs],
-        filters={"min_reward": min_reward, "val_frac": val_frac, "best_per_task": best_per_task},
+        filters=filters,
         packs=sorted(packs),
         counts=summary,
         n_train=rep.n_train,
@@ -298,7 +368,7 @@ def get_dataset(db: Session, ws: Workspace, dataset_id: str) -> Dataset:
 
 def dataset_out(d: Dataset, *, full: bool = False) -> dict[str, Any]:
     out = {
-        "id": d.id, "name": d.name, "source_runs": d.source_runs, "filters": d.filters,
+        "id": d.id, "name": d.name, "kind": d.kind, "source_runs": d.source_runs, "filters": d.filters,
         "packs": d.packs, "counts": d.counts, "n_train": d.n_train, "n_val": d.n_val,
         "created_at": d.created_at,
         "tasks": (d.manifest or {}).get("tasks"),
@@ -341,38 +411,114 @@ def delete_dataset(db: Session, ws: Workspace, user: User, d: Dataset) -> None:
 
 #: The CLI's defaults (`envforge train sft`), shown in the form.
 TRAIN_DEFAULTS = asdict(remote.TrainArgs())
+
+
+@dataclass(frozen=True)
+class GRPOLoop:
+    """The GRPO loop's own settings (the per-round update's are remote.GRPOArgs)."""
+
+    rounds: int = 4  # serve -> rollouts -> update, this many times
+    tasks_per_round: int = 16  # different training tasks attempted per round
+    group_size: int = 8  # attempts per task; advantages compare an attempt with its group
+    temperature: float = 1.0  # sampling temperature for the attempts (0 would make them identical)
+
+
+#: Defaults per method: what the form starts from and what an omitted field means.
+METHOD_DEFAULTS: dict[str, dict[str, Any]] = {
+    "sft": TRAIN_DEFAULTS,
+    "dpo": asdict(remote.DPOArgs()),
+    "grpo": {**asdict(remote.GRPOArgs()), **asdict(GRPOLoop())},
+}
 LIMITS = {
-    "epochs": (0.05, 20), "lr": (1e-6, 1e-2), "lora_r": (1, 256), "lora_alpha": (1, 1024),
+    "epochs": (0.05, 20), "lr": (1e-7, 1e-2), "lora_r": (1, 256), "lora_alpha": (1, 1024),
     "max_len": (256, 65536), "batch_size": (1, 64), "grad_accum": (1, 512), "max_steps": (1, 1_000_000),
+    "beta": (0.001, 10), "kl_beta": (0, 10), "clip_eps": (0.01, 0.9), "rounds": (1, 100),
+    "tasks_per_round": (1, 500), "group_size": (2, 32), "temperature": (0.1, 2),
 }  # fmt: skip
+INT_FIELDS = {"lora_r", "lora_alpha", "max_len", "batch_size", "grad_accum", "max_steps", "rounds",
+              "tasks_per_round", "group_size"}  # fmt: skip
 
 
-def _train_args(params: dict[str, Any]) -> remote.TrainArgs:
-    names = {f.name for f in fields(remote.TrainArgs)}
+def _hyperparams(method: str, params: dict[str, Any]) -> dict[str, Any]:
+    """The method's defaults with the given (range-checked) values on top."""
+    defaults = METHOD_DEFAULTS[method]
     clean: dict[str, Any] = {}
     for k, v in (params or {}).items():
-        if k not in names or v is None:
+        if k not in defaults or v is None:
             continue
         lo, hi = LIMITS[k]
         if not lo <= float(v) <= hi:
             raise HTTPException(400, f"{k} must be between {lo:g} and {hi:g}")
-        clean[k] = float(v) if k in ("epochs", "lr") else int(v)
-    return remote.TrainArgs(**{**TRAIN_DEFAULTS, **clean})
+        clean[k] = int(v) if k in INT_FIELDS else float(v)
+    return {**defaults, **clean}
 
 
-def start_training(db: Session, ws: Workspace, user: User, *, dataset_id: str, box_id: str,
-                   base_model: str, adapter_name: str | None = None,
-                   hyperparams: dict[str, Any] | None = None) -> TrainingJob:  # fmt: skip
-    """Queue a LoRA SFT job: upload the dataset to the box and train there."""
+def _train_args(params: dict[str, Any]) -> remote.TrainArgs:
+    return remote.TrainArgs(**_hyperparams("sft", params))
+
+
+def _script_args(method: str, hp: dict[str, Any]) -> remote.TrainingArgs:
+    """The dataclass whose argv the method's script takes, from stored hyperparams."""
+    cls = {"sft": remote.TrainArgs, "dpo": remote.DPOArgs, "grpo": remote.GRPOArgs}[method]
+    names = {f.name for f in fields(cls)}
+    return cls(**{k: v for k, v in hp.items() if k in names})
+
+
+def _init_adapter(db: Session, ws: Workspace, name: str | None, base: str) -> Adapter:
+    """The workspace adapter DPO / GRPO start from; it must sit on the same base model."""
+    if not name:
+        raise HTTPException(400, "pick the adapter to start from (usually your SFT adapter)")
+    a = db.scalar(select(Adapter).where(Adapter.workspace_id == ws.id, Adapter.name == name))
+    if a is None:
+        raise HTTPException(404, f"adapter {name} not found")
+    if a.base_model != base:
+        raise HTTPException(
+            400, f"{name} was trained on {a.base_model}; an adapter only works on that base model"
+        )
+    return a
+
+
+def start_training(db: Session, ws: Workspace, user: User, *, dataset_id: str | None = None,
+                   box_id: str, base_model: str, adapter_name: str | None = None,
+                   hyperparams: dict[str, Any] | None = None, method: str = "sft",
+                   init_adapter: str | None = None, pack: str | None = None) -> TrainingJob:  # fmt: skip
+    """Queue a training job on a box.
+
+    sft: imitate a dataset's solved episodes. dpo: prefer the chosen side of a
+    preference dataset, continuing from `init_adapter`. grpo: reinforcement learning on
+    environment `pack` from `init_adapter`, no dataset (it makes its own data each round).
+    """
     C.require_gpu_admin(user)
-    d = get_dataset(db, ws, dataset_id)
+    if method not in METHOD_DEFAULTS:
+        raise HTTPException(400, "method must be sft, dpo or grpo")
     box = C.get_box(db, ws, box_id)
+    d = get_dataset(db, ws, dataset_id) if dataset_id else None
+    if method in ("sft", "dpo"):
+        if d is None:
+            raise HTTPException(400, "pick a dataset")
+        want = "preference" if method == "dpo" else "sft"
+        if d.kind != want:
+            raise HTTPException(
+                400, f"{method.upper()} needs a{'' if want == 'sft' else ' preference'} dataset "
+                f"(kind {want}); {d.name} is kind {d.kind}",
+            )  # fmt: skip
     try:
         base = C.check_model_id(base_model)
-        name = remote.check_name((adapter_name or d.name).strip())
+        name = remote.check_name((adapter_name or (d.name if d else "")).strip())
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
-    args = _train_args(hyperparams or {})
+    hp = _hyperparams(method, hyperparams or {})
+    init = _init_adapter(db, ws, init_adapter, base) if method in ("dpo", "grpo") else None
+    env_name = None
+    if method == "grpo":
+        from envforge.web.builder import resolve_pack
+
+        env_name = pack or (init.pack if init else None)
+        if not env_name:
+            raise HTTPException(400, "pick the environment to train on")
+        resolve_pack(db, ws, env_name)  # 404 unless built in or published in this workspace
+        if len(name) > 58:  # rounds are saved as <name>-r<k> on the box
+            raise HTTPException(400, "GRPO adapter names can be at most 58 characters")
     if db.scalar(select(Adapter).where(Adapter.workspace_id == ws.id, Adapter.name == name)):
         raise HTTPException(409, f"an adapter named {name} already exists; pick another name")
     same = list(db.scalars(select(TrainingJob).where(TrainingJob.workspace_id == ws.id,
@@ -387,19 +533,32 @@ def start_training(db: Session, ws: Workspace, user: User, *, dataset_id: str, b
         raise HTTPException(409, f"{box.name} is already training; one job per box at a time")
     tj = TrainingJob(
         workspace_id=ws.id,
-        dataset_id=d.id,
+        dataset_id=d.id if d else None,
         box_id=box.id,
         adapter_name=name,
         base_model=base,
+        method=method,
+        init_adapter=init.name if init else None,
         # a retry after a failed/cancelled job of the same name may overwrite its leftovers
-        hyperparams={**asdict(args), "dataset_name": d.name, "replace": bool(same)},
+        hyperparams={
+            **hp,
+            "dataset_name": d.name if d else None,
+            "pack": env_name,
+            "replace": bool(same),
+        },  # fmt: skip
         hourly_usd=box.hourly_usd,
         status="queued",
         created_by=user.id,
     )
     db.add(tj)
     db.flush()
-    job = C.enqueue_box_job(db, box, user, "train_start", {"training_job_id": tj.id})
+    if method == "grpo":
+        tj.state = {"round": 0, "phase": "rollout", "current": init.name, "rounds": [],
+                    "steps_done": 0}  # fmt: skip
+        tj.total_steps = hp["rounds"]
+        job = C.enqueue_box_job(db, box, user, "grpo_rollout", {"training_job_id": tj.id})
+    else:
+        job = C.enqueue_box_job(db, box, user, "train_start", {"training_job_id": tj.id})
     tj.job_id = job.id
     db.commit()
     return tj
@@ -422,7 +581,7 @@ def run_train_start(db: Session, job: Job, box: GpuBox) -> None:
     job.progress = f"uploading {d.name} to {box.name}"
     db.commit()
     params = dict(tj.hyperparams)
-    args = remote.TrainArgs(**{k: params[k] for k in TRAIN_DEFAULTS if k in params})
+    args = _script_args(tj.method or "sft", params)
     hf_token = crypto.decrypt(box.hf_token_ciphertext) if box.hf_token_ciphertext else None
     with C.open_box(db, box) as cb:
         runtime = C.resolve_box_runtime(db, box, cb)
@@ -435,9 +594,12 @@ def run_train_start(db: Session, job: Job, box: GpuBox) -> None:
             box.serve_state, box.serve_error = "stopped", None
             box.served_model = box.served_adapters = box.endpoint_url = None
             db.commit()
+        if tj.init_adapter:  # DPO continues from this adapter: it must be on the box
+            C.ensure_adapter_on_box(db, cb, box, tj.init_adapter, job)
         remote.start_training(
             cb, Path(d.path), base=tj.base_model, name=tj.adapter_name, args=args,
             hf_token=hf_token, replace=bool(params.get("replace")), runtime=runtime,  # type: ignore[arg-type]
+            method=tj.method or "sft", init_adapter=tj.init_adapter,
         )  # fmt: skip
     tj.runtime = runtime
     tj.status, tj.started_at = "running", datetime.now(UTC)
@@ -477,9 +639,11 @@ def training_out(db: Session, tj: TrainingJob, *, full: bool = False) -> dict[st
     adapter = db.scalar(select(Adapter).where(Adapter.training_job_id == tj.id))
     out = {
         "id": tj.id, "status": tj.status, "adapter_name": tj.adapter_name, "base_model": tj.base_model,
+        "method": tj.method or "sft", "init_adapter": tj.init_adapter, "pack": tj.hyperparams.get("pack"),
         "dataset_id": tj.dataset_id, "dataset_name": tj.hyperparams.get("dataset_name"),
         "box_id": tj.box_id, "box_name": box.name if box else None,
-        "hyperparams": {k: v for k, v in tj.hyperparams.items() if k in TRAIN_DEFAULTS},
+        "hyperparams": {k: v for k, v in tj.hyperparams.items() if k in METHOD_DEFAULTS[tj.method or "sft"]},
+        "grpo": _grpo_out(tj) if tj.method == "grpo" else None,
         "step": tj.step, "total_steps": tj.total_steps, "epoch": tj.epoch,
         "last_loss": next((p["loss"] for p in reversed(tj.losses or []) if "loss" in p), None),
         "cancel_requested": tj.cancel_requested, "error": tj.error,
@@ -495,6 +659,13 @@ def training_out(db: Session, tj: TrainingJob, *, full: bool = False) -> dict[st
     return out
 
 
+def _grpo_out(tj: TrainingJob) -> dict[str, Any]:
+    """Where a GRPO run is: round, phase, the rollout run, and each finished round's numbers."""
+    st = tj.state or {}
+    return {"round": st.get("round", 0) + 1, "rounds_total": tj.hyperparams.get("rounds"),
+            "phase": st.get("phase"), "run_id": st.get("run_id"), "rounds": st.get("rounds", [])}  # fmt: skip
+
+
 def _apply_events(tj: TrainingJob, events: list[dict[str, Any]]) -> str | None:
     """Fold sft.py's progress events into the row; returns an error message if one came."""
     losses = list(tj.losses or [])
@@ -507,15 +678,19 @@ def _apply_events(tj: TrainingJob, events: list[dict[str, Any]]) -> str | None:
             tj.step = int(ev.get("step") or tj.step)
             tj.epoch = ev.get("epoch", tj.epoch)
             if isinstance(ev.get("loss"), int | float):
-                losses.append({"step": tj.step, "loss": round(float(ev["loss"]), 5)})
+                point = {"step": tj.step, "loss": round(float(ev["loss"]), 5)}
+                if isinstance(ev.get("accuracy"), int | float):  # DPO: chosen preferred
+                    point["accuracy"] = round(float(ev["accuracy"]), 4)
+                losses.append(point)
         elif kind == "eval":
             if isinstance(ev.get("loss"), int | float):
-                losses.append(
-                    {
-                        "step": int(ev.get("step") or tj.step),
-                        "eval_loss": round(float(ev["loss"]), 5),
-                    }
-                )
+                point = {
+                    "step": int(ev.get("step") or tj.step),
+                    "eval_loss": round(float(ev["loss"]), 5),
+                }
+                if isinstance(ev.get("accuracy"), int | float):
+                    point["eval_accuracy"] = round(float(ev["accuracy"]), 4)
+                losses.append(point)
         elif kind == "error":
             error = str(ev.get("message") or "training failed")[:2000]
     tj.losses = losses[-2000:]
@@ -536,13 +711,23 @@ def _create_adapter(db: Session, tj: TrainingJob, local: Path) -> Adapter:
     with contextlib.suppress(OSError, ValueError):
         rank = int(json.loads((local / "adapter_config.json").read_text()).get("r") or 0) or None
     keep = ("n_train", "n_val", "global_step", "final_train_loss", "mean_train_loss", "final_eval_loss",
-            "trainable_params", "dataset_sha256", "started_at", "finished_at")  # fmt: skip
+            "final_train_accuracy", "final_eval_accuracy", "trainable_params", "dataset_sha256",
+            "started_at", "finished_at")  # fmt: skip
     metrics = {k: manifest[k] for k in keep if k in manifest}
+    metrics["method"] = tj.method or "sft"
+    if tj.method == "grpo":  # the reward curve is the result that matters
+        metrics["rounds"] = (tj.state or {}).get("rounds", [])
     metrics["lineage"] = {"dataset": tj.hyperparams.get("dataset_name"), "packs": d.packs if d else None,
-                          "source_runs": d.source_runs if d else None}  # fmt: skip
+                          "source_runs": d.source_runs if d else None, "method": tj.method or "sft",
+                          "init_adapter": tj.init_adapter}  # fmt: skip
+    pack = d.packs[0] if d and d.packs else tj.hyperparams.get("pack")
+    if pack is None and tj.init_adapter:  # DPO on a mixed dataset: test where the parent was
+        parent = db.scalar(select(Adapter).where(Adapter.workspace_id == tj.workspace_id,
+                                                 Adapter.name == tj.init_adapter))  # fmt: skip
+        pack = parent.pack if parent else None
     a = Adapter(
         workspace_id=tj.workspace_id, name=tj.adapter_name, base_model=tj.base_model,
-        pack=(d.packs[0] if d and d.packs else None), dataset_id=tj.dataset_id,
+        pack=pack, dataset_id=tj.dataset_id,
         training_job_id=tj.id, box_id=tj.box_id, path=str(local), lora_rank=rank,
         metrics=metrics, created_by=tj.created_by,
     )  # fmt: skip
@@ -553,6 +738,9 @@ def _create_adapter(db: Session, tj: TrainingJob, local: Path) -> Adapter:
 
 def poll_training(db: Session, tj: TrainingJob) -> None:
     """One poll of a running job: progress, logs, and the end (fetch the adapter)."""
+    if tj.method == "grpo":
+        poll_grpo(db, tj)
+        return
     s = get_settings()
     box = db.get(GpuBox, tj.box_id) if tj.box_id else None
     if box is None:
@@ -640,6 +828,310 @@ def poll_trainings(db: Session) -> int:
     return n
 
 
+# ---- GRPO: reinforcement learning against the environment's verifier --------------------
+#
+# One training job, many rounds. Round r (0-based) runs four phases, kept in tj.state:
+#
+#   rollout   compute job grpo_rollout: serve base + the current adapter, then queue a
+#             rollout *run*: tasks_per_round training tasks x group_size attempts each
+#             (Run.repeats), sampled at `temperature`, on seeds 10000 + r*tasks_per_round
+#   rollouts  the runs worker plays them (8 at a time on vLLM); polls wait for the run
+#   train     compute job grpo_train: score each group -> advantages, drop groups whose
+#             attempts all scored the same (no signal), stop vLLM, upload, start
+#             grpo_step.py: current adapter -> <name>-r<r+1> (the last round: <name>)
+#   training  polls follow grpo_step.py like an SFT job; then round r+1 starts
+#
+# The KL anchor of every update is the adapter the run started from (init_adapter).
+# Each round's rollout run is an ordinary run in the Runs list, so the reward curve and
+# every attempt's replay are there to look at.
+
+
+def _grpo_job(db: Session, job: Job) -> TrainingJob:
+    tj = db.get(TrainingJob, (job.payload or {}).get("training_job_id"))
+    if tj is None or tj.workspace_id != job.workspace_id or tj.method != "grpo":
+        raise ValueError("GRPO training job not found")
+    return tj
+
+
+def _round_out(tj: TrainingJob, r: int) -> str:
+    """The adapter round r's update writes: <name>-r<k>, or <name> for the last round."""
+    return tj.adapter_name if r + 1 >= tj.hyperparams["rounds"] else f"{tj.adapter_name}-r{r + 1}"
+
+
+def grpo_rollouts(
+    run_dir: Path, tools: list[dict[str, Any]] | None
+) -> tuple[list[dict], dict[str, Any]]:
+    """Score a rollout run's attempts against their group: `(rows, round stats)`.
+
+    A group is every attempt at the same task. advantage = (reward - mean) / std within
+    the group; groups whose attempts all scored the same teach nothing and are dropped.
+    Attempts that crashed on an infrastructure error don't count at all.
+    """
+    from envforge.core.trajectory import load_run
+    from envforge.train.filter import to_chat_example
+
+    groups: dict[tuple, list] = {}
+    for t in load_run(run_dir):
+        if not t.error:
+            groups.setdefault((t.task.pack, t.task.tier, t.task.seed), []).append(t)
+    rows, rewards, informative = [], [], 0
+    for key, attempts in sorted(groups.items()):
+        rs = [t.reward for t in attempts]
+        rewards += rs
+        mu = sum(rs) / len(rs)
+        std = (sum((x - mu) ** 2 for x in rs) / len(rs)) ** 0.5
+        if len(rs) < 2 or std < 1e-6:
+            continue
+        informative += 1
+        for t, x in zip(attempts, rs, strict=True):
+            ex = to_chat_example(t, tools)
+            rows.append({"messages": ex["messages"], "tools": tools, "advantage": (x - mu) / std,
+                         "reward": x, "group": "/".join(map(str, key)), "meta": ex["meta"]})  # fmt: skip
+    stats = {
+        "attempts": len(rewards),
+        "mean_reward": round(sum(rewards) / len(rewards), 4) if rewards else 0.0,
+        "solve_rate": round(sum(x >= 1.0 for x in rewards) / len(rewards), 4) if rewards else 0.0,
+        "groups": len(groups),
+        "informative_groups": informative,
+        "trained_on": len(rows),
+    }
+    return rows, stats
+
+
+def run_grpo_rollout(db: Session, job: Job, box: GpuBox) -> None:
+    """Worker, phase `rollout`: serve the current adapter, queue the round's rollout run."""
+    from envforge.web.services import enqueue_run
+
+    tj = _grpo_job(db, job)
+    if tj.cancel_requested or tj.status == "cancelled":
+        _finish(db, tj, "cancelled")
+        return
+    st, hp = dict(tj.state or {}), tj.hyperparams
+    r = st["round"]
+    if tj.status == "queued":
+        tj.status, tj.started_at = "running", datetime.now(UTC)
+    tj.polled_at = datetime.now(UTC)
+    db.commit()
+    current = st["current"]
+    ranks = [a.lora_rank for a in db.scalars(select(Adapter).where(
+        Adapter.workspace_id == tj.workspace_id, Adapter.name == tj.init_adapter)) if a.lora_rank]  # fmt: skip
+    C.serve_on_box(db, job, box, model=tj.base_model, adapters=[current],
+                   max_lora_rank=C._lora_rank_bucket(ranks))  # fmt: skip
+    ws = db.get(Workspace, tj.workspace_id)
+    user = db.get(User, tj.created_by)
+    try:
+        run = enqueue_run(
+            db, ws, user, pack=hp["pack"], model=f"vllm:{current}",
+            episodes=hp["tasks_per_round"] * hp["group_size"], tiers=list(hp.get("tiers") or []),
+            seed_start=TRAIN_SEED_MIN + r * hp["tasks_per_round"], temperature=hp["temperature"],
+            label=f"{tj.adapter_name} · GRPO round {r + 1}/{hp['rounds']} rollouts",
+            repeats=hp["group_size"],
+        )  # fmt: skip
+    except HTTPException as e:
+        raise ValueError(str(e.detail)) from e
+    tj.state = {**st, "phase": "rollouts", "run_id": run.id}
+    job.progress = f"queued rollout run {run.id}"
+    db.commit()
+
+
+def run_grpo_train(db: Session, job: Job, box: GpuBox) -> None:
+    """Worker, phase `train`: score the rollouts, free the GPU, start this round's update."""
+    from envforge.web.builder import resolve_pack
+
+    tj = _grpo_job(db, job)
+    if tj.cancel_requested or tj.status == "cancelled":
+        _finish(db, tj, "cancelled")
+        return
+    st, hp = dict(tj.state or {}), tj.hyperparams
+    r = st["round"]
+    run = db.get(Run, st.get("run_id"))
+    if run is None or not run.run_dir:
+        raise ValueError("the round's rollout run is gone")
+    ws = db.get(Workspace, tj.workspace_id)
+    tools = ds.tool_schemas(resolve_pack(db, ws, hp["pack"], include_deleted=True))
+    rows, stats = grpo_rollouts(Path(run.run_dir), tools)
+    rounds = [*st.get("rounds", []), {"round": r + 1, "run_id": run.id, **stats}]
+    out = _round_out(tj, r)
+    if not rows:
+        # every group was all-solved or all-failed: nothing to learn from this round
+        tj.state = {**st, "rounds": rounds}
+        db.commit()
+        _next_round(db, tj, skipped=True)
+        return
+    data_dir = config.sft_dir(ws.slug) / tj.adapter_name / f"grpo-round-{r + 1}"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / "train.jsonl").write_text("".join(json.dumps(x) + "\n" for x in rows))
+    job.progress = f"round {r + 1}: training on {len(rows)} attempts"
+    db.commit()
+    hf_token = crypto.decrypt(box.hf_token_ciphertext) if box.hf_token_ciphertext else None
+    with C.open_box(db, box) as cb:
+        runtime = C.resolve_box_runtime(db, box, cb)
+        if box.serve_state != "stopped":  # vLLM holds the GPU's memory; training needs it
+            stop_vllm(cb, box.vllm_port, runtime=runtime)  # type: ignore[arg-type]
+            box.serve_state, box.serve_error = "stopped", None
+            box.served_model = box.served_adapters = box.endpoint_url = None
+            db.commit()
+        C.ensure_adapter_on_box(db, cb, box, tj.init_adapter or st["current"], job)
+        remote.start_training(
+            cb, data_dir, base=tj.base_model, name=out, args=_script_args("grpo", hp),
+            hf_token=hf_token, replace=True, runtime=runtime,  # type: ignore[arg-type]
+            method="grpo", init_adapter=st["current"], ref_adapter=tj.init_adapter,
+        )  # fmt: skip
+    tj.runtime = runtime
+    tj.log_cursor = 0
+    tj.state = {**st, "rounds": rounds, "phase": "training", "out": out, "round_steps": 0}
+    db.commit()
+
+
+def _next_round(db: Session, tj: TrainingJob, *, skipped: bool = False) -> None:
+    """Move to the next round's rollouts, or finish after the last one."""
+    st, hp = dict(tj.state or {}), tj.hyperparams
+    r = st["round"]
+    if not skipped:
+        st["current"] = st["out"]
+    st["steps_done"] = st.get("steps_done", 0) + st.get("round_steps", 0)
+    tj.step = r + 1
+    if r + 1 >= hp["rounds"]:
+        tj.state = {**st, "phase": "fetching"}
+        db.commit()
+        return  # the next poll fetches the final adapter
+    # the next poll queues the round's grpo_rollout job (this may run inside a job, and a
+    # box takes one job at a time)
+    tj.state = {**st, "round": r + 1, "phase": "queue_rollout", "run_id": None, "out": None}
+    db.commit()
+
+
+def _enqueue_phase(db: Session, tj: TrainingJob, box: GpuBox, kind: str, phase: str) -> None:
+    """Queue the compute job for the next phase; if the box is busy, the next poll retries."""
+    try:
+        job = C.enqueue_box_job(
+            db, box, db.get(User, tj.created_by), kind, {"training_job_id": tj.id}
+        )
+    except HTTPException:
+        db.rollback()
+        return
+    tj.job_id = job.id
+    tj.state = {**(tj.state or {}), "phase": phase}
+    db.commit()
+
+
+def _apply_grpo_events(tj: TrainingJob, events: list[dict[str, Any]]) -> str | None:
+    """Fold grpo_step.py's events into the row, with steps counted across rounds."""
+    st = dict(tj.state or {})
+    losses = list(tj.losses or [])
+    error = None
+    for ev in events:
+        if ev.get("event") == "log" and isinstance(ev.get("loss"), int | float):
+            st["round_steps"] = int(ev.get("step") or 0)
+            losses.append({"step": st.get("steps_done", 0) + st["round_steps"], "round": st["round"] + 1,
+                           "loss": round(float(ev["loss"]), 5), "kl": round(float(ev.get("kl") or 0), 6)})  # fmt: skip
+        elif ev.get("event") == "error":
+            error = str(ev.get("message") or "training failed")[:2000]
+    tj.losses, tj.state = losses[-2000:], st
+    return error
+
+
+def _grpo_cancel(db: Session, tj: TrainingJob, cb: Any | None) -> None:
+    st = tj.state or {}
+    run = db.get(Run, st.get("run_id")) if st.get("run_id") else None
+    if run is not None and run.status in ("queued", "running"):
+        run.status = "cancelled"  # the runs worker stops it between episodes
+    if cb is not None and st.get("phase") == "training" and st.get("out"):
+        remote.remove_container(cb, st["out"], runtime=tj.runtime or "docker")  # type: ignore[arg-type]
+    job = db.get(Job, tj.job_id) if tj.job_id else None
+    if job is not None and job.status == "queued":
+        job.status, job.finished_at = "cancelled", datetime.now(UTC)
+
+
+def poll_grpo(db: Session, tj: TrainingJob) -> None:
+    """One poll of a GRPO job: advance whichever phase it is in."""
+    s = get_settings()
+    st = dict(tj.state or {})
+    phase = st.get("phase")
+    box = db.get(GpuBox, tj.box_id) if tj.box_id else None
+    if box is None:
+        _finish(db, tj, "failed", "the GPU box was removed while training")
+        return
+    tj.polled_at = datetime.now(UTC)
+    started = _aware(tj.started_at) or datetime.now(UTC)
+    too_long = datetime.now(UTC) - started > timedelta(hours=s.TRAIN_MAX_HOURS)
+    if (tj.cancel_requested or too_long) and phase != "training":
+        _grpo_cancel(db, tj, None)
+        if too_long:
+            _finish(
+                db, tj, "failed", f"stopped: ran longer than TRAIN_MAX_HOURS={s.TRAIN_MAX_HOURS:g}"
+            )
+        else:
+            _finish(db, tj, "cancelled")
+        return
+    if phase in ("rollout", "train"):  # a compute job is doing this phase
+        db.commit()
+        return
+    if phase == "queue_rollout":
+        _enqueue_phase(db, tj, box, "grpo_rollout", "rollout")
+        return
+    if phase == "rollouts":
+        run = db.get(Run, st.get("run_id"))
+        if run is None or run.status in ("failed", "cancelled"):
+            why = (run.error if run else None) or (run.status if run else "the run is gone")
+            _finish(db, tj, "failed", f"round {st['round'] + 1} rollouts: {why}"[:2000])
+        elif run.status == "completed":
+            _enqueue_phase(db, tj, box, "grpo_train", "train")
+        else:
+            db.commit()
+        return
+    try:
+        with C.open_box(db, box) as cb:
+            if phase == "training":
+                if tj.cancel_requested or too_long:
+                    _grpo_cancel(db, tj, cb)
+                    _finish(db, tj, "cancelled" if not too_long else "failed",
+                            None if not too_long else f"stopped: ran longer than TRAIN_MAX_HOURS={s.TRAIN_MAX_HOURS:g}")  # fmt: skip
+                    return
+                runtime = tj.runtime or "docker"
+                events, cursor, status = remote.poll_once(
+                    cb, st["out"], tj.log_cursor, runtime=runtime
+                )  # type: ignore[arg-type]
+                tj.log_cursor = cursor
+                error = _apply_grpo_events(tj, events)
+                tj.log_tail = remote.logs(cb, st["out"], 60, runtime=runtime)[-8000:]  # type: ignore[arg-type]
+                tj.poll_failures = 0
+                db.commit()
+                if status.running:
+                    return
+                if not status.exists or status.exit_code != 0:
+                    _finish(db, tj, "failed", error or f"round {st['round'] + 1} update exited with code "
+                            f"{status.exit_code}; see the log")  # fmt: skip
+                    return
+                remote.remove_container(cb, st["out"], runtime=runtime)  # type: ignore[arg-type]
+                _next_round(db, tj)
+                return
+            if phase == "fetching":
+                ws = db.get(Workspace, tj.workspace_id)
+                final = (tj.state or {}).get("current")
+                if final == tj.init_adapter:
+                    _finish(db, tj, "failed", "no round had a learning signal (every group of attempts "
+                            "scored the same); try more tasks per round or a higher temperature")  # fmt: skip
+                    return
+                local = remote.fetch_adapter(cb, final, config.workspace_dir(ws.slug) / "adapters")
+    except (ComputeError, OSError, ValueError) as e:
+        db.rollback()
+        tj.poll_failures += 1
+        tj.polled_at = datetime.now(UTC)
+        if tj.poll_failures >= s.TRAIN_MAX_POLL_FAILURES:
+            _finish(db, tj, "failed", f"box unreachable for {tj.poll_failures} polls: {e}"[:2000])
+        else:
+            db.commit()
+        return
+    if phase == "fetching":
+        if final != tj.adapter_name:  # the last round was skipped: keep the job's name
+            target = local.with_name(tj.adapter_name)
+            shutil.rmtree(target, ignore_errors=True)
+            local = local.rename(target)
+        _create_adapter(db, tj, local)
+        _finish(db, tj, "completed")
+
+
 # ---- adapters ------------------------------------------------------------------------
 
 
@@ -672,6 +1164,7 @@ def adapter_out(db: Session, a: Adapter) -> dict[str, Any]:
         "dataset_deleted": a.dataset_id is None, "training_job_id": a.training_job_id,
         "lora_rank": a.lora_rank, "metrics": {k: v for k, v in (a.metrics or {}).items() if k != "lineage"},
         "source_runs": lineage.get("source_runs") or [], "test_run_id": a.test_run_id,
+        "method": lineage.get("method") or "sft", "init_adapter": lineage.get("init_adapter"),
         "served_on": served, "created_at": a.created_at,
     }  # fmt: skip
 
@@ -698,6 +1191,7 @@ def test_adapter(
     if not 1 <= episodes <= 1000:
         raise HTTPException(400, "episodes must be 1..1000")
     box = C.get_box(db, ws, box_id)
+    C.refuse_while_training(db, box)
     return C.enqueue_box_job(
         db, box, user, "adapter_test", {"adapter_id": a.id, "episodes": episodes}
     )

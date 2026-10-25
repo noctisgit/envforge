@@ -59,6 +59,9 @@ class WebSettings(BaseSettings):
     TRAIN_MAX_HOURS: float = 24.0  # a training job running longer is stopped and failed
     TRAIN_POLL_SECONDS: int = 20  # how often the compute worker reads training progress
     TRAIN_MAX_POLL_FAILURES: int = 15  # consecutive unreachable polls before giving up
+    # episodes a run on a vLLM model plays at once: vLLM batches concurrent requests, so a
+    # small open model gets through an evaluation (or GRPO's rollouts) several times faster
+    VLLM_RUN_CONCURRENCY: int = 8
 
     # --- http ---
     CORS_ORIGINS: Annotated[list[str], NoDecode] = ["http://localhost:3000"]

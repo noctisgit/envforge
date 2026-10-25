@@ -714,14 +714,18 @@ export interface DatasetSource {
   eligible: boolean;
   reason: string | null;
 }
+export type DatasetKind = "sft" | "preference";
 export interface DatasetFilters {
   run_ids: string[];
   min_reward: number;
   val_frac: number;
   best_per_task: boolean;
+  kind?: DatasetKind; // preference: chosen/rejected pairs of the same task, for DPO
+  max_pairs_per_task?: number;
 }
 export interface DatasetPreview {
-  kept: number;
+  kind?: DatasetKind;
+  kept: number; // examples, or pairs for a preference dataset
   n_train: number;
   n_val: number;
   tasks: number;
@@ -730,6 +734,11 @@ export interface DatasetPreview {
   examples_per_task?: { min: number; max: number; mean: number };
   by_pack_tier?: Record<string, number>;
   models?: Record<string, number>;
+  // preference datasets
+  chosen_episodes?: number;
+  rejected_episodes?: number;
+  tasks_without_rejected?: number;
+  tasks_without_chosen?: number;
   packs: string[];
   overlap: { run_id: string; label: string; model: string; tasks: number; sample: string[] }[];
   warnings: string[];
@@ -737,8 +746,9 @@ export interface DatasetPreview {
 export interface DatasetRow {
   id: string;
   name: string;
+  kind: DatasetKind;
   source_runs: string[];
-  filters: { min_reward: number; val_frac: number; best_per_task: boolean };
+  filters: { min_reward: number; val_frac: number; best_per_task?: boolean; max_pairs_per_task?: number };
   packs: string[];
   counts: DatasetPreview;
   n_train: number;
@@ -747,6 +757,7 @@ export interface DatasetRow {
   tasks: Record<string, number[][]> | null;
 }
 
+export type TrainMethod = "sft" | "dpo" | "grpo";
 export interface TrainParams {
   epochs: number;
   lr: number;
@@ -756,17 +767,40 @@ export interface TrainParams {
   batch_size: number;
   grad_accum: number;
   max_steps: number | null;
+  // dpo
+  beta?: number;
+  // grpo: the loop, and each round's update
+  rounds?: number;
+  tasks_per_round?: number;
+  group_size?: number;
+  temperature?: number;
+  kl_beta?: number;
+  clip_eps?: number;
+}
+export interface GrpoRound {
+  round: number;
+  run_id: string;
+  attempts: number;
+  mean_reward: number;
+  solve_rate: number;
+  groups: number;
+  informative_groups: number;
+  trained_on: number;
 }
 export interface TrainingJob {
   id: string;
   status: "queued" | "starting" | "running" | "fetching" | "completed" | "failed" | "cancelled";
   adapter_name: string;
   base_model: string;
+  method: TrainMethod;
+  init_adapter: string | null; // dpo / grpo continue from this adapter
+  pack: string | null; // grpo: the environment it learns in
   dataset_id: string | null;
   dataset_name: string | null;
   box_id: string | null;
   box_name: string | null;
   hyperparams: TrainParams;
+  grpo: { round: number; rounds_total: number; phase: string; run_id: string | null; rounds: GrpoRound[] } | null;
   step: number;
   total_steps: number | null;
   epoch: number | null;
@@ -781,12 +815,13 @@ export interface TrainingJob {
   started_at: string | null;
   finished_at: string | null;
   polled_at: string | null;
-  losses?: { step: number; loss?: number; eval_loss?: number }[];
+  losses?: { step: number; loss?: number; eval_loss?: number; accuracy?: number; eval_accuracy?: number; kl?: number; round?: number }[];
   log_tail?: string;
 }
 export interface TrainingList {
   jobs: TrainingJob[];
   defaults: TrainParams & { base_model: string };
+  method_defaults: Record<TrainMethod, Partial<TrainParams>>;
   can_manage: boolean;
 }
 export interface AdapterRow {
@@ -800,7 +835,17 @@ export interface AdapterRow {
   dataset_deleted: boolean;
   training_job_id: string | null;
   lora_rank: number | null;
-  metrics: Record<string, number | string | null>;
+  metrics: {
+    n_train?: number;
+    global_step?: number;
+    final_train_loss?: number | null;
+    final_eval_loss?: number | null;
+    final_eval_accuracy?: number | null; // dpo: share of held-out pairs it prefers correctly
+    rounds?: GrpoRound[]; // grpo: each round's rollouts
+    [k: string]: unknown;
+  };
+  method: TrainMethod;
+  init_adapter: string | null; // dpo / grpo: the adapter it continued from
   source_runs: string[];
   test_run_id: string | null;
   served_on: { box_id: string; box_name: string; endpoint_url: string | null }[];
@@ -832,7 +877,10 @@ export const Compute = {
 
   trainings: (ws: string) => api<TrainingList>(`${W(ws)}/training`),
   training: (ws: string, id: string) => api<TrainingJob>(`${W(ws)}/training/${id}`),
-  startTraining: (ws: string, body: Partial<TrainParams> & { dataset_id: string; box_id: string; base_model: string; adapter_name?: string }) =>
+  startTraining: (
+    ws: string,
+    body: Partial<TrainParams> & { method?: TrainMethod; dataset_id?: string | null; box_id: string; base_model: string; adapter_name?: string; init_adapter?: string | null; pack?: string | null },
+  ) =>
     api<TrainingJob>(`${W(ws)}/training`, post(body)),
   cancelTraining: (ws: string, id: string) => api<TrainingJob>(`${W(ws)}/training/${id}/cancel`, post()),
 

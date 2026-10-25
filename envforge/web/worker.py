@@ -178,6 +178,8 @@ def _execute(db: Session, run: Run, stack: contextlib.ExitStack) -> None:
             raise _SpendLimit()  # the workspace's monthly limit: stop between episodes
 
     priced = provider not in ("scripted", "vllm")
+    # self-hosted models batch concurrent requests; hosted APIs keep one episode at a time
+    concurrency = max(1, get_settings().VLLM_RUN_CONCURRENCY) if provider == "vllm" else 1
 
     with _Heartbeat(run.id):
         try:
@@ -192,6 +194,8 @@ def _execute(db: Session, run: Run, stack: contextlib.ExitStack) -> None:
                 run_id=run.id,
                 progress=progress,
                 extra_meta={"workspace": ws.slug, "label": run.label},
+                repeats=max(1, run.repeats or 1),
+                concurrency=concurrency,
             )
             run.run_dir = str(run_dir)
             report = evaluate_run(run_dir)

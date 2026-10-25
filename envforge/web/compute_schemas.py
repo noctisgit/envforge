@@ -41,6 +41,9 @@ class DatasetFilterIn(BaseModel):
     min_reward: float = Field(default=1.0, ge=0, le=1)
     val_frac: float = Field(default=0.05, ge=0, le=0.5)
     best_per_task: bool = True
+    # sft: solved episodes; preference: chosen/rejected pairs of the same task for DPO
+    kind: Literal["sft", "preference"] = "sft"
+    max_pairs_per_task: int = Field(default=4, ge=1, le=32)
 
 
 class DatasetIn(DatasetFilterIn):
@@ -48,10 +51,21 @@ class DatasetIn(DatasetFilterIn):
 
 
 class TrainIn(BaseModel):
-    dataset_id: str = Field(max_length=32)
+    method: Literal["sft", "dpo", "grpo"] = "sft"
+    dataset_id: str | None = Field(default=None, max_length=32)  # sft / dpo; GRPO makes its own
     box_id: str = Field(max_length=32)
     base_model: str = Field(min_length=1, max_length=200)
     adapter_name: str | None = Field(default=None, max_length=63)
+    init_adapter: str | None = Field(default=None, max_length=63)  # dpo / grpo start from it
+    pack: str | None = Field(default=None, max_length=80)  # grpo: the environment to train on
+    # dpo / grpo hyper-parameters (ranges are checked in training_service)
+    beta: float | None = None
+    kl_beta: float | None = None
+    clip_eps: float | None = None
+    rounds: int | None = None
+    tasks_per_round: int | None = None
+    group_size: int | None = None
+    temperature: float | None = None
     epochs: float | None = None
     lr: float | None = None
     lora_r: int | None = None

@@ -69,3 +69,63 @@ def test_filter_keeps_only_clean_successes(tmp_path):
 def test_metrics_empty():
     m = compute_metrics([])
     assert m.n == 0 and m.solve_rate == 0.0
+
+
+def test_run_many_repeats_give_each_task_a_group_of_attempts(tmp_path):
+    run_dir = run_many(PACK, load_model("scripted"), runs_dir=tmp_path, episodes=6,
+                       tiers=[1, 2], seed_start=10_000, repeats=3)  # fmt: skip
+    trajs = load_run(run_dir)
+    assert [t.episode for t in trajs] == list(range(6))
+    assert [(t.task.seed, t.task.tier) for t in trajs] == [(10_000, 1)] * 3 + [(10_001, 2)] * 3
+
+
+def test_run_many_concurrency_keeps_episode_order(tmp_path):
+    import random
+    import threading
+    import time
+
+    from envforge.models.base import ChatModel
+
+    local = threading.local()  # the scripted model keeps per-episode state: one per thread
+    seen_threads: set[str] = set()
+
+    class Threaded(ChatModel):
+        """Scripted answers with random delays, so episodes finish out of order."""
+
+        model_id = "threaded"
+
+        def _inner(self):
+            if not hasattr(local, "model"):
+                local.model = load_model("scripted")
+            return local.model
+
+        def on_reset(self, env):
+            self._inner().on_reset(env)
+
+        def complete(self, messages, tools):
+            seen_threads.add(threading.current_thread().name)
+            time.sleep(random.random() * 0.02)
+            return self._inner().complete(messages, tools)
+
+    order: list[int] = []
+    run_dir = run_many(PACK, Threaded(), runs_dir=tmp_path, episodes=8, tiers=[1, 2, 3],
+                       concurrency=4, progress=lambda t: order.append(t.episode))  # fmt: skip
+    trajs = load_run(run_dir)
+    assert [t.episode for t in trajs] == order == list(range(8))
+    assert all(t.success for t in trajs) and len(seen_threads) > 1
+
+
+def test_run_many_stops_when_progress_raises(tmp_path):
+    import pytest
+
+    class Stop(Exception):
+        pass
+
+    def progress(t):
+        if t.episode == 2:
+            raise Stop
+
+    with pytest.raises(Stop):
+        run_many(PACK, load_model("scripted"), runs_dir=tmp_path, episodes=20, tiers=[1],
+                 concurrency=4, progress=progress, run_id="stopped")  # fmt: skip
+    assert len(load_run(tmp_path / "stopped")) == 3  # nothing written after the stop

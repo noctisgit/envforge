@@ -220,3 +220,53 @@ def test_vllm_serves_lora_adapters_by_name():
     with pytest.raises(ValueError):
         vllm_docker_run("m", lora_adapters=["bad name"])
     assert "--enable-lora" not in vllm_docker_run("m")
+
+
+def test_dpo_and_grpo_commands_in_both_runtimes():
+    dpo_args = remote.DPOArgs(beta=0.2, epochs=2)
+    pod = remote.build_pod_train("abcd-dpo1", "Qwen/Qwen2.5-3B-Instruct", dpo_args, has_val=True,
+                                 method="dpo", init_adapter="abcd-sft1")  # fmt: skip
+    assert pod[:2] == ["python3", "/root/envforge/jobs/abcd-dpo1/dpo.py"]
+    assert pod[pod.index("--init-adapter") + 1] == "/root/envforge/adapters/abcd-sft1"
+    assert "--val" in pod and pod[pod.index("--beta") + 1] == "0.2"
+    assert pod[pod.index("--out") + 1] == "/root/envforge/adapters/abcd-dpo1"
+
+    grpo_args = remote.GRPOArgs(kl_beta=0.02)
+    docker = remote.build_docker_run("run-r3", "Qwen/Qwen2.5-3B-Instruct", grpo_args, has_val=True,
+                                     method="grpo", init_adapter="run-r2", ref_adapter="abcd-sft1")  # fmt: skip
+    cmd = docker[-1]
+    assert "/job/grpo_step.py" in cmd and "--val" not in cmd  # rollouts have no validation split
+    assert "--policy-adapter /adapters/run-r2 --ref-adapter /adapters/abcd-sft1" in cmd
+    assert "--kl-beta 0.02" in cmd
+
+    with pytest.raises(ValueError, match="init_adapter"):
+        remote.build_pod_train("x", "b", grpo_args, has_val=False, method="grpo")
+    with pytest.raises(ValueError, match="invalid adapter name"):
+        remote.build_pod_train(
+            "x", "b", dpo_args, has_val=False, method="dpo", init_adapter="../etc"
+        )
+    with pytest.raises(ValueError, match="unknown training method"):
+        remote.build_pod_train("x", "b", dpo_args, has_val=False, method="ppo")
+
+
+def test_start_training_uploads_the_method_script_and_needs_its_adapters(tmp_path):
+    from envforge.compute.fake import FakeGPUBox
+
+    data = tmp_path / "pairs"
+    data.mkdir()
+    (data / "train.jsonl").write_text("{}\n")
+    box = FakeGPUBox()
+    with pytest.raises(ComputeError, match="abcd-sft1 is not on the box"):
+        remote.start_training(box, data, base="Qwen/Qwen2.5-3B-Instruct", name="abcd-dpo1",
+                              args=remote.DPOArgs(), method="dpo", init_adapter="abcd-sft1")  # fmt: skip
+    box.adapters.add("abcd-sft1")
+    remote.start_training(box, data, base="Qwen/Qwen2.5-3B-Instruct", name="abcd-dpo1",
+                          args=remote.DPOArgs(), method="dpo", init_adapter="abcd-sft1")  # fmt: skip
+    uploaded = {Path(r).name for _, r in box.puts}
+    assert {
+        "train.jsonl",
+        "sft.py",
+        "lora_tools.py",
+        "dpo.py",
+    } <= uploaded and "grpo_step.py" not in uploaded
+    assert "dpo.py" in box.trainings["abcd-dpo1"]["cmd"]

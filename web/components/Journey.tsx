@@ -191,6 +191,8 @@ function StepBody({ step, ws, data, onChange }: { step: Step; goal: GoalId; ws: 
   const base = ws.train_base_model || "Qwen/Qwen2.5-3B-Instruct";
   const serving = data.boxes?.find((b) => b.serve_state === "serving");
   const adapter = data.adapters?.[0];
+  // the model actually in use beats the workspace default (which may name another size)
+  const student = serving?.served_model ?? adapter?.base_model ?? base;
   const markAnd = (id: string) => () => {
     saveMark(ws.id, id, true);
     onChange();
@@ -339,8 +341,8 @@ function StepBody({ step, ws, data, onChange }: { step: Step; goal: GoalId; ws: 
       const ref = teacherEval[0];
       return (
         <div className="flex flex-wrap gap-2">
-          <Link href={newRunHref({ pack, model: `vllm:${base}`, seed: EVAL_SEED, episodes: ref?.episodes ?? 50, label: "student · baseline" })} className="btn">
-            Run {base.split("/").pop()} on the same seeds
+          <Link href={newRunHref({ pack, model: `vllm:${student}`, seed: EVAL_SEED, episodes: ref?.episodes ?? 50, label: "student · baseline" })} className="btn">
+            Run {student.split("/").pop()} on the same seeds
           </Link>
           {!vllm && <span className="hint self-center">Needs the vLLM provider from the previous step.</span>}
         </div>
@@ -398,6 +400,30 @@ function StepBody({ step, ws, data, onChange }: { step: Step; goal: GoalId; ws: 
       );
     }
 
+    case "beyond":
+      return (
+        <div className="space-y-2">
+          <ul className="hint list-disc space-y-1 pl-5">
+            <li>
+              <b>DPO:</b> run your adapter on training seeds, then build <i>preference pairs</i> from that run plus a teacher run on the same seeds, and train with
+              method DPO starting from your adapter.
+            </li>
+            <li>
+              <b>GRPO:</b> pick method GRPO, your adapter and the environment. Each round the model attempts training tasks several times, the verifier scores the
+              attempts, and the adapter moves toward the ones that beat their group.
+            </li>
+          </ul>
+          <div className="flex flex-wrap gap-2">
+            <Link href="/datasets" className="btn-ghost">
+              Build preference pairs
+            </Link>
+            <Link href="/training" className="btn">
+              Open Fine-tune
+            </Link>
+          </div>
+        </div>
+      );
+
     case "use": {
       const url = serving?.endpoint_url ?? vllm?.base_url ?? "http://<gpu-box>:8000/v1";
       const model = adapter?.name ?? adapterEval[0]?.model.slice(5) ?? "<adapter>";
@@ -420,7 +446,7 @@ print(reply.choices[0].message.content)`}
               Endpoint, curl and download on Models
             </Link>
             <span className="hint">
-              The adapter only works on top of <span className="mono">{base}</span>.
+              The adapter only works on top of <span className="mono">{adapter?.base_model ?? base}</span>.
             </span>
           </div>
         </div>

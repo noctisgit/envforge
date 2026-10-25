@@ -15,6 +15,7 @@ import re
 import time
 import uuid
 from collections.abc import Callable, Iterable
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -178,12 +179,22 @@ def run_many(
     run_id: str | None = None,
     progress: Callable[[Trajectory], None] | None = None,
     extra_meta: dict[str, Any] | None = None,
+    repeats: int = 1,
+    concurrency: int = 1,
 ) -> Path:
     """Run `episodes` episodes, cycling through `tiers`, and write them to a run dir.
 
     Seeds are `seed_start + episode`, so a run is fully reproducible for a
     deterministic model (and the *tasks* are reproducible for any model).
+
+    `repeats=k` gives every task k attempts in a row (episodes 0..k-1 share a seed, then
+    the next task): the *groups* GRPO compares, sampled at temperature > 0.
+    `concurrency=n` runs up to n episodes at once in threads, for servers that batch
+    requests (vLLM). Trajectories are still written, and `progress` still called, in
+    episode order, from this thread.
     """
+    if repeats < 1 or concurrency < 1:
+        raise ValueError("repeats and concurrency must be at least 1")
     tiers = list(tiers)
     rid = run_id or new_run_id(env_cls.name, model.model_id)
     run_dir = runs_dir / rid
@@ -201,12 +212,34 @@ def run_many(
             **(extra_meta or {}),
         }
     )
-    for ep in range(episodes):
-        tier = tiers[ep % len(tiers)]
-        seed = seed_start + ep
-        task = env_cls.generate_task(seed=seed, tier=tier)
-        traj = run_episode(env_cls, task, model, run_id=rid, episode=ep, max_steps=max_steps)
+
+    def one(ep: int) -> Trajectory:
+        i = ep // repeats  # the task index: `repeats` episodes in a row share it
+        task = env_cls.generate_task(seed=seed_start + i, tier=tiers[i % len(tiers)])
+        return run_episode(env_cls, task, model, run_id=rid, episode=ep, max_steps=max_steps)
+
+    def record(traj: Trajectory) -> None:
         store.append(traj)
         if progress:
-            progress(traj)
+            progress(traj)  # may raise (e.g. a cancelled run): stops the run here
+
+    if concurrency == 1:
+        for ep in range(episodes):
+            record(one(ep))
+        return run_dir
+
+    # Up to `concurrency` episodes in flight; finished ones wait in `done` until every
+    # earlier episode is written, so the file stays in episode order.
+    pool = ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="episode")
+    try:
+        futures: dict[int, Future[Trajectory]] = {}
+        next_submit = next_write = 0
+        while next_write < episodes:
+            while next_submit < episodes and len(futures) < concurrency:
+                futures[next_submit] = pool.submit(one, next_submit)
+                next_submit += 1
+            record(futures.pop(next_write).result())  # waits for the oldest in flight
+            next_write += 1
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)  # on an error: drop what's queued
     return run_dir

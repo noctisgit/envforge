@@ -2,7 +2,9 @@
 
 // Datasets: rejection sampling in the browser. Pick finished runs on training seeds,
 // set the filters, watch the live preview (counts, split, overlap with evaluation runs),
-// save a named dataset. Saved datasets feed the Training page and can be downloaded.
+// save a named dataset. Two kinds: SFT examples (solved episodes to imitate) and
+// preference pairs for DPO (a solved and a failed episode of the same task). Saved
+// datasets feed the Fine-tune page and can be downloaded.
 
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
@@ -11,7 +13,7 @@ import { useConfirm } from "@/components/ConfirmDialog";
 import { newRunHref } from "@/components/Journey";
 import { Empty, Page, PageHeader, Panel, StatCard, StatGrid } from "@/components/Page";
 import { useToast } from "@/components/Toast";
-import { Compute, downloadFile, type DatasetPreview, type DatasetRow, type DatasetSource } from "@/lib/api";
+import { Compute, downloadFile, type DatasetKind, type DatasetPreview, type DatasetRow, type DatasetSource } from "@/lib/api";
 import { TRAIN_SEED } from "@/lib/journey";
 import { useWorkspace } from "@/lib/workspace";
 
@@ -25,12 +27,28 @@ const slug = (s: string) =>
 
 function Preview({ p, loading }: { p: DatasetPreview | null; loading: boolean }) {
   if (!p) return <p className="hint">{loading ? "Building a preview…" : "Pick at least one run to see what the dataset would contain."}</p>;
+  const pairs = p.kind === "preference";
   return (
     <div className="space-y-3" aria-live="polite" style={{ opacity: loading ? 0.6 : 1 }}>
       <StatGrid cols={4}>
-        <StatCard label="Examples" value={p.kept} note={p.episodes_seen !== undefined ? `of ${p.episodes_seen} episodes` : undefined} tone={p.kept ? undefined : "bad"} />
+        <StatCard
+          label={pairs ? "Pairs" : "Examples"}
+          value={p.kept}
+          note={pairs ? `${p.chosen_episodes ?? 0} solved · ${p.rejected_episodes ?? 0} failed episodes` : p.episodes_seen !== undefined ? `of ${p.episodes_seen} episodes` : undefined}
+          tone={p.kept ? undefined : "bad"}
+        />
         <StatCard label="Train / val" value={`${p.n_train} / ${p.n_val}`} note="split by task" />
-        <StatCard label="Tasks" value={p.tasks} note={p.examples_per_task ? `${p.examples_per_task.min}–${p.examples_per_task.max} examples each` : undefined} />
+        <StatCard
+          label={pairs ? "Tasks with a pair" : "Tasks"}
+          value={p.tasks}
+          note={
+            pairs
+              ? `${p.tasks_without_rejected ?? 0} never failed · ${p.tasks_without_chosen ?? 0} never solved`
+              : p.examples_per_task
+                ? `${p.examples_per_task.min}–${p.examples_per_task.max} examples each`
+                : undefined
+          }
+        />
         <StatCard label="Eval overlap" value={p.overlap.length ? `${p.overlap.reduce((n, o) => n + o.tasks, 0)} tasks` : "none"} tone={p.overlap.length ? "bad" : "good"} note={p.overlap.length ? `in ${p.overlap.length} eval run(s)` : "evaluation seeds stay clean"} />
       </StatGrid>
       {p.by_pack_tier && Object.keys(p.by_pack_tier).length > 0 && (
@@ -71,6 +89,8 @@ function DatasetsInner() {
   const [minReward, setMinReward] = useState(1);
   const [valPct, setValPct] = useState(5);
   const [bestPerTask, setBestPerTask] = useState(true);
+  const [kind, setKind] = useState<DatasetKind>("sft");
+  const [maxPairs, setMaxPairs] = useState(4);
   const [preview, setPreview] = useState<DatasetPreview | null>(null);
   const [previewing, setPreviewing] = useState(false);
   const [name, setName] = useState("");
@@ -111,7 +131,7 @@ function DatasetsInner() {
     }
     setPreviewing(true);
     const t = setTimeout(() => {
-      Compute.previewDataset(ws.id, { run_ids: picked, min_reward: minReward, val_frac: valPct / 100, best_per_task: bestPerTask })
+      Compute.previewDataset(ws.id, { run_ids: picked, min_reward: minReward, val_frac: valPct / 100, best_per_task: bestPerTask, kind, max_pairs_per_task: maxPairs })
         .then(setPreview)
         .catch((e) => {
           setPreview(null);
@@ -120,14 +140,14 @@ function DatasetsInner() {
         .finally(() => setPreviewing(false));
     }, 400);
     return () => clearTimeout(t);
-  }, [ws, picked, minReward, valPct, bestPerTask, toast]);
+  }, [ws, picked, minReward, valPct, bestPerTask, kind, maxPairs, toast]);
 
   // suggest a name from the environment
   useEffect(() => {
     if (name || picked.length === 0 || !sources) return;
     const first = sources.find((s) => s.id === picked[0]);
-    if (first) setName(slug(`${first.pack}-v${(datasets?.length ?? 0) + 1}`));
-  }, [picked, sources, datasets, name]);
+    if (first) setName(slug(`${first.pack}-${kind === "preference" ? "pairs" : "v"}${(datasets?.length ?? 0) + 1}`));
+  }, [picked, sources, datasets, name, kind]);
 
   if (!ws) return null;
 
@@ -135,8 +155,8 @@ function DatasetsInner() {
     e.preventDefault();
     setSaving(true);
     try {
-      const d = await Compute.saveDataset(ws!.id, { name, run_ids: picked, min_reward: minReward, val_frac: valPct / 100, best_per_task: bestPerTask });
-      toast.success("Dataset saved", `${d.name}: ${d.n_train} training and ${d.n_val} validation examples.`);
+      const d = await Compute.saveDataset(ws!.id, { name, run_ids: picked, min_reward: minReward, val_frac: valPct / 100, best_per_task: bestPerTask, kind, max_pairs_per_task: maxPairs });
+      toast.success("Dataset saved", `${d.name}: ${d.n_train} training and ${d.n_val} validation ${kind === "preference" ? "pairs" : "examples"}.`);
       setName("");
       setPicked([]);
       await load();
@@ -173,7 +193,8 @@ function DatasetsInner() {
         description={
           <>
             Training data from a strong model&apos;s solutions (<em>rejection sampling</em>): keep the episodes that scored well, one per task, and hold some tasks
-            out for validation. Only runs on training seeds ({TRAIN_SEED}+) can be used, so evaluation runs on seeds 0–99 stay a fair test.
+            out for validation. Or <em>preference pairs</em> for DPO: a solved and a failed episode of the same task. Only runs on training seeds ({TRAIN_SEED}+)
+            can be used, so evaluation runs on seeds 0–99 stay a fair test.
           </>
         }
       />
@@ -192,6 +213,31 @@ function DatasetsInner() {
           </div>
         ) : (
           <form onSubmit={save} className="space-y-5">
+            <fieldset>
+              <legend className="label">What to build</legend>
+              <div className="flex flex-wrap gap-2" role="radiogroup">
+                {(
+                  [
+                    ["sft", "SFT examples", "solved episodes to imitate"],
+                    ["preference", "Preference pairs (DPO)", "a solved and a failed episode of the same task"],
+                  ] as const
+                ).map(([k, label, note]) => (
+                  <label key={k} className={`inset-card flex cursor-pointer items-start gap-2 px-3 py-2 text-sm ${kind === k ? "" : "opacity-70"}`} style={kind === k ? { borderColor: "var(--accent)" } : undefined}>
+                    <input type="radio" name="ds-kind" className="mt-1" checked={kind === k} onChange={() => setKind(k)} />
+                    <span>
+                      <span className="block">{label}</span>
+                      <span className="hint">{note}</span>
+                    </span>
+                  </label>
+                ))}
+              </div>
+              {kind === "preference" && (
+                <p className="hint mt-2">
+                  The failed side should come from the model you want to improve: run your adapter on training seeds ({TRAIN_SEED}+) and pick that run together
+                  with a teacher run on the same seeds.
+                </p>
+              )}
+            </fieldset>
             {wantedIneligible.length > 0 && (
               <p className="text-sm" style={{ color: "var(--warn)" }}>
                 {wantedIneligible.length} of the runs you came from can&apos;t be used: {wantedIneligible[0].reason}.
@@ -237,7 +283,7 @@ function DatasetsInner() {
             <div className="grid grid-cols-1 items-end gap-4 sm:grid-cols-3">
               <div>
                 <label className="label" htmlFor="ds-reward">
-                  Minimum reward
+                  {kind === "preference" ? "Solved side: minimum reward" : "Minimum reward"}
                 </label>
                 <select id="ds-reward" className="input" value={minReward} onChange={(e) => setMinReward(Number(e.target.value))}>
                   <option value={1}>1.0 (clean solves only)</option>
@@ -253,10 +299,19 @@ function DatasetsInner() {
                 </label>
                 <input id="ds-val" className="input" type="number" min={0} max={50} step={1} value={valPct} onChange={(e) => setValPct(Math.max(0, Math.min(50, Number(e.target.value))))} />
               </div>
-              <label className="flex items-center gap-2 pb-2 text-sm">
-                <input type="checkbox" checked={bestPerTask} onChange={(e) => setBestPerTask(e.target.checked)} />
-                Best episode per task only
-              </label>
+              {kind === "preference" ? (
+                <div>
+                  <label className="label" htmlFor="ds-pairs">
+                    Pairs per task (max)
+                  </label>
+                  <input id="ds-pairs" className="input" type="number" min={1} max={32} step={1} value={maxPairs} onChange={(e) => setMaxPairs(Math.max(1, Math.min(32, Number(e.target.value))))} />
+                </div>
+              ) : (
+                <label className="flex items-center gap-2 pb-2 text-sm">
+                  <input type="checkbox" checked={bestPerTask} onChange={(e) => setBestPerTask(e.target.checked)} />
+                  Best episode per task only
+                </label>
+              )}
             </div>
 
             <Preview p={preview} loading={previewing} />
@@ -296,13 +351,18 @@ function DatasetsInner() {
             <tbody>
               {datasets.map((d) => (
                 <tr key={d.id}>
-                  <td className="mono">{d.name}</td>
+                  <td>
+                    <span className="mono">{d.name}</span>
+                    {d.kind === "preference" && <span className="pill pill-queued ml-2">DPO pairs</span>}
+                  </td>
                   <td>{d.packs.join(", ")}</td>
                   <td className="num text-right">
                     {d.n_train} / {d.n_val}
                   </td>
                   <td className="hint hidden md:table-cell">
-                    reward ≥ {d.filters.min_reward} · {d.filters.best_per_task ? "best per task" : "all passes"} · {Math.round(d.filters.val_frac * 100)}% val ·{" "}
+                    reward ≥ {d.filters.min_reward} ·{" "}
+                    {d.kind === "preference" ? `≤ ${d.filters.max_pairs_per_task ?? 4} pairs per task` : d.filters.best_per_task ? "best per task" : "all passes"} ·{" "}
+                    {Math.round(d.filters.val_frac * 100)}% val ·{" "}
                     {d.source_runs.length} run{d.source_runs.length === 1 ? "" : "s"}
                   </td>
                   <td className="hint hidden md:table-cell">{new Date(d.created_at).toLocaleDateString()}</td>

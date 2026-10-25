@@ -344,6 +344,7 @@ def enqueue_run(
     max_steps: int | None = None,
     temperature: float = 0.0,
     label: str = "",
+    repeats: int = 1,
 ) -> Run:
     from envforge.core.runner import new_run_id
     from envforge.web.builder import resolve_pack
@@ -398,6 +399,7 @@ def enqueue_run(
         max_steps=max_steps,
         temperature=temperature,
         label=label,
+        repeats=max(1, int(repeats)),
         status="queued",
         gpu_box_id=box.id if box else None,
     )

@@ -95,6 +95,7 @@ def list_training(
     return {
         "jobs": [T.training_out(db, tj) for tj in T.list_trainings(db, ws)],
         "defaults": {**T.TRAIN_DEFAULTS, "base_model": ws.train_base_model},
+        "method_defaults": T.METHOD_DEFAULTS,  # sft / dpo / grpo: what the form starts from
         "can_manage": C.can_manage(user),
     }
 
@@ -104,9 +105,11 @@ def start_training(
     ws_id: str, body: TrainIn, user: User = Depends(current_user), db: Session = Depends(get_db)
 ) -> dict:
     ws = svc.require_workspace(db, user, ws_id)
-    params = body.model_dump(exclude={"dataset_id", "box_id", "base_model", "adapter_name"})
+    params = body.model_dump(exclude={"dataset_id", "box_id", "base_model", "adapter_name", "method",
+                                      "init_adapter", "pack"})  # fmt: skip
     tj = T.start_training(db, ws, user, dataset_id=body.dataset_id, box_id=body.box_id,
-                          base_model=body.base_model, adapter_name=body.adapter_name, hyperparams=params)  # fmt: skip
+                          base_model=body.base_model, adapter_name=body.adapter_name, hyperparams=params,
+                          method=body.method, init_adapter=body.init_adapter, pack=body.pack)  # fmt: skip
     return T.training_out(db, tj, full=True)
 
 

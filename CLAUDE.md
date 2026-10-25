@@ -65,7 +65,11 @@ envforge/
   train/
     filter.py       kept trajectories -> chat-format JSONL for SFT
     dataset.py      rejection sampling: best episode per task, task-level val split, seed manifest, overlap()
+    preference.py   DPO pairs: a solved and a failed episode of the same task, split by task, same manifest
     sft.py          STANDALONE LoRA SFT script (assistant-only loss); copied to the GPU box — no envforge imports
+    dpo.py          STANDALONE DPO script (imports sft.py + lora_tools.py from its own directory on the box)
+    grpo_step.py    STANDALONE one GRPO update from scored rollouts (clipped ratio + KL to the start adapter)
+    lora_tools.py   STANDALONE torch helpers for dpo.py / grpo_step.py (load a LoRA policy, label log-probs)
     remote.py       run sft.py in a detached container on a GPU box, follow progress, fetch the adapter
     cli.py          `envforge train dataset|check-overlap|sft|follow|logs|fetch` (docs/TRAINING.md)
   cli.py            typer CLI
@@ -77,7 +81,7 @@ envforge/
     auth/           local (argon2 + session cookie) and clerk (JWT via JWKS); one current_user dep
     services.py     workspace access, key resolution, run enqueue, usage aggregation
     compute_service.py  GPU boxes: encrypted SSH key, admin gate, open_box, check/serve/stop jobs, box models in the picker
-    training_service.py datasets (train.dataset), LoRA training jobs (train.remote, polled), adapters (serve, test, download)
+    training_service.py datasets (SFT examples / DPO pairs), training jobs (sft, dpo; grpo = a loop of rollout runs + updates), adapters
     compute_schemas.py  request bodies for the two services above
     security.py     vLLM base-URL checks (SSRF) and in-memory rate limiting
     builder.py      builder projects, revision DAG, content-addressed task sets, uploads, publish, resolve_pack, jobs
@@ -171,4 +175,6 @@ Model strings are `provider:model-id`:
   backend for GPU boxes; vLLM serving an open model; same eval against it.
 - **Phase 3 (done):** filter high-reward trajectories → LoRA SFT on an open model on a
   rented GPU → serve the adapter with vLLM → re-eval on held-out seeds (docs/TRAINING.md).
-- **Phase 4:** DPO, then GRPO, using the same environments.
+- **Phase 4 (in progress):** DPO (preference pairs from the student's own failures) and GRPO
+  (rounds of scored rollouts, orchestrated by the web app) using the same environments —
+  docs/TRAINING.md, "Beyond imitation".

@@ -150,6 +150,8 @@ class Run(Base):
     max_steps: Mapped[int | None] = mapped_column(Integer, nullable=True)
     temperature: Mapped[float] = mapped_column(Float, default=0.0)
     label: Mapped[str] = mapped_column(String(200), default="")
+    # attempts per task (GRPO rollouts: k episodes in a row share a seed); 1 for evaluations
+    repeats: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
 
     status: Mapped[str] = mapped_column(String(16), default="queued", index=True)
     # queued | running | completed | failed | cancelled
@@ -396,8 +398,10 @@ class Dataset(Base):
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
     workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
     name: Mapped[str] = mapped_column(String(64))  # also the default adapter name
+    # sft = solved episodes to imitate; preference = chosen/rejected pairs for DPO
+    kind: Mapped[str] = mapped_column(String(16), default="sft", server_default="sft")
     source_runs: Mapped[list[str]] = mapped_column(JSON)
-    filters: Mapped[dict] = mapped_column(JSON)  # min_reward, val_frac, best_per_task
+    filters: Mapped[dict] = mapped_column(JSON)  # min_reward, val_frac, best_per_task / pair rules
     packs: Mapped[list[str]] = mapped_column(JSON)
     counts: Mapped[dict] = mapped_column(JSON)  # manifest counts + per task stats
     n_train: Mapped[int] = mapped_column(Integer, default=0)
@@ -418,7 +422,13 @@ class TrainingJob(Base):
     job_id: Mapped[str | None] = mapped_column(String(32), nullable=True)  # the train_start job
     adapter_name: Mapped[str] = mapped_column(String(64))
     base_model: Mapped[str] = mapped_column(String(200))
-    hyperparams: Mapped[dict] = mapped_column(JSON)  # remote.TrainArgs fields
+    # sft | dpo | grpo; dpo and grpo continue from init_adapter (an adapter in this workspace)
+    method: Mapped[str] = mapped_column(String(8), default="sft", server_default="sft")
+    init_adapter: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    hyperparams: Mapped[dict] = mapped_column(JSON)  # remote.TrainArgs / DPOArgs / GRPO fields
+    # GRPO's loop: current round and phase, each round's rollout run and reward (see
+    # training_service "GRPO"); None for sft / dpo
+    state: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     runtime: Mapped[str | None] = mapped_column(String(8), nullable=True)
     # queued | starting | running | fetching | completed | failed | cancelled
     status: Mapped[str] = mapped_column(String(16), default="queued", index=True)

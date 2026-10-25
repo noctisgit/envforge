@@ -27,7 +27,7 @@ commands below are otherwise identical.
 **Datasets** (pick runs on training seeds, live preview with the eval-seed overlap check,
 save), **Fine-tune** (dataset + base model + GPU box + hyperparameters with the CLI's
 defaults; live steps, loss curve, log tail, elapsed time, estimated cost; cancel) and
-**Models** (adapters with lineage; *Test* serves base + adapter and queues a run on seeds 0+,
+**Models** (adapters with lineage, including DPO / GRPO parents; *Test* serves base + adapter and queues a run on seeds 0+,
 then links to Compare with the teacher and the base model; serve, download `.tar.gz`, curl /
 Python snippets). GPU boxes are added under Settings → GPU boxes. The Home guide links each
 step to its page. Details in docs/WEB.md.
@@ -159,5 +159,81 @@ Profile with the box's URL, then pick either model and use **Compare**).
 - **Train loss ↓ but eval loss ↑** — overfitting: fewer epochs, more data, or lower lr.
 - **Great on training seeds, poor on eval seeds** — memorisation; that's why the seed ranges
   are separate and `check-overlap` exists.
-- Imitation can't exceed the teacher. Phase 4 (DPO, then GRPO) uses the verifier's reward
-  directly so the student can improve beyond it.
+- Imitation can't exceed the teacher. Phase 4 (DPO, then GRPO, below) uses the verifier's
+  reward directly so the student can improve beyond it.
+
+## Beyond imitation (Phase 4): DPO and GRPO
+
+SFT only ever shows the model what to do. Both methods below continue from an SFT adapter
+and also use what went *wrong*, judged by the same verifier.
+
+### DPO: prefer the solved attempt over the failed one
+
+**The idea.** For one task, take a **chosen** episode (reward 1.0) and a **rejected** one
+(reward 0). DPO raises the model's probability of the chosen answer relative to where it
+started, and lowers the rejected one's, through
+`-log sigmoid(beta * [(log pi(chosen) - log ref(chosen)) - (log pi(rejected) - log ref(rejected))])`.
+`ref` is the starting adapter, frozen; `beta` (0.1) is how hard to push and how far the
+model may drift. Only the agent's own tokens count, exactly as in SFT. Code:
+`envforge/train/preference.py` (pairs), `envforge/train/dpo.py` (the script, runs on the
+box next to `sft.py` and `lora_tools.py`).
+
+**Recipe (web app).**
+
+1. **Student failures on training seeds.** Serve your SFT adapter (Models → Serve), then on
+   Runs pick `vllm:<adapter>`, Purpose *Training data · seeds 10000+*, the same seeds and
+   tiers as a teacher run you already have. Its failures are the rejected side: the
+   mistakes this exact model makes are what it should unlearn.
+2. **Datasets → Preference pairs (DPO).** Tick the teacher run and the student run. The
+   preview shows pairs, how many tasks had both a pass and a failure ("never failed" tasks
+   give no pair), and the overlap check against evaluation runs, as for SFT.
+3. **Fine-tune → DPO**, start from your SFT adapter (the base model comes with it), beta 0.1,
+   1–2 epochs. The chart adds **chosen preferred**: the share of pairs where the chosen
+   answer already has the higher implicit reward. It should climb towards 1 on training
+   pairs; held-out pairs (the validation split) tell you whether it generalises.
+4. **Test** the DPO adapter on evaluation seeds and Compare with the SFT adapter.
+
+**Reading it.** Accuracy near 1 with held-out accuracy near 0.5 = memorised the pairs;
+lower beta or fewer epochs, or more pairs. A solve-rate drop with rising margins = it moved
+too far from the reference (raise beta). DPO suits *decision* errors (refused when it
+should have acted); it can't teach behaviour no chosen episode shows.
+
+### GRPO: learn from your own attempts, scored by the environment
+
+**The idea.** Reinforcement learning with the verifier as the reward and no learned critic.
+Each round, the current adapter attempts each of K training tasks G times (temperature 1).
+An attempt's **advantage** is how it scored against its own group:
+`A = (reward - mean) / std`. Above-average attempts become more likely, below-average ones
+less likely, through the PPO-style clipped objective per token
+`-min(ratio * A, clip(ratio, 1 - eps, 1 + eps) * A) + kl_beta * KL(pi || ref)`, where
+`ratio = pi / pi_old` and `ref` is the adapter the run started from. Groups where every
+attempt scored the same (all solved, or all failed) carry no signal and are skipped; that
+is why GRPO wants a model that already solves *some* tasks: start from SFT, not from the
+base model. Code: `envforge/train/grpo_step.py` (one update, on the box);
+`envforge/web/training_service.py`, section GRPO (the loop).
+
+**One round** (all automatic, after **Fine-tune → GRPO**, start-from adapter, environment):
+
+```
+serve base + current adapter ─► rollout run: K tasks x G attempts on seeds 10000 + r*K
+        ▲                                   (a normal run in Runs: replays, rewards)
+        │                                                   │
+next round ◄── <name>-r<k> ◄── grpo_step.py on the box ◄── group advantages
+```
+
+The last round's adapter is saved as the job's name and registered like any other.
+Defaults: 4 rounds x 16 tasks x 8 attempts, lr 1e-5, KL weight 0.04, clip 0.2. On a 3B
+model and one A6000 expect very roughly 15–30 minutes per round (rollouts run 8 at a time
+on vLLM; vLLM is stopped for each update because both need the GPU's memory).
+
+**Reading it.** The job page's *Rounds* table is the learning curve: mean reward and solve
+rate on that round's **training** tasks, and how many groups had signal. Rising reward is
+the goal, but it is measured on training tasks; the real test is still the evaluation
+seeds (Models → Test). Watch the KL line: steady growth is fine; a jump means the policy is
+moving fast (lower the learning rate or raise the KL weight). Read some rollout replays
+too: RL optimises exactly what the verifier rewards, loopholes included (reward hacking).
+
+**Limits of this implementation (on purpose, for readability).** Attempts are generated by
+vLLM and re-tokenised for training (vLLM may have tokenised the same text differently; the
+error is small). Generation and training alternate on one GPU, so a round waits for the
+rollouts, then for the update. A production setup runs them side by side on separate GPUs.

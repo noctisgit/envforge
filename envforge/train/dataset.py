@@ -27,7 +27,7 @@ import hashlib
 import json
 import re
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -164,13 +164,6 @@ def build_dataset(
         for t in rows(k):
             report.by_pack_tier[(k[0], k[1])] += 1
             report.models[t.model] += 1
-    seeds: dict[str, list[int]] = {}
-    records: dict[str, list[str]] = {}
-    for p, _tier, s in best:
-        if isinstance(s, str):
-            records.setdefault(p, []).append(s.removeprefix(RECORD_PREFIX))
-        else:
-            seeds.setdefault(p, []).append(s)
     manifest = {
         "format_version": 1,
         "created_at": datetime.now(UTC).isoformat(),
@@ -187,14 +180,28 @@ def build_dataset(
         },  # fmt: skip
         "models": dict(report.models),
         "by_pack_tier": {f"{p}/tier{t}": n for (p, t), n in sorted(report.by_pack_tier.items())},
-        # every task the model will have seen (train AND val), as compact seed ranges
-        "tasks": {p: _ranges(s) for p, s in seeds.items()},
-        # declarative packs: the task records instead of seeds
-        "records": {p: sorted(r) for p, r in records.items()},
-        "task_keys": sorted([list(k) for k in best]),
+        **manifest_tasks(best),
     }
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
     return report
+
+
+def manifest_tasks(keys: Iterable[TaskKey]) -> dict[str, Any]:
+    """The part of a manifest that `overlap()` reads: every task the model will have seen
+    (train AND val), as compact seed ranges, task records (declarative packs) and keys."""
+    keys = list(keys)
+    seeds: dict[str, list[int]] = {}
+    records: dict[str, list[str]] = {}
+    for p, _tier, s in keys:
+        if isinstance(s, str):
+            records.setdefault(p, []).append(s.removeprefix(RECORD_PREFIX))
+        else:
+            seeds.setdefault(p, []).append(s)
+    return {
+        "tasks": {p: _ranges(s) for p, s in seeds.items()},
+        "records": {p: sorted(r) for p, r in records.items()},
+        "task_keys": sorted([list(k) for k in keys]),
+    }
 
 
 def load_manifest(dataset_dir: Path) -> dict[str, Any]:

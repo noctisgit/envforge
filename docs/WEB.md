@@ -151,7 +151,9 @@ browser, reusing the same code (`envforge/compute`, `envforge/train`). Logic liv
   of every version of that environment are checked (see docs/BUILDER.md, held-out tasks).
   Saving writes `data/workspaces/<slug>/sft/<name>/` (train.jsonl, val.jsonl,
   manifest.json; customer-data environments re-sanitised like the export) and a `datasets`
-  row with the source runs, filters, counts and manifest.
+  row with the source runs, filters, counts and manifest. `kind: "preference"` builds DPO
+  pairs instead (`train.preference.build_preference_dataset`): a solved and a failed episode
+  of the same task, split by task, with the same overlap check.
 - **Training.** `POST .../training` creates a `training_jobs` row and a `train_start` job:
   the compute worker uploads the dataset and `sft.py` and starts training detached
   (`train.remote.start_training`). After that the worker *polls* each running job every
@@ -159,7 +161,16 @@ browser, reusing the same code (`envforge/compute`, `envforge/train`). Logic liv
   it fetches the adapter to `data/workspaces/<slug>/adapters/<name>/` and creates an
   `adapters` row (base model, dataset, metrics from `envforge_manifest.json`). Cancel stops
   the job on the box at the next poll. A job is failed after `TRAIN_MAX_HOURS` or
-  `TRAIN_MAX_POLL_FAILURES` unreachable polls in a row.
+  `TRAIN_MAX_POLL_FAILURES` unreachable polls in a row. `method` is `sft` (the default),
+  `dpo` (a preference dataset, continuing from `init_adapter`: `dpo.py`, the starting
+  adapter uploaded to the box if needed) or `grpo` (no dataset: an environment `pack` and
+  `init_adapter`). A GRPO job is a loop kept in `training_jobs.state`: per round a
+  `grpo_rollout` job (serve the current adapter, queue a rollout run with `runs.repeats`
+  attempts per task at temperature > 0), the runs worker playing it, a `grpo_train` job
+  (group advantages, stop vLLM, start `grpo_step.py`), then polls of that update; the
+  last round's adapter is fetched and registered. Serving or testing on a box is refused
+  (409) while it trains. Runs on vLLM models play `VLLM_RUN_CONCURRENCY` (8) episodes at
+  once, written in episode order. See docs/TRAINING.md, "Beyond imitation".
 - **Models.** Serve an adapter on any box (`--lora-modules`; uploaded from the local copy if
   that box doesn't have it), **Test** it (serve if needed, then an evaluation run on seeds
   0+ of its environment, linked to Compare with the teacher and the base model), download
@@ -328,11 +339,11 @@ Commit the generated file under `envforge/web/migrations/versions/`.
 | POST | `/api/workspaces/{id}/gpu-boxes/{box}/serve` | queue vLLM serving `{model, adapters?, max_model_len?}` (admin) |
 | POST | `/api/workspaces/{id}/gpu-boxes/{box}/stop` | queue stopping vLLM (admin) |
 | GET | `/api/workspaces/{id}/datasets/sources` | completed runs, eligible (training seeds) or why not |
-| POST | `/api/workspaces/{id}/datasets/preview` | counts, split, examples per task, eval-seed overlap |
+| POST | `/api/workspaces/{id}/datasets/preview` | counts, split, examples per task (or pairs, `kind: "preference"`), eval-seed overlap |
 | GET/POST | `/api/workspaces/{id}/datasets` | list / save a named dataset |
 | GET/DELETE | `/api/workspaces/{id}/datasets/{ds}` | detail with manifest / delete files + row |
 | GET | `/api/workspaces/{id}/datasets/{ds}/download?split=train\|val` | the JSONL file |
-| GET/POST | `/api/workspaces/{id}/training` | jobs + CLI defaults / start a LoRA SFT job (admin) |
+| GET/POST | `/api/workspaces/{id}/training` | jobs + defaults per method / start an SFT, DPO or GRPO job (admin) |
 | GET | `/api/workspaces/{id}/training/{job}` | status, step/epoch, losses, log tail, elapsed, est. cost |
 | POST | `/api/workspaces/{id}/training/{job}/cancel` | cancel (admin) |
 | GET | `/api/workspaces/{id}/adapters[/{a}]` | trained adapters with lineage and where they're served |

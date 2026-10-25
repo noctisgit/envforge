@@ -274,6 +274,14 @@ export function stepsFor(goal: GoalId, d: JourneyData): Step[] {
         status: d.marks.use ? "done" : "todo",
         manual: true,
       },
+      {
+        id: "beyond",
+        title: "Go past imitation: DPO or GRPO",
+        why: "SFT copies the teacher. DPO learns from pairs of solved and failed attempts at the same task; GRPO from rounds of the model's own attempts, scored by the environment.",
+        status: adapters.some((a) => a.method === "dpo" || a.method === "grpo") ? "done" : "todo",
+        detail: adapters.find((a) => a.method === "dpo" || a.method === "grpo")?.name,
+        optional: true,
+      },
     );
   }
 

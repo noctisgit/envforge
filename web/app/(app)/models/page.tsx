@@ -9,6 +9,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { CodeBlock } from "@/components/CodeBlock";
 import { useConfirm } from "@/components/ConfirmDialog";
+import { GrpoRounds } from "@/components/GrpoRounds";
 import { invalidateModelCache } from "@/components/ModelPicker";
 import { Empty, Page, PageHeader, Panel } from "@/components/Page";
 import { useToast } from "@/components/Toast";
@@ -18,6 +19,7 @@ import { usePoll } from "@/lib/poll";
 import { useWorkspace } from "@/lib/workspace";
 
 const num = (v: unknown, d = 3) => (typeof v === "number" ? v.toFixed(d) : "–");
+
 
 /** Newest completed evaluation run on `pack` matching `pred`. */
 function latestEval(runs: Run[], pack: string | null, pred: (r: Run) => boolean) {
@@ -95,15 +97,30 @@ print(reply.choices[0].message.content)`;
             {served ? <span className="pill pill-completed">serving on {served.box_name}</span> : <span className="pill pill-queued">not served</span>}
           </div>
           <div className="hint mt-1 [overflow-wrap:anywhere]">
-            LoRA{a.lora_rank ? ` r${a.lora_rank}` : ""} on <span className="mono">{a.base_model}</span> · trained on{" "}
-            {a.dataset_deleted ? (
-              <span>{a.dataset_name ?? "?"} (deleted)</span>
+            LoRA{a.lora_rank ? ` r${a.lora_rank}` : ""} on <span className="mono">{a.base_model}</span> ·{" "}
+            {a.method === "grpo" ? (
+              <span>
+                GRPO from <span className="mono">{a.init_adapter}</span> in {a.pack}, {a.metrics.rounds?.length ?? 0} round{a.metrics.rounds?.length === 1 ? "" : "s"}
+              </span>
             ) : (
-              <Link href="/datasets" className="underline">
-                {a.dataset_name}
-              </Link>
+              <>
+                {a.method === "dpo" && (
+                  <span>
+                    DPO from <span className="mono">{a.init_adapter}</span> on{" "}
+                  </span>
+                )}
+                {a.method !== "dpo" && "trained on "}
+                {a.dataset_deleted ? (
+                  <span>{a.dataset_name ?? "?"} (deleted)</span>
+                ) : (
+                  <Link href="/datasets" className="underline">
+                    {a.dataset_name}
+                  </Link>
+                )}{" "}
+                ({a.source_runs.length} source run{a.source_runs.length === 1 ? "" : "s"})
+              </>
             )}{" "}
-            ({a.source_runs.length} source run{a.source_runs.length === 1 ? "" : "s"}) ·{" "}
+            ·{" "}
             <Link href="/training" className="underline">
               training job
             </Link>{" "}
@@ -122,24 +139,34 @@ print(reply.choices[0].message.content)`;
         </div>
       </div>
 
-      <dl className="grid grid-cols-2 gap-x-4 gap-y-2 sm:grid-cols-4">
-        <div>
-          <dt className="label mb-0">Train examples</dt>
-          <dd className="num">{a.metrics.n_train ?? "–"}</dd>
-        </div>
-        <div>
-          <dt className="label mb-0">Steps</dt>
-          <dd className="num">{a.metrics.global_step ?? "–"}</dd>
-        </div>
-        <div>
-          <dt className="label mb-0">Final train loss</dt>
-          <dd className="num">{num(a.metrics.final_train_loss)}</dd>
-        </div>
-        <div>
-          <dt className="label mb-0">Final eval loss</dt>
-          <dd className="num">{num(a.metrics.final_eval_loss)}</dd>
-        </div>
-      </dl>
+      {a.method === "grpo" ? (
+        <GrpoRounds rounds={a.metrics.rounds ?? []} />
+      ) : (
+        <dl className="grid grid-cols-2 gap-x-4 gap-y-2 sm:grid-cols-4">
+          <div>
+            <dt className="label mb-0">{a.method === "dpo" ? "Train pairs" : "Train examples"}</dt>
+            <dd className="num">{a.metrics.n_train ?? "–"}</dd>
+          </div>
+          <div>
+            <dt className="label mb-0">Steps</dt>
+            <dd className="num">{a.metrics.global_step ?? "–"}</dd>
+          </div>
+          <div>
+            <dt className="label mb-0">Final train loss</dt>
+            <dd className="num">{num(a.metrics.final_train_loss)}</dd>
+          </div>
+          <div>
+            <dt className="label mb-0">{a.method === "dpo" ? "Held-out pairs preferred" : "Final eval loss"}</dt>
+            <dd className="num">
+              {a.method === "dpo"
+                ? typeof a.metrics.final_eval_accuracy === "number"
+                  ? `${Math.round(a.metrics.final_eval_accuracy * 100)}%`
+                  : "–"
+                : num(a.metrics.final_eval_loss)}
+            </dd>
+          </div>
+        </dl>
+      )}
 
       <div className="space-y-3 border-t pt-4" style={{ borderColor: "var(--line)" }}>
         <div className="font-semibold">Test it</div>

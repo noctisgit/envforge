@@ -1,4 +1,5 @@
-"""Run `train/sft.py` on a GPU box over SSH and bring the adapter home.
+"""Run a training script (`sft.py`, `dpo.py` or `grpo_step.py`) on a GPU box over SSH
+and bring the adapter home.
 
     job = start_training(box, dataset_dir, base="Qwen/Qwen2.5-7B-Instruct", name="netops-v1")
     for event in follow(box, "netops-v1"): print(event)       # parsed progress lines
@@ -6,7 +7,7 @@
 
 Layout on the box (one directory tree, so vLLM can mount the adapters later):
 
-    /root/envforge/jobs/<name>/      train.jsonl, val.jsonl, sft.py
+    /root/envforge/jobs/<name>/      train.jsonl, val.jsonl, the scripts (sft.py, lora_tools.py, ...)
     /root/envforge/adapters/<name>/  the LoRA adapter + envforge_manifest.json + metrics.jsonl
 
 Two runtimes (see `envforge.compute.runtime`), one workflow:
@@ -23,9 +24,15 @@ Two runtimes (see `envforge.compute.runtime`), one workflow:
   `envforge.compute.process`); its output goes to `/root/envforge/logs/train-<name>.log`
   and `follow()` reads that file instead of `docker logs`.
 
-Either way the uploaded `sft.py` (the control plane's copy, so versions always match)
-is what runs, the adapter lands in `/root/envforge/adapters/<name>/`, and the progress
+Either way the uploaded scripts (the control plane's copies, so versions always match)
+are what runs, the adapter lands in `/root/envforge/adapters/<name>/`, and the progress
 events have the same shape.
+
+Three methods share this machinery (`method=`): `sft` (imitate solved episodes), `dpo`
+(prefer the chosen side of preference pairs, continuing from `init_adapter`) and `grpo`
+(one reinforcement-learning update from scored rollouts, from `init_adapter` with
+`ref_adapter` as the KL anchor). dpo.py and grpo_step.py import sft.py and lora_tools.py,
+so those two are uploaded with them (an SFT job needs only sft.py).
 """
 
 from __future__ import annotations
@@ -48,6 +55,10 @@ REMOTE_ROOT = "/root/envforge"
 PIP_CACHE_VOLUME = "envforge-pip-cache"
 TRAIN_DEPS = ("peft>=0.13", "datasets>=3.0", "accelerate>=1.0")
 SFT_SCRIPT = Path(__file__).with_name("sft.py")
+#: method -> the script that runs it; HELPERS are uploaded with every job
+SCRIPTS = {"sft": "sft.py", "dpo": "dpo.py", "grpo": "grpo_step.py"}
+HELPERS = ("sft.py", "lora_tools.py")
+Method = str  # "sft" | "dpo" | "grpo"
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,62}$")
 
 
@@ -103,6 +114,42 @@ class TrainArgs:
         return out
 
 
+@dataclass(frozen=True)
+class DPOArgs:
+    """The hyper-parameters forwarded to dpo.py (the adapter's rank comes from init_adapter)."""
+
+    epochs: float = 1
+    lr: float = 2e-5
+    beta: float = 0.1
+    max_len: int = 8192
+    grad_accum: int = 8
+    max_steps: int | None = None
+
+    def argv(self) -> list[str]:
+        out = ["--epochs", f"{self.epochs:g}", "--lr", f"{self.lr:g}", "--beta", f"{self.beta:g}",
+               "--max-len", str(self.max_len), "--grad-accum", str(self.grad_accum)]  # fmt: skip
+        if self.max_steps:
+            out += ["--max-steps", str(self.max_steps)]
+        return out
+
+
+@dataclass(frozen=True)
+class GRPOArgs:
+    """The hyper-parameters forwarded to grpo_step.py for one round's update."""
+
+    lr: float = 1e-5
+    kl_beta: float = 0.04
+    clip_eps: float = 0.2
+    epochs: float = 1
+    max_len: int = 8192
+    grad_accum: int = 8
+
+    def argv(self) -> list[str]:
+        return ["--lr", f"{self.lr:g}", "--kl-beta", f"{self.kl_beta:g}", "--clip-eps", f"{self.clip_eps:g}",
+                "--epochs", f"{self.epochs:g}", "--max-len", str(self.max_len),
+                "--grad-accum", str(self.grad_accum)]  # fmt: skip
+
+
 def _check_base(base: str) -> str:
     # Quoting stops shell injection; this stops a "model" like "--trust-remote-code"
     # from being read by sft.py as a flag.
@@ -111,33 +158,58 @@ def _check_base(base: str) -> str:
     return base
 
 
+TrainingArgs = TrainArgs | DPOArgs | GRPOArgs
+
+
 def sft_argv(
-    python: str, job: str, out: str, base: str, args: TrainArgs, *, has_val: bool
-) -> list[str]:
-    """`<python> <job>/sft.py --data ... --base ... --out ...`, shared by both runtimes.
+    python: str, job: str, out: str, base: str, args: TrainingArgs, *, has_val: bool,
+    method: Method = "sft", adapters: str = ADAPTERS_DIR, init_adapter: str | None = None,
+    ref_adapter: str | None = None,
+) -> list[str]:  # fmt: skip
+    """`<python> <job>/<script> --data ... --base ... --out ...`, shared by both runtimes.
 
-    `job` and `out` are paths *as the training process sees them*: `/job` and
-    `/adapters/<name>` inside a container, the real box paths in a pod."""
-    argv = [python, f"{job}/sft.py", "--data", f"{job}/train.jsonl"]
-    if has_val:
+    `job`, `out` and `adapters` are paths *as the training process sees them*: `/job`
+    and `/adapters` inside a container, the real box paths in a pod. DPO starts from
+    `init_adapter`; GRPO updates `init_adapter` (the policy) with `ref_adapter` as anchor.
+    """
+    if method not in SCRIPTS:
+        raise ValueError(f"unknown training method {method!r}")
+    argv = [python, f"{job}/{SCRIPTS[method]}", "--data", f"{job}/train.jsonl"]
+    if has_val and method != "grpo":
         argv += ["--val", f"{job}/val.jsonl"]
-    return argv + ["--base", _check_base(base), "--out", out, *args.argv()]
+    argv += ["--base", _check_base(base), "--out", out]
+    if method == "dpo" and init_adapter:
+        argv += ["--init-adapter", f"{adapters}/{check_name(init_adapter)}"]
+    if method == "grpo":
+        if not init_adapter:
+            raise ValueError("GRPO needs the adapter to update (init_adapter)")
+        argv += ["--policy-adapter", f"{adapters}/{check_name(init_adapter)}",
+                 "--ref-adapter", f"{adapters}/{check_name(ref_adapter or init_adapter)}"]  # fmt: skip
+    return argv + args.argv()
 
 
-def build_train_command(name: str, base: str, args: TrainArgs, *, has_val: bool) -> str:
+def build_train_command(name: str, base: str, args: TrainingArgs, *, has_val: bool,
+                        method: Method = "sft", init_adapter: str | None = None,
+                        ref_adapter: str | None = None) -> str:  # fmt: skip
     """The shell command run inside the training container (all values quoted)."""
-    sft = sft_argv("python", "/job", f"/adapters/{check_name(name)}", base, args, has_val=has_val)
-    return f"pip install --quiet {shlex.join(TRAIN_DEPS)} && {shlex.join(sft)}"
+    argv = sft_argv("python", "/job", f"/adapters/{check_name(name)}", base, args, has_val=has_val,
+                    method=method, adapters="/adapters", init_adapter=init_adapter,
+                    ref_adapter=ref_adapter)  # fmt: skip
+    return f"pip install --quiet {shlex.join(TRAIN_DEPS)} && {shlex.join(argv)}"
 
 
-def build_pod_train(name: str, base: str, args: TrainArgs, *, has_val: bool) -> list[str]:
+def build_pod_train(name: str, base: str, args: TrainingArgs, *, has_val: bool,
+                    method: Method = "sft", init_adapter: str | None = None,
+                    ref_adapter: str | None = None) -> list[str]:  # fmt: skip
     """argv for the training process in pod mode (deps are baked into the image)."""
     out = f"{ADAPTERS_DIR}/{check_name(name)}"
-    return sft_argv("python3", job_dir(name), out, base, args, has_val=has_val)
+    return sft_argv("python3", job_dir(name), out, base, args, has_val=has_val, method=method,
+                    init_adapter=init_adapter, ref_adapter=ref_adapter)  # fmt: skip
 
 
-def build_docker_run(name: str, base: str, args: TrainArgs, *, has_val: bool,
-                     image: str = DEFAULT_VLLM_IMAGE) -> list[str]:  # fmt: skip
+def build_docker_run(name: str, base: str, args: TrainingArgs, *, has_val: bool,
+                     image: str = DEFAULT_VLLM_IMAGE, method: Method = "sft",
+                     init_adapter: str | None = None, ref_adapter: str | None = None) -> list[str]:  # fmt: skip
     """argv for the detached training container (without secrets)."""
     _check_base(base)
     job = job_dir(name)
@@ -152,7 +224,8 @@ def build_docker_run(name: str, base: str, args: TrainArgs, *, has_val: bool,
         "--label", f"envforge.base={base}",
         "--entrypoint", "bash",
         image,
-        "-lc", build_train_command(name, base, args, has_val=has_val),
+        "-lc", build_train_command(name, base, args, has_val=has_val, method=method,
+                                   init_adapter=init_adapter, ref_adapter=ref_adapter),
     ]  # fmt: skip
 
 
@@ -162,16 +235,21 @@ def start_training(
     *,
     base: str,
     name: str,
-    args: TrainArgs = TrainArgs(),
+    args: TrainingArgs = TrainArgs(),
     hf_token: str | None = None,
     image: str = DEFAULT_VLLM_IMAGE,
     replace: bool = False,
     runtime: Runtime = "docker",
+    method: Method = "sft",
+    init_adapter: str | None = None,
+    ref_adapter: str | None = None,
 ) -> str:
-    """Upload the dataset and sft.py, then start training detached.
+    """Upload the dataset and the scripts, then start training detached.
 
     Returns the container name (docker) or process name (pod). `image` only matters
-    in docker mode; in pod mode the pod's own image is what runs."""
+    in docker mode; in pod mode the pod's own image is what runs. `init_adapter` and
+    `ref_adapter` must already be in the box's adapters directory (the caller uploads
+    them; see web/training_service.py)."""
     runtime = check_runtime(runtime)
     dataset_dir = Path(dataset_dir)
     train = dataset_dir / "train.jsonl"
@@ -180,12 +258,18 @@ def start_training(
         raise FileNotFoundError(f"{train} not found (build it with `envforge train dataset`)")
     has_val = val.exists() and val.stat().st_size > 0
     job = job_dir(name)
+    extra = {"method": method, "init_adapter": init_adapter, "ref_adapter": ref_adapter}
     if runtime == "pod":
-        argv = build_pod_train(name, base, args, has_val=has_val)  # validate before uploading
+        argv = build_pod_train(
+            name, base, args, has_val=has_val, **extra
+        )  # validate before uploading
         _clear_previous_pod_job(box, name, replace=replace)
     else:
-        argv = build_docker_run(name, base, args, has_val=has_val, image=image)
+        argv = build_docker_run(name, base, args, has_val=has_val, image=image, **extra)
         _clear_previous_container(box, name, replace=replace)
+    for needed in {init_adapter, ref_adapter} - {None}:
+        if not box.run(["test", "-f", f"{ADAPTERS_DIR}/{needed}/adapter_config.json"]).ok:
+            raise ComputeError(f"adapter {needed} is not on the box (upload it first)")
     if box.run(["test", "-e", f"{ADAPTERS_DIR}/{name}"]).ok and not replace:
         raise ComputeError(f"adapter {name} already exists on the box; pick another --name")
 
@@ -193,7 +277,9 @@ def start_training(
     box.put(train, f"{job}/train.jsonl")
     if has_val:
         box.put(val, f"{job}/val.jsonl")
-    box.put(SFT_SCRIPT, f"{job}/sft.py")
+    scripts = ["sft.py"] if method == "sft" else [*HELPERS, SCRIPTS[method]]
+    for script in dict.fromkeys(scripts):
+        box.put(SFT_SCRIPT.with_name(script), f"{job}/{script}")
 
     if runtime == "pod":
         if hf_token and "\n" in hf_token:
