@@ -54,9 +54,10 @@ function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
         envforge
       </Link>
       <WorkspaceSwitcher />
-      <nav aria-label="Main" className="flex flex-col gap-4">
+      <nav aria-label="Main" className="flex flex-col gap-3">
         {NAV.map((g, i) => (
-          <div key={g.group ?? i} className="flex flex-col gap-0.5">
+          // a thin rule above each section after Home: Build | Evaluate | Train
+          <div key={g.group ?? i} className={`flex flex-col gap-0.5 ${i > 0 ? "border-t pt-3" : ""}`} style={i > 0 ? { borderColor: "var(--line)" } : undefined}>
             {g.group && (
               <div className="px-2 pb-1 text-[11px] font-medium tracking-wide uppercase" style={{ color: "var(--muted)" }}>
                 {g.group}
@@ -71,9 +72,6 @@ function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
         ))}
       </nav>
       <div className="mt-auto flex flex-col gap-0.5 border-t pt-4" style={{ borderColor: "var(--line)" }}>
-        <NavLink href="/account#keys" active={false} onNavigate={onNavigate}>
-          Provider keys
-        </NavLink>
         <NavLink href="/usage" active={on("/usage")} onNavigate={onNavigate}>
           Usage
         </NavLink>
