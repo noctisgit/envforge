@@ -222,8 +222,15 @@ export function stepsFor(goal: GoalId, d: JourneyData): Step[] {
         id: "gpu",
         title: "Connect a GPU box with vLLM",
         why: "Rent a GPU (RunPod, Vast, Lambda), add it under Settings → GPU boxes, check it, and serve the open model with vLLM.",
-        status: serving || vllm ? "done" : "todo",
-        detail: serving ? `${serving.name} serving ${serving.served_model}` : vllm ? vllm.base_url ?? undefined : box ? `${box.name} added, not serving` : undefined,
+        // stays done once the small model has been scored on it: vLLM is stopped on purpose for training
+        status: serving || vllm || (box && studentEval.length) ? "done" : "todo",
+        detail: serving
+          ? `${serving.name} serving ${serving.served_model}`
+          : vllm
+            ? (vllm.base_url ?? undefined)
+            : box
+              ? `${box.name} added, vLLM ${studentEval.length ? "stopped (training needs the GPU)" : "not serving yet"}`
+              : undefined,
       },
       {
         id: "student-eval",
@@ -249,7 +256,7 @@ export function stepsFor(goal: GoalId, d: JourneyData): Step[] {
       {
         id: "train",
         title: "Fine-tune a LoRA adapter",
-        why: "Train a small add-on to the open model on the GPU box (about 20–60 min for a 7B model).",
+        why: "Train a small add-on to the open model on the GPU box (about 20–60 min for a 7B model). Starting it stops vLLM there: serving and training can't share the GPU's memory.",
         status: trained || d.marks.train ? "done" : "todo",
         detail: adapters.length ? `${adapters[0].name} on ${adapters[0].base_model}` : training ? `${training.adapter_name}: ${training.status}` : undefined,
       },

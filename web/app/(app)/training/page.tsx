@@ -297,6 +297,12 @@ function TrainingInner() {
                       Check this box first on <Link href="/settings/gpu-boxes" className="underline">GPU boxes</Link>.
                     </p>
                   )}
+                  {box && box.serve_state !== "stopped" && (
+                    <p className="hint mt-1" style={{ color: "var(--warn)" }}>
+                      {box.name} is serving {box.served_model ?? "a model"}: starting training stops vLLM first, since serving and training can&apos;t share the GPU&apos;s
+                      memory. Serve the trained adapter afterwards from Models.
+                    </p>
+                  )}
                 </div>
                 <div className="md:col-span-2">
                   <label className="label">Base model</label>

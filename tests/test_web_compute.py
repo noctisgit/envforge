@@ -801,3 +801,23 @@ def test_tunnel_box_serves_and_runs_through_the_tunnel(client, fake_boxes):  # n
     # the worker opens the tunnel for the run and closes it when the run ends
     assert run_forever(once=True, kind="runs") == 1
     assert len(fake.tunnels) == 3 and fake.open_tunnels == 0
+
+
+def test_training_stops_vllm_to_free_the_gpu(client, fake_boxes, fast_polls):  # noqa: F811
+    _signup(client)
+    ws = _ws(client)
+    p = f"/api/workspaces/{ws['id']}"
+    box = _add_box(client, ws["id"])
+    client.post(f"{p}/gpu-boxes/{box['id']}/serve", json={"model": "Qwen/Qwen2.5-0.5B-Instruct"})
+    _work()
+    fake = fake_boxes[box["id"]]
+    assert (
+        fake.serving and client.get(f"{p}/gpu-boxes").json()["boxes"][0]["serve_state"] == "serving"
+    )
+    d = _dataset(client, ws["id"])
+    body = {"dataset_id": d["id"], "box_id": box["id"], "base_model": "Qwen/Qwen2.5-0.5B-Instruct"}
+    assert client.post(f"{p}/training", json=body).status_code == 202
+    _work()  # train_start: stops vLLM, then starts training
+    b = client.get(f"{p}/gpu-boxes").json()["boxes"][0]
+    assert not fake.serving and b["serve_state"] == "stopped" and b["endpoint_url"] is None
+    assert "netops-v1" in fake.trainings

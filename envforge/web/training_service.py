@@ -36,6 +36,7 @@ from sqlalchemy.orm import Session
 
 from envforge import config
 from envforge.compute.base import ComputeError
+from envforge.compute.vllm import stop_vllm
 from envforge.core.env import TRAIN_SEED_MIN
 from envforge.train import dataset as ds
 from envforge.train import remote
@@ -405,7 +406,8 @@ def start_training(db: Session, ws: Workspace, user: User, *, dataset_id: str, b
 
 
 def run_train_start(db: Session, job: Job, box: GpuBox) -> None:
-    """Worker: upload the dataset + sft.py and start training detached (train.remote)."""
+    """Worker: stop vLLM if it's running, upload the dataset + sft.py and start training
+    detached (train.remote)."""
     tj = db.get(TrainingJob, (job.payload or {}).get("training_job_id"))
     if tj is None or tj.workspace_id != job.workspace_id:
         raise ValueError("training job not found")
@@ -424,6 +426,15 @@ def run_train_start(db: Session, job: Job, box: GpuBox) -> None:
     hf_token = crypto.decrypt(box.hf_token_ciphertext) if box.hf_token_ciphertext else None
     with C.open_box(db, box) as cb:
         runtime = C.resolve_box_runtime(db, box, cb)
+        if box.serve_state != "stopped":
+            # vLLM reserves ~90% of the GPU's memory for its cache, so training can't share
+            # the card: stop it (serving the trained adapter starts it again)
+            job.progress = f"stopping vLLM on {box.name} to free the GPU for training"
+            db.commit()
+            stop_vllm(cb, box.vllm_port, runtime=runtime)  # type: ignore[arg-type]
+            box.serve_state, box.serve_error = "stopped", None
+            box.served_model = box.served_adapters = box.endpoint_url = None
+            db.commit()
         remote.start_training(
             cb, Path(d.path), base=tj.base_model, name=tj.adapter_name, args=args,
             hf_token=hf_token, replace=bool(params.get("replace")), runtime=runtime,  # type: ignore[arg-type]
