@@ -224,6 +224,40 @@ def test_worker_records_tokens_and_cost(client, monkeypatch):  # noqa: F811
     assert usage["totals"]["cost_usd"] == pytest.approx(expected)
 
 
+def test_unreachable_model_fails_run_keeps_finished_episodes(client, monkeypatch):  # noqa: F811
+    from envforge.models.base import ModelUnreachable
+    from envforge.models.scripted import ScriptedModel
+
+    class DropsOff(ScriptedModel):
+        """Solves two episodes, then its server stops answering."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.resets = 0
+
+        def on_reset(self, env):
+            self.resets += 1
+            super().on_reset(env)
+
+        def complete(self, messages, tools):
+            if self.resets > 2:
+                raise ModelUnreachable("scripted unreachable for 180s (APIConnectionError)")
+            return super().complete(messages, tools)
+
+    monkeypatch.setattr("envforge.web.worker.load_model", lambda *a, **k: DropsOff())
+    _signup(client)
+    ws = _ws(client)
+    r = client.post(f"/api/workspaces/{ws['id']}/runs", json={"model": "scripted", "episodes": 6})
+    from envforge.web.worker import run_forever
+
+    run_forever(once=True)
+    run = client.get(f"/api/workspaces/{ws['id']}/runs/{r.json()['id']}").json()
+    assert run["status"] == "failed" and run["progress"] == 2
+    assert "stopped after 2 episode(s)" in run["error"] and "unreachable" in run["error"]
+    overall = run["metrics"]["overall"]
+    assert overall["n"] == 2 and overall["solve_rate"] == 1.0  # no unreached episode scored
+
+
 # ---- models ---------------------------------------------------------------------
 
 

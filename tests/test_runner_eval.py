@@ -131,6 +131,37 @@ def test_run_many_stops_when_progress_raises(tmp_path):
     assert len(load_run(tmp_path / "stopped")) == 3  # nothing written after the stop
 
 
+def test_an_unreachable_model_stops_the_run_without_scoring_episodes(tmp_path):
+    """Episodes that never reached the model are not failures: they aren't written, and
+    the run stops with ModelUnreachable, keeping the episodes that did finish."""
+    import pytest
+
+    from envforge.models.base import ChatModel, ModelUnreachable
+
+    class DropsOff(ChatModel):
+        """The reference solver until episode 3, then its server goes away."""
+
+        model_id = "drops-off"
+
+        def __init__(self):
+            self.inner = load_model("scripted")
+            self.episodes = 0
+
+        def on_reset(self, env):
+            self.episodes += 1
+            self.inner.on_reset(env)
+
+        def complete(self, messages, tools):
+            if self.episodes > 3:
+                raise ModelUnreachable("drops-off unreachable for 180s")
+            return self.inner.complete(messages, tools)
+
+    with pytest.raises(ModelUnreachable):
+        run_many(PACK, DropsOff(), runs_dir=tmp_path, episodes=10, tiers=[1], run_id="dropped")
+    trajs = load_run(tmp_path / "dropped")
+    assert len(trajs) == 3 and all(t.error is None for t in trajs)
+
+
 def test_a_stopped_run_leaves_no_episode_calling_the_model(tmp_path):
     """Cancelling a concurrent run must stop the episodes already in flight, not only
     the queued ones (audit finding C2): after run_many returns, no more model calls."""

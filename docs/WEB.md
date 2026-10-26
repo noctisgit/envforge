@@ -11,7 +11,11 @@ The web layer is optional. The CLI and library work without it. It adds:
   rules and a live task preview, generated from the pack (see docs/PACKS.md)
 - **a run queue** executed by separate worker processes in two lanes (`envforge-worker
   --kind runs --lane api|gpu`, the `worker` and `worker-gpu` compose services): a run on a
-  provider API and a run on your GPU box go side by side; GPU runs wait for each other
+  provider API and a run on your GPU box go side by side; GPU runs wait for each other.
+  **Stop** (on the runs list and the run page) ends a run after the episode it is on and
+  keeps what finished. If the model's server can't be reached (a box dropping off the
+  network), each call retries for 3 minutes, then the run fails with "stopped after N
+  episode(s)": episodes that never reached the model aren't scored as failures
 - **a UI** for queuing runs, watching progress, reading metrics and transcripts,
   comparing runs, and **usage** (tokens and estimated cost per day, model, member and
   workspace)

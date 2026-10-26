@@ -95,18 +95,18 @@ export default function RunDetailPage() {
 
   async function cancel() {
     const ok = await confirm({
-      title: "Cancel this run?",
-      body: "The worker stops after the episode it is on. Finished episodes and their usage are kept.",
-      confirmLabel: "Cancel run",
+      title: "Stop this run?",
+      body: "The worker stops after the episode it is on. Finished episodes and their usage are kept and scored.",
+      confirmLabel: "Stop run",
       cancelLabel: "Keep running",
       tone: "danger",
     });
     if (!ok) return;
     try {
       setRun(await Api.cancelRun(ws!.id, run!.id));
-      toast.info("Cancelling", "The worker stops after the current episode.");
+      toast.info("Stopping", "The worker stops after the current episode.");
     } catch (e) {
-      toast.error("Couldn't cancel the run", e);
+      toast.error("Couldn't stop the run", e);
     }
   }
 
@@ -132,8 +132,8 @@ export default function RunDetailPage() {
           <>
             {episodes.length > 0 && <ExportButton wsId={ws.id} runIds={[run.id]} />}
             {active ? (
-              <button className="btn-ghost" onClick={cancel}>
-                Cancel run
+              <button className="btn-danger" onClick={cancel}>
+                Stop run
               </button>
             ) : (
               <button className="btn-danger" onClick={remove}>

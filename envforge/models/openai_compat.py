@@ -9,19 +9,34 @@ One class serves three providers, because they speak the same wire protocol:
 
 from __future__ import annotations
 
+import functools
 import json
 from typing import Any
 
 from envforge import config
 from envforge.core.env import ToolCall, ToolSpec
 from envforge.core.trajectory import Usage
-from envforge.models.base import AssistantTurn, ChatModel, Message
+from envforge.models.base import AssistantTurn, ChatModel, Message, retry_unreachable
 
 PROVIDERS: dict[str, dict[str, str | None]] = {
     "openai": {"base_url": None, "key_env": "OPENAI_API_KEY"},
     "vercel": {"base_url": config.VERCEL_BASE_URL, "key_env": "AI_GATEWAY_API_KEY"},
     "vllm": {"base_url": config.VLLM_BASE_URL, "key_env": "VLLM_API_KEY"},
 }
+
+
+#: HTTP statuses that mean "a proxy or gateway in front of the model is down", not "the
+#: model refused the request".
+GATEWAY_DOWN = (502, 503, 504)
+
+
+def _unreachable(e: Exception) -> bool:
+    """True when the error means the server is out of reach (worth waiting for)."""
+    from openai import APIConnectionError, APIStatusError  # APITimeoutError is a connection error
+
+    return isinstance(e, APIConnectionError) or (
+        isinstance(e, APIStatusError) and e.status_code in GATEWAY_DOWN
+    )
 
 
 class OpenAICompatModel(ChatModel):
@@ -100,6 +115,9 @@ class OpenAICompatModel(ChatModel):
         Reasoning models (gpt-5, o-series, ...) refuse `temperature` and want
         `max_completion_tokens` instead of `max_tokens`. Rather than keep a list of
         which model wants what, we learn it from the first 400 and remember it.
+
+        A server that can't be reached (a GPU box dropping off the network) is retried
+        for a while, then raises `ModelUnreachable`.
         """
         from openai import BadRequestError
 
@@ -113,7 +131,11 @@ class OpenAICompatModel(ChatModel):
                 kwargs["temperature"] = self._temperature
             kwargs[self._max_tokens_param] = self._max_tokens
             try:
-                return self._client.chat.completions.create(**kwargs)
+                return retry_unreachable(
+                    functools.partial(self._client.chat.completions.create, **kwargs),
+                    _unreachable,
+                    model_id=self.model_id,
+                )
             except BadRequestError as e:
                 msg = str(e).lower()
                 if self._send_temperature and "temperature" in msg:

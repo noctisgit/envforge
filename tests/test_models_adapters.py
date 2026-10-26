@@ -83,6 +83,61 @@ def test_openai_compat_other_errors_propagate():
         model.complete(MESSAGES, [ECHO])
 
 
+def _connection_error() -> openai.APIConnectionError:
+    req = httpx.Request("POST", "https://example.invalid/v1/chat/completions")
+    return openai.APIConnectionError(request=req)
+
+
+def test_openai_compat_waits_for_an_unreachable_server(monkeypatch):
+    """A GPU box dropping off the network for a moment: the call retries, then succeeds."""
+    monkeypatch.setattr("envforge.models.base.time.sleep", lambda s: None)
+    model = load_model("vllm:qwen", api_key="k", base_url="http://127.0.0.1:9/v1")
+    calls = []
+
+    def create(**kwargs):
+        calls.append(1)
+        if len(calls) < 3:
+            raise _connection_error()
+        return _ok_response()
+
+    model._client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+    assert model.complete(MESSAGES, [ECHO]).tool_calls[0].name == "echo"
+    assert len(calls) == 3
+
+
+def test_openai_compat_gives_up_on_a_server_that_stays_down(monkeypatch):
+    from envforge.models.base import ModelUnreachable
+
+    monkeypatch.setattr("envforge.models.base.RECONNECT_WAIT_S", 0.0)
+    model = load_model("vllm:qwen", api_key="k", base_url="http://127.0.0.1:9/v1")
+
+    def create(**kwargs):
+        raise _connection_error()
+
+    model._client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+    with pytest.raises(ModelUnreachable, match="vllm:qwen unreachable"):
+        model.complete(MESSAGES, [ECHO])
+
+
+def test_retry_unreachable_retries_only_unreachable_errors(monkeypatch):
+    from envforge.models.base import retry_unreachable
+
+    monkeypatch.setattr("envforge.models.base.time.sleep", lambda s: None)
+    calls = []
+
+    def boom():
+        calls.append(1)
+        raise ValueError("a real error")
+
+    with pytest.raises(ValueError):
+        retry_unreachable(boom, lambda e: isinstance(e, ConnectionError), model_id="m")
+    assert len(calls) == 1  # not retried
+
+
 def _anthropic_bad_request(msg: str):
     import anthropic
 

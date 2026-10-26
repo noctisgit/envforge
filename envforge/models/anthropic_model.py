@@ -2,13 +2,23 @@
 
 from __future__ import annotations
 
+import functools
 import json
 from typing import Any
 
 from envforge.config import env
 from envforge.core.env import ToolCall, ToolSpec
 from envforge.core.trajectory import Usage
-from envforge.models.base import AssistantTurn, ChatModel, Message
+from envforge.models.base import AssistantTurn, ChatModel, Message, retry_unreachable
+
+
+def _unreachable(e: Exception) -> bool:
+    """True when the error means the API is out of reach (worth waiting for)."""
+    from anthropic import APIConnectionError, APIStatusError
+
+    return isinstance(e, APIConnectionError) or (
+        isinstance(e, APIStatusError) and e.status_code in (502, 503, 504)
+    )
 
 
 class AnthropicModel(ChatModel):
@@ -82,6 +92,9 @@ class AnthropicModel(ChatModel):
         on older models (Sonnet/Haiku 4.5, the 4.6 line), so we send it as raw JSON via
         `extra_body` for reproducible evals. Newer models (Opus 4.7+, Sonnet 5.x) reject
         it with a 400; we learn that from the first refusal and stop sending it.
+
+        Connection errors and gateway errors are retried for a while (the SDK's own
+        retries give up within seconds), then raise `ModelUnreachable`.
         """
         from anthropic import BadRequestError
 
@@ -108,7 +121,11 @@ class AnthropicModel(ChatModel):
             if self._send_temperature:
                 kwargs["extra_body"] = {"temperature": self._temperature}
             try:
-                return self._client.messages.create(**kwargs)
+                return retry_unreachable(
+                    functools.partial(self._client.messages.create, **kwargs),
+                    _unreachable,
+                    model_id=self.model_id,
+                )
             except BadRequestError as e:
                 if self._send_temperature and "temperature" in str(e).lower():
                     self._send_temperature = False

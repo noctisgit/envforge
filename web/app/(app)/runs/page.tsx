@@ -148,7 +148,7 @@ export default function RunsPage() {
     const active = chosen.filter(isActive);
     const deletable = chosen.filter((r) => !active.includes(r));
     if (!deletable.length) {
-      toast.warning("Nothing deleted", "Queued or running runs can't be deleted — cancel them first.");
+      toast.warning("Nothing deleted", "Queued or running runs can't be deleted — stop them first.");
       return;
     }
     const one = deletable.length === 1;
@@ -181,6 +181,27 @@ export default function RunsPage() {
     const deleted = deletable.length - failed.length;
     if (deleted) toast.success(deleted === 1 ? "Run deleted" : `${deleted} runs deleted`);
     if (failed.length) toast.error("Some runs were not deleted", failed.join("; "));
+    await load();
+  }
+
+  async function stop(r: Run) {
+    const ok = await confirm({
+      title: "Stop this run?",
+      body:
+        r.status === "queued"
+          ? `${r.label || r.id} hasn't started; it is taken off the queue.`
+          : `${r.label || r.id} stops after the episode it is on. The ${r.progress} finished episode${r.progress === 1 ? "" : "s"} and their usage are kept and scored.`,
+      confirmLabel: "Stop run",
+      cancelLabel: "Keep running",
+      tone: "danger",
+    });
+    if (!ok) return;
+    try {
+      await Api.cancelRun(ws!.id, r.id);
+      toast.info("Stopping", r.status === "queued" ? "Taken off the queue." : "The worker stops after the current episode.");
+    } catch (e) {
+      toast.error("Couldn't stop the run", e);
+    }
     await load();
   }
 
@@ -465,7 +486,11 @@ export default function RunsPage() {
                       {new Date(r.created_at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
                     </td>
                     <td>
-                      {!isActive(r) && (
+                      {isActive(r) ? (
+                        <button className="text-xs hover:underline" style={{ color: "var(--bad)" }} onClick={() => stop(r)} aria-label={`stop ${r.label || r.id}`}>
+                          Stop
+                        </button>
+                      ) : (
                         <button className="text-xs hover:underline" style={{ color: "var(--muted)" }} onClick={() => remove([r.id])} aria-label={`delete ${r.label || r.id}`}>
                           Delete
                         </button>

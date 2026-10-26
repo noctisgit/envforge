@@ -23,7 +23,7 @@ from typing import Any
 
 from envforge.core.env import Environment, Task, ToolError, ToolSpec
 from envforge.core.trajectory import Step, Trajectory, TrajectoryStore, Usage
-from envforge.models.base import ChatModel, Message
+from envforge.models.base import ChatModel, Message, ModelUnreachable
 
 FINISH_TOOL = ToolSpec(
     name="finish",
@@ -59,6 +59,10 @@ def run_episode(
 ) -> Trajectory:
     """Run one episode and return its trajectory. Never raises for model/tool errors;
     they are recorded in the trajectory instead, so a bad episode doesn't kill a run.
+
+    The one exception is `ModelUnreachable`: when the model's server can't be reached,
+    the episode measured nothing, so it is not recorded (it would count as a failure);
+    the error propagates and stops the run.
 
     `stop` (set by run_many when a run is cancelled) ends the episode before its next
     model call, with finished_reason "stopped"."""
@@ -151,6 +155,8 @@ def run_episode(
         traj.usage = total_usage
         traj.meta["final_snapshot"] = env.snapshot()
 
+    except ModelUnreachable:
+        raise  # not the model's fault: stop the run rather than score this episode
     except Exception as e:  # noqa: BLE001 - record and continue the run
         traj.finished_reason = "error"
         traj.error = f"{type(e).__name__}: {e}"
@@ -200,6 +206,9 @@ def run_many(
     `concurrency=n` runs up to n episodes at once in threads, for servers that batch
     requests (vLLM). Trajectories are still written, and `progress` still called, in
     episode order, from this thread.
+
+    If the model's server stays unreachable, `ModelUnreachable` is raised; the episodes
+    written so far stay in the run dir.
     """
     if repeats < 1 or concurrency < 1:
         raise ValueError("repeats and concurrency must be at least 1")
@@ -251,7 +260,7 @@ def run_many(
             record(futures.pop(next_write).result())  # waits for the oldest in flight
             next_write += 1
     finally:
-        # On an error (a cancelled run): drop what's queued, tell the episodes in flight
+        # On an error (a cancelled run, an unreachable model): drop what's queued, tell the episodes in flight
         # to stop before their next model call, and wait for them, so nothing keeps
         # calling the model after this returns.
         stop.set()

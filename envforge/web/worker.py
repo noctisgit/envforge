@@ -29,6 +29,7 @@ from envforge import config
 from envforge.core.evaluate import evaluate_run, trajectory_cost
 from envforge.core.runner import run_many
 from envforge.models import load_model
+from envforge.models.base import ModelUnreachable
 from envforge.web import services as svc
 from envforge.web.db import session_factory
 from envforge.web.models import Run, Workspace
@@ -228,6 +229,13 @@ def _execute(db: Session, run: Run, stack: contextlib.ExitStack) -> None:
             run.metrics = evaluate_run(run.run_dir).model_dump()
             _finish(db, run, "failed", f"stopped after {run.progress} episode(s): "
                     + svc.limit_reached_message(ws))  # fmt: skip
+        except ModelUnreachable as e:
+            # the box or API went away: keep (and score) only the episodes that finished
+            run.run_dir = str(config.runs_dir(ws.slug) / run.id)
+            run.metrics = evaluate_run(run.run_dir).model_dump()
+            _finish(db, run, "failed", f"stopped after {run.progress} episode(s): {e}. "
+                    "The finished episodes are kept; queue the run again once the model "
+                    "is reachable.")  # fmt: skip
         except Exception as e:  # noqa: BLE001
             traceback.print_exc()  # full detail goes to the worker log, not to the user
             _finish(db, run, "failed", _user_error(e))
