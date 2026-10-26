@@ -19,7 +19,9 @@ How a declarative episode works
 - `generate_task(seed, tier)` chooses a record of that tier from its side
   deterministically (records sorted by id; `record_index` spreads a run's episodes over
   all of them; seeds count from 10000 on the training side). The `Task` carries the record id in `hidden["task_record"]`; the
-  full record stays in the class's task table.
+  full record stays in the class's task table. With tier `ALL_TASKS_TIER` (0) a seed picks
+  from the whole side instead, ordered by (tier, id): n consecutive seeds cover all n
+  records of that side once each, which is how a run scores a model on every held-out task.
 - `reset()` deep-copies the record's starting state into a `World` (rules.py). The
   first observation is the ticket plus a list of the systems the agent can query —
   never the records themselves; the agent has to look things up.
@@ -36,6 +38,7 @@ import re
 from typing import Any, ClassVar
 
 from envforge.core.env import (
+    ALL_TASKS_TIER,
     TRAIN_SEED_MIN,
     Diagram,
     DiagramEdge,
@@ -447,11 +450,15 @@ class DeclarativeEnvironment(Environment):
     def generate_task(cls, seed: int, tier: int) -> Task:
         training = seed >= TRAIN_SEED_MIN
         side = cls.train_by_tier if training else cls.eval_by_tier
-        if tier not in side:  # nearest tier with tasks on this side (lower on ties)
-            tier = min(side, key=lambda t: (abs(t - tier), t))
-        records = side[tier]
         offset = seed - TRAIN_SEED_MIN if training else seed
-        rec = records[record_index(offset, len(records), len(cls.tiers))]
+        if tier == ALL_TASKS_TIER:  # the whole side in a fixed order, one record per seed
+            records = [r for t in sorted(side) for r in side[t]]
+            rec = records[offset % len(records)]
+        else:
+            if tier not in side:  # nearest tier with tasks on this side (lower on ties)
+                tier = min(side, key=lambda t: (abs(t - tier), t))
+            records = side[tier]
+            rec = records[record_index(offset, len(records), len(cls.tiers))]
         expected = [c.category for c in rec.success if isinstance(c, ResolutionIs)]
         return Task(
             id=f"{cls.name}-t{rec.tier}-{rec.id}-s{seed}",
@@ -536,6 +543,14 @@ class DeclarativeEnvironment(Environment):
 
     def snapshot(self) -> dict[str, Any]:
         return self.world.snapshot()
+
+    @classmethod
+    def task_counts(cls) -> dict[str, int]:
+        """Records on each side of the split (both are every record when it's too small)."""
+        return {
+            "eval": sum(len(recs) for recs in cls.eval_by_tier.values()),
+            "train": sum(len(recs) for recs in cls.train_by_tier.values()),
+        }
 
     # ---- self-description ------------------------------------------------------------
     @classmethod

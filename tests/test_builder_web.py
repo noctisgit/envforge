@@ -316,6 +316,29 @@ def _published(c, ws, p, set_script) -> str:
     return c.post(f"{_base(ws, p)}/publish", json={}).json()["pack_name"]
 
 
+def test_a_run_can_score_every_held_out_task_once(builder):
+    from envforge.web.worker import run_forever
+
+    c, ws, p, set_script = builder
+    name = _published(c, ws, p, set_script)
+    pack = {x["name"]: x for x in c.get(f"/api/workspaces/{ws}/packs").json()}[name]
+    n = pack["task_counts"]["eval"]
+    r = c.post(f"/api/workspaces/{ws}/runs",
+               json={"pack": name, "model": "scripted", "episodes": n, "tiers": [0]})  # fmt: skip
+    assert r.status_code == 202 and r.json()["tiers"] == [0], r.text
+    assert run_forever(once=True, kind="runs") == 1
+    eps = c.get(f"/api/workspaces/{ws}/runs/{r.json()['id']}/episodes").json()
+    records = [e["task_id"].rsplit("-s", 1)[0] for e in eps]
+    assert len(records) == len(set(records)) == n  # each held-out task exactly once
+    # built-in packs generate tasks from the seed: tier 0 falls back to their tiers
+    r = c.post(
+        f"/api/workspaces/{ws}/runs", json={"pack": "netops", "model": "scripted", "tiers": [0]}
+    )
+    assert r.status_code == 202 and r.json()["tiers"] == [1, 2, 3]
+    builtin = {x["name"]: x for x in c.get(f"/api/workspaces/{ws}/packs").json()}["netops"]
+    assert builtin["task_counts"] is None
+
+
 def test_delete_published_environment_keeps_past_runs(builder):
     from envforge.web.worker import run_forever
 

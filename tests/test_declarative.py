@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from envforge.core.env import TRAIN_SEED_MIN, Diagram, ToolCall, ToolError
+from envforge.core.env import ALL_TASKS_TIER, TRAIN_SEED_MIN, Diagram, ToolCall, ToolError
 from envforge.core.explore import pack_overview, preview_task, replay_episode
 from envforge.core.registry import get_pack
 from envforge.core.runner import run_episode
@@ -385,6 +385,20 @@ def test_a_run_over_every_tier_reaches_every_record():
                 cls.generate_task(start + i + 3 * k, tier).hidden["task_record"] for k in range(n)
             }
             assert seen == {r.id for r in side[tier]}
+
+
+def test_tier_zero_walks_every_task_on_a_side_once():
+    tasks = [shop_task(id=f"t{i}", tier=1 + (i % 3)) for i in range(90)]
+    cls = make_environment(shop_spec(tiers=[1, 2, 3]), tasks)
+    counts = cls.task_counts()
+    assert counts["eval"] + counts["train"] == 90
+    for start, side, n in ((0, cls.eval_by_tier, counts["eval"]),
+                           (TRAIN_SEED_MIN, cls.train_by_tier, counts["train"])):  # fmt: skip
+        picked = [cls.generate_task(start + i, ALL_TASKS_TIER) for i in range(n)]
+        ids = [t.hidden["task_record"] for t in picked]
+        assert sorted(ids) == sorted(r.id for recs in side.values() for r in recs)  # each once
+        assert [t.tier for t in picked] == sorted(t.tier for t in picked)  # tier by tier
+    assert make_environment(shop_spec(), [shop_task()]).task_counts() == {"eval": 1, "train": 1}
 
 
 def test_a_task_set_too_small_to_split_uses_every_record():

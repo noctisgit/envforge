@@ -129,6 +129,7 @@ class PackOut(BaseModel):
     tiers: list[int]
     max_steps: int
     description: str
+    task_counts: dict[str, int] | None = None  # fixed task lists: {"eval": n, "train": m}
 
 
 class ServerInfo(BaseModel):

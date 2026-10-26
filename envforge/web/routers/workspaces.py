@@ -56,6 +56,7 @@ def packs(_: User = Depends(current_user)) -> list[PackOut]:
             tiers=list(c.tiers),
             max_steps=c.max_steps,
             description=c.description,
+            task_counts=c.task_counts(),
         )
         for n, c in sorted(discover_packs().items())
     ]

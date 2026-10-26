@@ -377,6 +377,7 @@ def enqueue_run(
     label: str = "",
     repeats: int = 1,
 ) -> Run:
+    from envforge.core.env import ALL_TASKS_TIER
     from envforge.core.runner import new_run_id
     from envforge.web.builder import resolve_pack
     from envforge.web.compute_service import box_for_model
@@ -412,7 +413,10 @@ def enqueue_run(
         raise HTTPException(
             429, f"this workspace already has {active} queued/running runs (limit {limit})"
         )
-    valid_tiers = [t for t in tiers if t in env_cls.tiers] or list(env_cls.tiers)
+    if tiers == [ALL_TASKS_TIER] and env_cls.task_counts() is not None:
+        valid_tiers = [ALL_TASKS_TIER]  # every task on the seeds' side once (fixed task lists)
+    else:
+        valid_tiers = [t for t in tiers if t in env_cls.tiers] or list(env_cls.tiers)
 
     # The id doubles as a directory name and the column holds 80 chars: a 15-char stamp,
     # the pack, the model and a 6-char suffix, with 3 separators. Shorten the model part

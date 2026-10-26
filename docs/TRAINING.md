@@ -43,7 +43,11 @@ tickets for evaluation: seeds below 10000 pick only those, seeds from 10000 only
 rest. The same two seed ranges therefore work unchanged, and the overlap check compares
 tickets for them (docs/BUILDER.md, held-out tasks). With few tickets, an evaluation of
 100 episodes repeats each held-out ticket several times; that measures consistency, not
-more coverage.
+more coverage. A run over tiers 1–3 also cycles the tiers evenly, so when the tiers hold
+different numbers of tickets, the smaller tiers repeat and count for more in the score.
+For a fair score use tier `0` ("every task once" in the web run form): with as many
+episodes as held-out tickets (the pack's `task_counts`), each ticket comes up exactly
+once, tier by tier. Seeds from 10000 with tier 0 walk every training ticket once instead.
 
 ```bash
 uv run envforge run netops --model anthropic:claude-sonnet-5-5 --episodes 500 --seed-start 10000

@@ -9,7 +9,7 @@ import { ModelPicker } from "@/components/ModelPicker";
 import { Empty, Page, PageHeader, Panel, rateTone, StatCard, StatGrid, toneColor } from "@/components/Page";
 import { Tabs } from "@/components/Tabs";
 import { errorText, useToast } from "@/components/Toast";
-import { Api, fmtCost, fmtTokens, type Pack, type Run } from "@/lib/api";
+import { ALL_TASKS_TIER, Api, fmtCost, fmtTokens, type Pack, type Run } from "@/lib/api";
 import { EVAL_SEED, TRAIN_SEED } from "@/lib/journey";
 import { useWorkspace } from "@/lib/workspace";
 
@@ -110,9 +110,16 @@ export default function RunsPage() {
     return () => clearInterval(t);
   }, [active, load]);
 
-  if (!ws) return null;
   const currentPack = packs.find((p) => p.name === pack);
   const packTiers = currentPack?.tiers ?? [];
+  // "every task once": packs with a fixed task list can walk all of one side of the split
+  const counts = currentPack?.task_counts ?? null;
+  const sideCount = counts ? (seedStart >= TRAIN_SEED ? counts.train : counts.eval) : 0;
+  const wholeSet = tiers.length === 1 && tiers[0] === ALL_TASKS_TIER;
+  useEffect(() => {
+    if (wholeSet && sideCount) setEpisodes(Math.min(1000, sideCount * repeats));
+  }, [wholeSet, sideCount, repeats]);
+  if (!ws) return null;
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -252,21 +259,28 @@ export default function RunsPage() {
           </div>
           <div>
             <label className="label">Episodes</label>
-            <input className="input" type="number" min={1} max={1000} value={episodes} onChange={(e) => setEpisodes(Number(e.target.value))} />
+            <input className="input" type="number" min={1} max={1000} value={episodes} disabled={wholeSet} onChange={(e) => setEpisodes(Number(e.target.value))} />
+            {wholeSet && <div className="hint mt-1">{sideCount} tasks{repeats > 1 ? ` × ${repeats} attempts` : ""}</div>}
           </div>
           <div className="md:col-span-2 2xl:col-span-2">
             <label className="label">Tiers (none = all)</label>
-            <div className="flex gap-3 pt-2 text-sm">
+            <div className="flex flex-wrap gap-3 pt-2 text-sm">
               {packTiers.map((t) => (
                 <label key={t} className="flex items-center gap-1">
                   <input
                     type="checkbox"
                     checked={tiers.includes(t)}
-                    onChange={(e) => setTiers(e.target.checked ? [...tiers, t].sort() : tiers.filter((x) => x !== t))}
+                    onChange={(e) => setTiers(e.target.checked ? [...tiers.filter((x) => x !== ALL_TASKS_TIER), t].sort() : tiers.filter((x) => x !== t))}
                   />
                   {t}
                 </label>
               ))}
+              {counts && (
+                <label className="flex items-center gap-1" title="Every task on this side of the split exactly once, all tiers: the fairest score, with no task counted twice">
+                  <input type="checkbox" checked={wholeSet} onChange={(e) => setTiers(e.target.checked ? [ALL_TASKS_TIER] : [])} />
+                  every task once
+                </label>
+              )}
             </div>
           </div>
           <div className="md:col-span-2 2xl:col-span-2">

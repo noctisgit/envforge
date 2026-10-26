@@ -48,12 +48,16 @@ export interface Workspace {
   month_spend_usd: number;
 }
 
+/** Tier value meaning "every task on the seeds' side once" (packs with task_counts). */
+export const ALL_TASKS_TIER = 0;
+
 export interface Pack {
   name: string;
   kind: string;
   tiers: number[];
   max_steps: number;
   description: string;
+  task_counts?: { eval: number; train: number } | null; // fixed task lists: runs can cover every task once
   custom?: boolean; // published from the builder in this workspace
   project_id?: string | null;
 }

@@ -780,6 +780,7 @@ def workspace_packs(ws_id: str, user: User = Depends(current_user), db: Session 
             "tiers": list(c.tiers),
             "max_steps": c.max_steps,
             "description": c.description,
+            "task_counts": c.task_counts(),
             "custom": v is not None,
             "project_id": v.project_id if v else None,
         }  # fmt: skip

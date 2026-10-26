@@ -28,6 +28,11 @@ EnvKind = Literal["sim", "sandbox"]
 #: (0-99 by convention). Packs with a fixed list of tasks use it to keep the two apart.
 TRAIN_SEED_MIN = 10_000
 
+#: Pass as the tier to walk a pack's fixed task list instead of one tier: n consecutive
+#: seeds (n = that side's task count) give every evaluation task, or every training task,
+#: exactly once. Only packs whose `task_counts()` is not None support it.
+ALL_TASKS_TIER = 0
+
 
 class ToolSpec(BaseModel):
     """A tool the agent may call. `parameters` is a JSON Schema object.
@@ -196,6 +201,12 @@ class Environment(ABC):
     @abstractmethod
     def generate_task(cls, seed: int, tier: int) -> Task:
         """Deterministically build a task from (seed, tier)."""
+
+    @classmethod
+    def task_counts(cls) -> dict[str, int] | None:
+        """{"eval": n, "train": m} for packs with a fixed list of tasks (these accept
+        `ALL_TASKS_TIER`); None for packs that generate tasks from the seed."""
+        return None
 
     # ---- episode lifecycle ----------------------------------------------
     @abstractmethod

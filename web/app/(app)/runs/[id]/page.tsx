@@ -11,7 +11,7 @@ import { newRunHref } from "@/components/Journey";
 import { NextStep } from "@/components/NextStep";
 import { Empty, Facts, Page, PageHeader, Panel } from "@/components/Page";
 import { useToast } from "@/components/Toast";
-import { Api, ApiError, fmtCost, fmtTokens, type EpisodeSummary, type ReplayFrame, type Run, type Trajectory } from "@/lib/api";
+import { ALL_TASKS_TIER, Api, ApiError, fmtCost, fmtTokens, type EpisodeSummary, type ReplayFrame, type Run, type Trajectory } from "@/lib/api";
 import { EVAL_SEED, TRAIN_SEED, isTrainingRun, modelRole } from "@/lib/journey";
 import { useWorkspace } from "@/lib/workspace";
 
@@ -152,7 +152,7 @@ export default function RunDetailPage() {
               label: "tiers · seed start",
               value: (
                 <>
-                  {run.tiers.length ? run.tiers.join(", ") : "all"} · <span className="mono">{run.seed_start}</span>
+                  {run.tiers.length === 1 && run.tiers[0] === ALL_TASKS_TIER ? "every task once" : run.tiers.length ? run.tiers.join(", ") : "all"} · <span className="mono">{run.seed_start}</span>
                 </>
               ),
             },
