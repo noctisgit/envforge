@@ -168,7 +168,9 @@ def test_grpo_loop_runs_rounds_of_rollouts_and_updates(client, fake_boxes, fast_
     assert done["step"] == 2 and len(done["grpo"]["rounds"]) == 2
     from envforge import config
 
-    assert not list((config.workspace_dir(ws["slug"]) / "grpo").rglob("*.jsonl"))  # uploaded, then removed
+    assert not list(
+        (config.workspace_dir(ws["slug"]) / "grpo").rglob("*.jsonl")
+    )  # uploaded, then removed
     a = next(x for x in client.get(f"{p}/adapters").json() if x["name"] == "netops-grpo")
     assert (
         a["metrics"]["method"] == "grpo"
