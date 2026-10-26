@@ -18,8 +18,8 @@ environment for LLMs":
                                    │ one contract (envforge/core/env.py)
   ┌────────┐   tool calls   ┌──────▼──────┐  trajectories  ┌──────────┐  best episodes  ┌──────────┐
   │ model  │◄──────────────►│   runner    │───────────────►│  eval    │────────────────►│  train   │
-  │ (API / │  observations  │ (episodes)  │    (JSONL)     │ metrics, │   (rejection    │ LoRA SFT │
-  │  vLLM) │                └─────────────┘                │   cost   │    sampling)    │ → re-eval│
+  │ (API / │  observations  │ (episodes)  │    (JSONL)     │ metrics, │   (rejection    │ SFT, DPO │
+  │  vLLM) │                └─────────────┘                │   cost   │    sampling)    │ + GRPO   │
   └────────┘                                               └──────────┘                 └──────────┘
 ```
 
@@ -34,7 +34,8 @@ environment for LLMs":
 
 - **Evaluate models as agents.** Run Claude, GPT, anything on the Vercel AI Gateway, or your own
   open model behind vLLM against realistic, seeded tasks. Get solve rate, steps, collateral
-  damage, tokens and cost, and replay every episode step by step.
+  damage, tokens and cost, and replay every episode step by step. Score a fixed held-out set
+  with "every task once" so every model is measured on exactly the same tasks.
 - **Compare** models, prompts and difficulty tiers side by side.
 - **Explore environments**: world diagrams, tools with their JSON schemas, reward rules, difficulty
   tiers and live task previews, all generated from each environment's own code.
@@ -43,8 +44,10 @@ environment for LLMs":
   is redacted before any model sees it, and a measured human review gates extraction.
 - **Make training data.** Keep only the episodes that earned full reward (rejection sampling) and
   export them as chat-format JSONL.
-- **Fine-tune an open model** (LoRA SFT) on a rented GPU, serve it with vLLM, and measure
-  before/after on held-out tasks.
+- **Fine-tune an open model** on a rented GPU, all from the browser: LoRA SFT on a strong
+  model's best episodes, then **DPO** (pairs of the open model's own successes and failures)
+  and **GRPO** (rounds of scored rollouts on training tasks). Serve the adapter with vLLM and
+  measure before/after on held-out tasks.
 - **Track usage**: tokens and estimated cost per day, model, member and workspace.
 
 ## How it works
@@ -59,9 +62,11 @@ environment for LLMs":
 | **trajectory** | every message, tool call, result, token count and the reward, saved as JSONL |
 | **rejection sampling** | keep the best episode per task (reward 1.0) → chat-format training examples |
 | **SFT** | fine-tune an open model on those examples (LoRA), then evaluate it on held-out seeds |
+| **DPO** | learn from pairs of the model's own attempts at a task: one solved, one failed |
+| **GRPO** | online RL: the model tries each training task several times, the verifier scores every attempt, and the update favours the attempts that beat their group's average |
 
 This is the core loop of RL for LLM agents: environments → rollouts → evaluation → filtering →
-training. Phase 4 adds DPO and GRPO on the same environments.
+training, then DPO and GRPO to improve the model from its own attempts.
 [docs/LEARNING.md](docs/LEARNING.md) explains each piece and the ML concept behind it.
 
 The web app is a thin layer over the same library the CLI uses:
@@ -69,8 +74,10 @@ The web app is a thin layer over the same library the CLI uses:
 ```
 browser ──► Next.js UI (:3000) ──/api/*──► FastAPI ──► Postgres (users, workspaces, runs, builder)
                                               │
-                         worker ──► runs episodes with the user's own provider keys ──► model APIs / vLLM
-                         builder ──► uploads (redact → store), builder-agent chat turns
+                         worker      ──► API runs, with the user's own provider keys ──► model APIs
+                         worker-gpu  ──► runs on your GPU box, one at a time ─────────► vLLM (SSH tunnel / Tailscale)
+                         compute     ──► GPU boxes: check, serve, train adapters, over SSH
+                         builder     ──► uploads (redact → store), builder-agent chat turns
 ```
 
 ## Self-hosting (one command)
@@ -91,7 +98,9 @@ The installer:
    for the port, whether the UI should be reachable from other machines, your public URL (if
    any), and whether anyone may sign up;
 3. builds and starts the stack in Docker: **Postgres**, the **API** (it creates and migrates
-   the database tables on start), the **run worker**, the **builder worker** and the **web UI**;
+   the database tables on start), two **run workers** (provider APIs and GPU boxes, so both
+   kinds of run go side by side), the **builder worker**, the **compute worker** (GPU boxes
+   and training) and the **web UI**;
 4. waits until the app answers, then creates your **admin account** from the terminal, so
    nobody can claim the server by signing up first.
 
@@ -115,7 +124,7 @@ listen on every interface instead, use `--listen 0.0.0.0`.
 |---|---|
 | update | `git pull && ./install.sh`: keeps `.env` and all data, applies database migrations |
 | stop / start | `docker compose stop` / `docker compose start` (the stack also restarts with the machine) |
-| logs | `docker compose logs -f api worker builder web` |
+| logs | `docker compose logs -f api worker worker-gpu compute builder web` |
 | accounts | `docker compose exec api envforge admin users` · `create-user EMAIL [--admin]` · `reset-password EMAIL` · `set-admin EMAIL` · `sign-out EMAIL` |
 | back up | `docker compose exec -T postgres pg_dump -U envforge envforge \| gzip > envforge.sql.gz`, plus the `envdata` volume (runs, datasets) and your `.env` |
 
@@ -147,17 +156,25 @@ The sidebar follows the same pipeline: **Build** (Environments, Builder), **Eval
    rules and generated tasks.
 3. **Start a run** under Runs: model, environment, episodes, tiers and a **purpose**:
    *evaluation* (seeds 0+, the fixed tasks every model is scored on) or *training data*
-   (seeds 10000+, tasks a model may learn from, never used for scoring). The run's page shows
-   metrics, cost and a step-by-step replay of every episode, then suggests what to do next.
+   (seeds 10000+, tasks a model may learn from, never used for scoring). For environments with
+   a fixed task list, tick **every task once** to score the whole held-out set. The run's page
+   shows metrics, cost and a step-by-step replay of every episode, then suggests what to do
+   next. **Stop** ends a run early and keeps the finished episodes. If a GPU box drops off
+   the network, the run waits up to 3 minutes for it, then stops without scoring the episodes
+   that never reached the model.
 4. **Compare** two or more runs on the same tasks (solve rate per tier, steps, collateral, cost).
-5. **Train a model** walks through distillation: score the teacher and the untrained open
-   model, collect the teacher's solutions on training seeds, build the dataset, fine-tune a
-   LoRA adapter on a rented GPU, test it on the evaluation seeds and call it through vLLM.
-   Steps 4–6 run on the command line for now; the page shows the exact commands, filled in with
-   your runs.
-6. **Settings** (per workspace): default model, environment and episodes, the builder model, and
-   the training base model (searchable live from Hugging Face, with a GPU-memory estimate).
-   **Usage** shows tokens and cost per day, model, member and workspace.
+5. **Train a model**, all in the browser. **Guide** walks through distillation step by step:
+   score the teacher and the untrained open model, collect the teacher's solutions on training
+   seeds, then:
+   - **Settings → GPU boxes**: add a rented GPU (Tailscale or plain SSH), check it, serve an
+     open model with vLLM;
+   - **Datasets**: build SFT examples (the best episode per task) or DPO pairs from your runs;
+   - **Fine-tune**: train a LoRA adapter with **SFT**, **DPO** or **GRPO** on the box and follow
+     its loss curve;
+   - **Models**: serve an adapter next to its base model and score both on the evaluation seeds.
+6. **Settings** (per workspace): default model, environment and episodes, the builder model, the
+   training base model (searchable live from Hugging Face, with a GPU-memory estimate) and GPU
+   boxes. **Usage** shows tokens and cost per day, model, member and workspace.
 
 ## Command line
 
@@ -249,9 +266,12 @@ uv run envforge train sft my-set --base Qwen/Qwen2.5-7B-Instruct
 uv run envforge train follow my-set && uv run envforge train fetch my-set
 ```
 
-To evaluate a served model in the web app, add its URL under Profile → vLLM. Guides:
-[docs/COMPUTE.md](docs/COMPUTE.md) (GPU boxes, the RunPod template, Tailscale) and
-[docs/TRAINING.md](docs/TRAINING.md) (teacher runs → dataset → LoRA SFT → before/after eval).
+In the web app, add the box under **Settings → GPU boxes** and serve, train and evaluate from
+the browser. Over Tailscale the control plane calls vLLM directly; over plain SSH (a pod's
+public SSH port) it forwards vLLM through an SSH tunnel, so vLLM is never exposed to the
+internet. Guides: [docs/COMPUTE.md](docs/COMPUTE.md) (GPU boxes, the RunPod template,
+Tailscale) and [docs/TRAINING.md](docs/TRAINING.md) (teacher runs → dataset → LoRA SFT →
+before/after eval → DPO and GRPO).
 
 ## Documentation
 
@@ -260,7 +280,7 @@ To evaluate a served model in the web app, add its URL under Profile → vLLM. G
 | [docs/WEB.md](docs/WEB.md) | web layer: configuration, auth (local / Clerk), keys, isolation, deployment, API |
 | [docs/BUILDER.md](docs/BUILDER.md) | environment builder: uploads, redaction profiles, review, revisions, publishing |
 | [docs/COMPUTE.md](docs/COMPUTE.md) | GPU boxes, the envforge GPU image on RunPod/Vast, vLLM serving, Tailscale |
-| [docs/TRAINING.md](docs/TRAINING.md) | rejection sampling, LoRA SFT, serving adapters, before/after evaluation |
+| [docs/TRAINING.md](docs/TRAINING.md) | rejection sampling, LoRA SFT, serving adapters, before/after evaluation, DPO, GRPO |
 | [docs/PACKS.md](docs/PACKS.md) | writing a new environment in Python |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | design decisions, the pack contract, trajectory schema, roadmap |
 | [docs/LEARNING.md](docs/LEARNING.md) | module-by-module walkthrough mapped to RL-for-LLMs concepts |
@@ -289,6 +309,6 @@ Rules for contributors (and AI coding agents) are in [CLAUDE.md](CLAUDE.md).
 | 2 | `sipops`, `repofix` (Docker sandbox), GPU compute backend, vLLM serving | ✅ |
 | 3 | rejection sampling → LoRA SFT → serve the adapter → before/after eval | ✅ |
 | + | web app, environment builder, privacy pipeline, GPU image, one-command install | ✅ |
-| 4 | DPO, then GRPO on the same environments | next |
+| 4 | DPO and GRPO on the same environments, orchestrated from the web app | ✅ |
 
 MIT License.

@@ -175,6 +175,6 @@ Model strings are `provider:model-id`:
   backend for GPU boxes; vLLM serving an open model; same eval against it.
 - **Phase 3 (done):** filter high-reward trajectories → LoRA SFT on an open model on a
   rented GPU → serve the adapter with vLLM → re-eval on held-out seeds (docs/TRAINING.md).
-- **Phase 4 (in progress):** DPO (preference pairs from the student's own failures) and GRPO
+- **Phase 4 (done):** DPO (preference pairs from the student's own failures) and GRPO
   (rounds of scored rollouts, orchestrated by the web app) using the same environments —
   docs/TRAINING.md, "Beyond imitation".

@@ -136,7 +136,7 @@ until there is something to authenticate.
 | 1 ✅ | core, netops, adapters, eval + cost, CLI, chat-format export | environments, rewards, trajectories, evaluation |
 | 2 ✅ | `sipops` sim pack; `repofix` sandbox pack; `sandbox/docker.py`; `compute/ssh.py` + vLLM | the contract generalises; sandboxes; serving with vLLM |
 | 3 ✅ | `train/dataset.py` (rejection sampling, seed bookkeeping), `train/sft.py` (LoRA SFT, assistant-only loss), `train/remote.py` (GPU box), vLLM LoRA serving, before/after eval — docs/TRAINING.md | rejection sampling, SFT, overfitting, contamination |
-| 4 | DPO then GRPO trainers on the same envs | preference data; online RL |
+| 4 ✅ | `train/preference.py` (DPO pairs from the student's own attempts), `train/dpo.py`, `train/grpo_step.py` (one GRPO update from scored rollouts), GRPO rounds orchestrated by the web app — docs/TRAINING.md | preference data; online RL |
 
 ## Non-goals (for now)
 
