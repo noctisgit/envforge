@@ -222,7 +222,7 @@ function AddBoxForm({ wsId, onDone, onCancel }: { wsId: string; onDone: () => vo
           </div>
           <div>
             <label className="label" htmlFor="box-hf">Hugging Face token</label>
-            <input id="box-hf" className="input mono" type="password" autoComplete="new-password" placeholder="only for gated models" value={f.hf_token ?? ""} onChange={(e) => set("hf_token", e.target.value)} />
+            <input id="box-hf" className="input mono" type="password" autoComplete="new-password" placeholder="optional: else your account token (Provider keys)" value={f.hf_token ?? ""} onChange={(e) => set("hf_token", e.target.value)} />
           </div>
         </div>
       )}

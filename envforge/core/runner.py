@@ -12,6 +12,7 @@ same way. The model may also end an episode by replying with no tool calls.
 from __future__ import annotations
 
 import re
+import threading
 import time
 import uuid
 from collections.abc import Callable, Iterable
@@ -54,9 +55,13 @@ def run_episode(
     episode: int = 0,
     max_steps: int | None = None,
     on_step: Callable[[Step], None] | None = None,
+    stop: threading.Event | None = None,
 ) -> Trajectory:
     """Run one episode and return its trajectory. Never raises for model/tool errors;
-    they are recorded in the trajectory instead, so a bad episode doesn't kill a run."""
+    they are recorded in the trajectory instead, so a bad episode doesn't kill a run.
+
+    `stop` (set by run_many when a run is cancelled) ends the episode before its next
+    model call, with finished_reason "stopped"."""
     env = env_cls(task)
     budget = max_steps or env_cls.max_steps
     t0 = time.perf_counter()
@@ -89,6 +94,9 @@ def run_episode(
         ]
 
         for i in range(budget):
+            if stop is not None and stop.is_set():
+                traj.finished_reason = "stopped"
+                break
             t_call = time.perf_counter()
             turn = model.complete(messages, tools)
             latency = time.perf_counter() - t_call
@@ -212,11 +220,13 @@ def run_many(
             **(extra_meta or {}),
         }
     )
+    stop = threading.Event()  # set when the run stops early: episodes in flight end too
 
     def one(ep: int) -> Trajectory:
         i = ep // repeats  # the task index: `repeats` episodes in a row share it
         task = env_cls.generate_task(seed=seed_start + i, tier=tiers[i % len(tiers)])
-        return run_episode(env_cls, task, model, run_id=rid, episode=ep, max_steps=max_steps)
+        return run_episode(env_cls, task, model, run_id=rid, episode=ep, max_steps=max_steps,
+                           stop=stop)  # fmt: skip
 
     def record(traj: Trajectory) -> None:
         store.append(traj)
@@ -241,5 +251,9 @@ def run_many(
             record(futures.pop(next_write).result())  # waits for the oldest in flight
             next_write += 1
     finally:
-        pool.shutdown(wait=False, cancel_futures=True)  # on an error: drop what's queued
+        # On an error (a cancelled run): drop what's queued, tell the episodes in flight
+        # to stop before their next model call, and wait for them, so nothing keeps
+        # calling the model after this returns.
+        stop.set()
+        pool.shutdown(wait=True, cancel_futures=True)
     return run_dir

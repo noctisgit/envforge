@@ -129,3 +129,47 @@ def test_run_many_stops_when_progress_raises(tmp_path):
         run_many(PACK, load_model("scripted"), runs_dir=tmp_path, episodes=20, tiers=[1],
                  concurrency=4, progress=progress, run_id="stopped")  # fmt: skip
     assert len(load_run(tmp_path / "stopped")) == 3  # nothing written after the stop
+
+
+def test_a_stopped_run_leaves_no_episode_calling_the_model(tmp_path):
+    """Cancelling a concurrent run must stop the episodes already in flight, not only
+    the queued ones (audit finding C2): after run_many returns, no more model calls."""
+    import threading
+    import time
+
+    import pytest
+
+    from envforge.core.env import ToolCall
+    from envforge.models.base import AssistantTurn, ChatModel
+
+    calls: list[float] = []
+    first_goal = PACK.generate_task(seed=0, tier=1).goal
+
+    class Slow(ChatModel):
+        """Episode 0 finishes at once (so the run stops); the others keep working."""
+
+        model_id = "slow"
+
+        def complete(self, messages, tools):
+            if first_goal in messages[1].content:
+                return AssistantTurn(
+                    tool_calls=[ToolCall(id="f", name="finish", args={"summary": "done"})]
+                )
+            calls.append(time.monotonic())
+            time.sleep(0.05)
+            return AssistantTurn(tool_calls=[ToolCall(id="1", name="list_devices", args={})])
+
+    class Stop(Exception):
+        pass
+
+    def progress(t):
+        raise Stop
+
+    with pytest.raises(Stop):
+        run_many(PACK, Slow(), runs_dir=tmp_path, episodes=16, tiers=[1], concurrency=8,
+                 progress=progress, run_id="cancelled")  # fmt: skip
+    returned, n = time.monotonic(), len(calls)
+    time.sleep(0.3)
+    assert len(calls) == n  # nothing kept calling the model after the run stopped
+    assert not [t for t in threading.enumerate() if t.name.startswith("episode")]
+    assert all(c <= returned for c in calls)

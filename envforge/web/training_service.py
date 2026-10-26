@@ -44,7 +44,6 @@ from envforge.train import dataset as ds
 from envforge.train import preference as pref
 from envforge.train import remote
 from envforge.web import compute_service as C
-from envforge.web import crypto
 from envforge.web.models import Adapter, Dataset, GpuBox, Job, Run, TrainingJob, User, Workspace
 from envforge.web.settings import get_settings
 
@@ -492,6 +491,7 @@ def start_training(db: Session, ws: Workspace, user: User, *, dataset_id: str | 
     if method not in METHOD_DEFAULTS:
         raise HTTPException(400, "method must be sft, dpo or grpo")
     box = C.get_box(db, ws, box_id)
+    C.refuse_while_runs_use(db, box, "training")
     d = get_dataset(db, ws, dataset_id) if dataset_id else None
     if method in ("sft", "dpo"):
         if d is None:
@@ -519,6 +519,8 @@ def start_training(db: Session, ws: Workspace, user: User, *, dataset_id: str | 
         resolve_pack(db, ws, env_name)  # 404 unless built in or published in this workspace
         if len(name) > 58:  # rounds are saved as <name>-r<k> on the box
             raise HTTPException(400, "GRPO adapter names can be at most 58 characters")
+        if hp["tasks_per_round"] * hp["group_size"] > 1000:  # a run's episode cap
+            raise HTTPException(400, "tasks per round x attempts per task must be at most 1000")
     if db.scalar(select(Adapter).where(Adapter.workspace_id == ws.id, Adapter.name == name)):
         raise HTTPException(409, f"an adapter named {name} already exists; pick another name")
     same = list(db.scalars(select(TrainingJob).where(TrainingJob.workspace_id == ws.id,
@@ -582,7 +584,7 @@ def run_train_start(db: Session, job: Job, box: GpuBox) -> None:
     db.commit()
     params = dict(tj.hyperparams)
     args = _script_args(tj.method or "sft", params)
-    hf_token = crypto.decrypt(box.hf_token_ciphertext) if box.hf_token_ciphertext else None
+    hf_token = C.hf_token_for(db, box, tj.created_by)
     with C.open_box(db, box) as cb:
         runtime = C.resolve_box_runtime(db, box, cb)
         if box.serve_state != "stopped":
@@ -913,10 +915,13 @@ def run_grpo_rollout(db: Session, job: Job, box: GpuBox) -> None:
     tj.polled_at = datetime.now(UTC)
     db.commit()
     current = st["current"]
-    ranks = [a.lora_rank for a in db.scalars(select(Adapter).where(
-        Adapter.workspace_id == tj.workspace_id, Adapter.name == tj.init_adapter)) if a.lora_rank]  # fmt: skip
-    C.serve_on_box(db, job, box, model=tj.base_model, adapters=[current],
-                   max_lora_rank=C._lora_rank_bucket(ranks))  # fmt: skip
+    serving = (box.serve_state == "serving" and box.served_model == tj.base_model
+               and current in (box.served_adapters or []))  # fmt: skip
+    if not serving:  # (a retry after the run limit was hit finds it already serving)
+        ranks = [a.lora_rank for a in db.scalars(select(Adapter).where(
+            Adapter.workspace_id == tj.workspace_id, Adapter.name == tj.init_adapter)) if a.lora_rank]  # fmt: skip
+        C.serve_on_box(db, job, box, model=tj.base_model, adapters=[current],
+                       max_lora_rank=C._lora_rank_bucket(ranks))  # fmt: skip
     ws = db.get(Workspace, tj.workspace_id)
     user = db.get(User, tj.created_by)
     try:
@@ -928,6 +933,11 @@ def run_grpo_rollout(db: Session, job: Job, box: GpuBox) -> None:
             repeats=hp["group_size"],
         )  # fmt: skip
     except HTTPException as e:
+        if e.status_code == 429:  # the workspace's active-run limit: wait for a free slot
+            tj.state = {**st, "phase": "queue_rollout"}
+            job.progress = f"waiting for a free run slot: {e.detail}"
+            db.commit()
+            return
         raise ValueError(str(e.detail)) from e
     tj.state = {**st, "phase": "rollouts", "run_id": run.id}
     job.progress = f"queued rollout run {run.id}"
@@ -958,25 +968,29 @@ def run_grpo_train(db: Session, job: Job, box: GpuBox) -> None:
         db.commit()
         _next_round(db, tj, skipped=True)
         return
-    data_dir = config.sft_dir(ws.slug) / tj.adapter_name / f"grpo-round-{r + 1}"
+    # its own namespace (not sft/<name>, which datasets use), removed once uploaded
+    data_dir = config.workspace_dir(ws.slug) / "grpo" / tj.id / f"round-{r + 1}"
     data_dir.mkdir(parents=True, exist_ok=True)
     (data_dir / "train.jsonl").write_text("".join(json.dumps(x) + "\n" for x in rows))
     job.progress = f"round {r + 1}: training on {len(rows)} attempts"
     db.commit()
-    hf_token = crypto.decrypt(box.hf_token_ciphertext) if box.hf_token_ciphertext else None
-    with C.open_box(db, box) as cb:
-        runtime = C.resolve_box_runtime(db, box, cb)
-        if box.serve_state != "stopped":  # vLLM holds the GPU's memory; training needs it
-            stop_vllm(cb, box.vllm_port, runtime=runtime)  # type: ignore[arg-type]
-            box.serve_state, box.serve_error = "stopped", None
-            box.served_model = box.served_adapters = box.endpoint_url = None
-            db.commit()
-        C.ensure_adapter_on_box(db, cb, box, tj.init_adapter or st["current"], job)
-        remote.start_training(
-            cb, data_dir, base=tj.base_model, name=out, args=_script_args("grpo", hp),
-            hf_token=hf_token, replace=True, runtime=runtime,  # type: ignore[arg-type]
-            method="grpo", init_adapter=st["current"], ref_adapter=tj.init_adapter,
-        )  # fmt: skip
+    hf_token = C.hf_token_for(db, box, tj.created_by)
+    try:
+        with C.open_box(db, box) as cb:
+            runtime = C.resolve_box_runtime(db, box, cb)
+            if box.serve_state != "stopped":  # vLLM holds the GPU's memory; training needs it
+                stop_vllm(cb, box.vllm_port, runtime=runtime)  # type: ignore[arg-type]
+                box.serve_state, box.serve_error = "stopped", None
+                box.served_model = box.served_adapters = box.endpoint_url = None
+                db.commit()
+            C.ensure_adapter_on_box(db, cb, box, tj.init_adapter or st["current"], job)
+            remote.start_training(
+                cb, data_dir, base=tj.base_model, name=out, args=_script_args("grpo", hp),
+                hf_token=hf_token, replace=True, runtime=runtime,  # type: ignore[arg-type]
+                method="grpo", init_adapter=st["current"], ref_adapter=tj.init_adapter,
+            )  # fmt: skip
+    finally:
+        shutil.rmtree(data_dir, ignore_errors=True)  # on the box now (or the round failed)
     tj.runtime = runtime
     tj.log_cursor = 0
     tj.state = {**st, "rounds": rounds, "phase": "training", "out": out, "round_steps": 0}
@@ -1192,6 +1206,13 @@ def test_adapter(
         raise HTTPException(400, "episodes must be 1..1000")
     box = C.get_box(db, ws, box_id)
     C.refuse_while_training(db, box)
+    served = (
+        box.serve_state == "serving"
+        and box.served_model == a.base_model
+        and a.name in (box.served_adapters or [])
+    )
+    if not served:  # testing it means restarting vLLM with it
+        C.refuse_while_runs_use(db, box, "serving this adapter")
     return C.enqueue_box_job(
         db, box, user, "adapter_test", {"adapter_id": a.id, "episodes": episodes}
     )

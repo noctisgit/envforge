@@ -41,11 +41,16 @@ def load_policy(
     lora_dropout: float = 0.05,
     target_modules: str = "all-linear",
 ) -> Any:
-    """The base model with a *trainable* LoRA adapter on top.
+    """The base model with a *trainable* LoRA adapter on top, dropout switched off.
 
     With `adapter_dir`, training continues from that adapter (an SFT adapter for DPO,
     the latest round's for GRPO): same rank, same target layers. Without it, a fresh
     adapter is created as sft.py does.
+
+    Dropout is off because DPO and GRPO compare the policy's log-probabilities with ones
+    computed in eval mode (the reference, the old policy): with dropout on in training
+    the two differ before any update, so the GRPO ratio isn't 1 at the start and clipping
+    fires on noise. TRL disables it for the same reason.
     """
     import transformers
     from peft import LoraConfig, PeftModel, get_peft_model
@@ -61,7 +66,9 @@ def load_policy(
         model.enable_input_require_grads()
         model.config.use_cache = False
     if adapter_dir is not None:
-        return PeftModel.from_pretrained(model, str(adapter_dir), is_trainable=True)
+        return disable_dropout(
+            PeftModel.from_pretrained(model, str(adapter_dir), is_trainable=True)
+        )
     if target_modules == "all-linear":
         from sft import linear_module_names  # next to this file on the box
 
@@ -70,7 +77,17 @@ def load_policy(
         targets = [t.strip() for t in target_modules.split(",") if t.strip()]
     config = LoraConfig(task_type="CAUSAL_LM", r=lora_r, lora_alpha=lora_alpha,
                         lora_dropout=lora_dropout, target_modules=targets)  # fmt: skip
-    return get_peft_model(model, config)
+    return disable_dropout(get_peft_model(model, config))
+
+
+def disable_dropout(model: Any) -> Any:
+    """Set every dropout layer's probability to 0 (LoRA's included); returns the model."""
+    import torch
+
+    for module in model.modules():
+        if isinstance(module, torch.nn.Dropout):
+            module.p = 0.0
+    return model
 
 
 def label_logprobs(model: Any, input_ids: list[int], labels: list[int]) -> Any:

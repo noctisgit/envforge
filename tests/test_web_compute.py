@@ -854,3 +854,82 @@ def test_vllm_key_can_be_changed_while_stopped_and_is_never_returned(client, fak
 
     _second_user(client)  # someone else: not their workspace's box
     assert client.post(f"{url}/vllm-key", json={"key": new}).status_code == 404
+
+
+def test_account_hf_token_is_used_on_boxes_without_one(client, fake_boxes):  # noqa: F811
+    _signup(client)
+    ws = _ws(client)
+    r = client.put(
+        "/api/me/keys", json={"provider": "huggingface", "secret": "hf_ACCOUNTTOKEN1234"}
+    )
+    assert r.status_code == 200, r.text
+    hf = next(k for k in r.json() if k["provider"] == "huggingface")
+    assert hf["masked"] == "…1234" and "ACCOUNTTOKEN" not in r.text
+    # a download token, not a model provider: the model picker doesn't offer it
+    assert "huggingface" not in client.get(f"/api/workspaces/{ws['id']}/models").json()["providers"]
+
+    plain = _add_box(client, ws["id"])  # no token of its own: the account's is used
+    own = _add_box(client, ws["id"], name="gpu-2", host="100.64.0.8", hf_token="hf_BOXTOKEN5678")
+    for box, token in ((plain, "hf_ACCOUNTTOKEN1234"), (own, "hf_BOXTOKEN5678")):
+        client.post(
+            f"/api/workspaces/{ws['id']}/gpu-boxes/{box['id']}/serve",
+            json={"model": "Qwen/Qwen2.5-0.5B-Instruct"},
+        )
+        _work()
+        fake = fake_boxes[box["id"]]
+        assert any(i and f"HF_TOKEN={token}" in i for i in fake.inputs)
+        assert not any(token in c for c in fake.commands)  # on stdin only, never in argv
+
+
+def test_hugging_face_rejects_a_bad_token(client, monkeypatch):  # noqa: F811
+    import urllib.error
+    import urllib.request
+
+    def reject(req, timeout=None):
+        assert req.full_url == "https://huggingface.co/api/whoami-v2"
+        assert req.headers["Authorization"] == "Bearer hf_BADTOKEN000"
+        raise urllib.error.HTTPError(req.full_url, 401, "Unauthorized", {}, None)
+
+    monkeypatch.setenv("ENVFORGE_OFFLINE", "0")
+    monkeypatch.setattr(urllib.request, "urlopen", reject)
+    _signup(client)
+    r = client.put("/api/me/keys", json={"provider": "huggingface", "secret": "hf_BADTOKEN000"})
+    assert r.status_code == 400 and "Hugging Face rejected" in r.json()["detail"]
+
+
+def test_vllm_is_not_pulled_from_under_a_running_eval(client, fake_boxes):  # noqa: F811
+    _signup(client)
+    ws = _ws(client)
+    box = _add_box(client, ws["id"])
+    base = f"/api/workspaces/{ws['id']}/gpu-boxes/{box['id']}"
+    client.post(f"{base}/serve", json={"model": "Qwen/Qwen2.5-0.5B-Instruct"})
+    _work()
+    run = client.post(f"/api/workspaces/{ws['id']}/runs",
+                      json={"model": "vllm:Qwen/Qwen2.5-0.5B-Instruct", "episodes": 1}).json()  # fmt: skip
+    for path, body in ((f"{base}/stop", None), (f"{base}/serve", {"model": "Qwen/Other"})):
+        r = client.post(path, json=body) if body else client.post(path)
+        assert r.status_code == 409 and "is using gpu-1" in r.json()["detail"], r.text
+    assert client.delete(base).status_code == 409
+    client.post(f"/api/workspaces/{ws['id']}/runs/{run['id']}/cancel")
+    assert client.post(f"{base}/stop").status_code == 202  # free again
+
+
+def test_a_failed_training_start_stops_what_it_started(client, fake_boxes):  # noqa: F811
+    from envforge.web.models import Job, TrainingJob
+
+    _signup(client)
+    ws = _ws(client)
+    box = _add_box(client, ws["id"])
+    d = _dataset(client, ws["id"])
+    tj = client.post(f"/api/workspaces/{ws['id']}/training",
+                     json={"dataset_id": d["id"], "box_id": box["id"], "base_model": "Qwen/Qwen2.5-0.5B-Instruct"}).json()  # fmt: skip
+    _work()  # train_start: the process now runs on the box
+    fake = fake_boxes[box["id"]]
+    assert "netops-v1" in fake.trainings
+    with dbmod.session_factory()() as db:  # as if the worker had died before recording "running"
+        row = db.get(TrainingJob, tj["id"])
+        row.status = "starting"
+        job = db.get(Job, row.job_id)
+        C.fail_related(db, job, "worker stopped while running this job")
+        assert db.get(TrainingJob, tj["id"]).status == "failed"
+    assert "netops-v1" not in fake.trainings  # the orphaned training was stopped

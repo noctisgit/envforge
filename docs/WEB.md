@@ -129,7 +129,10 @@ browser, reusing the same code (`envforge/compute`, `envforge/train`). Logic liv
   worker reaches vLLM (`direct`, or `tunnel` through an SSH port forward; picked from the
   host when left empty), an optional $/hour, and secrets, all Fernet-encrypted like provider
   keys: the SSH private key, the vLLM API key (generated when left empty, sent to vLLM on
-  stdin) and an optional Hugging Face token. The SSH key is either pasted for that box
+  stdin) and an optional Hugging Face token (without one, the Hugging Face token saved
+  under Provider keys by whoever starts the job is used). The token is written on the box (in its
+  process environment or container config), so anyone with SSH to that box can read it: use
+  a fine-grained, read-only token. The SSH key is either pasted for that box
   (validated, no passphrase) or, by default, the **workspace SSH key**: a key pair generated
   per workspace on first use, whose public half the page shows for adding once to
   RunPod / Vast. Responses show public keys and masked `SHA256:` fingerprints only. **Check**, **Serve** and **Stop** are jobs for the

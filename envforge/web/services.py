@@ -21,6 +21,9 @@ from envforge.web.security import check_base_url
 from envforge.web.settings import get_settings
 
 PROVIDERS = ("anthropic", "openai", "vercel", "vllm")
+# Keys a user can save: the model providers, plus a Hugging Face token, which GPU boxes
+# use to download weights (gated models need it). It is not a model provider.
+KEY_PROVIDERS = (*PROVIDERS, "huggingface")
 
 
 def slugify(name: str) -> str:
@@ -231,6 +234,29 @@ def list_provider_models(
     return None
 
 
+def _verify_hf(token: str) -> tuple[bool, str | None]:
+    """(accepted?, note). Asks Hugging Face who the token belongs to; HTTP 400 if rejected."""
+    import urllib.error
+    import urllib.request
+
+    if os.getenv("ENVFORGE_OFFLINE", "").lower() in ("1", "true", "yes"):
+        return False, "not checked (offline mode)"
+    req = urllib.request.Request(
+        "https://huggingface.co/api/whoami-v2",
+        headers={"Authorization": f"Bearer {token}", "User-Agent": "envforge"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:  # noqa: S310 - fixed https URL
+            json.loads(r.read())
+        return True, None
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            raise HTTPException(400, f"Hugging Face rejected this token ({e.code})") from e
+        return False, f"could not check the token with Hugging Face ({e.code})"
+    except Exception as e:  # noqa: BLE001 - save anyway; the first download will tell
+        return False, f"could not reach Hugging Face to check the token ({type(e).__name__})"
+
+
 def _verify(
     provider: str, secret: str, base_url: str | None = None
 ) -> tuple[list[str] | None, str | None]:
@@ -251,8 +277,8 @@ def set_key(
     db: Session, user: User, provider: str, secret: str, base_url: str | None = None
 ) -> ProviderKey:
     """Save (or replace) one of the user's provider keys, checking it with the provider."""
-    if provider not in PROVIDERS:
-        raise HTTPException(400, f"provider must be one of {PROVIDERS}")
+    if provider not in KEY_PROVIDERS:
+        raise HTTPException(400, f"provider must be one of {KEY_PROVIDERS}")
     secret = secret.strip()
     if provider != "vllm" and len(secret) < 8:
         raise HTTPException(400, "key looks too short")
@@ -267,7 +293,12 @@ def set_key(
             raise HTTPException(400, str(e)) from e
     else:
         base_url = None
-    models, note = _verify(provider, secret, base_url)
+    if provider == "huggingface":
+        verified, note = _verify_hf(secret)
+        models = None
+    else:
+        models, note = _verify(provider, secret, base_url)
+        verified = models is not None
     row = _key_row(db, user.id, provider)
     if row is None:
         row = ProviderKey(
@@ -278,7 +309,7 @@ def set_key(
     row.last4 = crypto.mask(secret or "not-needed")
     row.base_url = base_url
     row.models = models
-    row.verified_at = datetime.now(UTC) if models is not None else None
+    row.verified_at = datetime.now(UTC) if verified else None
     row.verify_note = note
     db.commit()
     return row
@@ -623,4 +654,4 @@ def available_providers(db: Session, user_id: str) -> list[str]:
     """Providers this user can run: their own keys, or all of them on a shared-key server."""
     if get_settings().ALLOW_SERVER_KEYS:
         return list(PROVIDERS)
-    return sorted({r.provider for r in user_keys(db, user_id)})
+    return sorted({r.provider for r in user_keys(db, user_id) if r.provider in PROVIDERS})

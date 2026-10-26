@@ -43,6 +43,11 @@ def free_local_port() -> int:
         return s.getsockname()[1]
 
 
+def _port_taken(error: str) -> bool:
+    """Did ssh fail because the local port was already in use?"""
+    return "Address already in use" in error or "local forwarding" in error
+
+
 def _port_open(port: int, timeout: float = 0.5) -> bool:
     try:
         with socket.create_connection(("127.0.0.1", port), timeout=timeout):
@@ -79,6 +84,9 @@ class SSHTunnel:
         self._proc: Any = None
         self._stderr: IO[str] | None = None
         self._stop = threading.Event()
+        # the watchdog's restart and __exit__'s kill must not interleave: a restart that
+        # spawns ssh just after the kill would leave that ssh running for ever
+        self._lock = threading.Lock()
         self._watchdog: threading.Thread | None = None
 
     def url(self, path: str = "/v1") -> str:
@@ -88,15 +96,15 @@ class SSHTunnel:
     # ---------------------------------------------------------------- lifecycle
 
     def __enter__(self) -> SSHTunnel:
-        for attempt in range(
-            2
-        ):  # a port picked by free_local_port can be taken before ssh binds it
+        for attempt in range(2):
             self.local_port = free_local_port()
             try:
                 self._start()
                 break
-            except ComputeError:
-                if attempt == 1:
+            except ComputeError as e:
+                # retry only a lost race for the port (another process took it before ssh
+                # bound it), not a dead box or a refused login: those would just fail twice
+                if attempt == 1 or not _port_taken(str(e)):
                     raise
         self._watchdog = threading.Thread(target=self._watch, daemon=True)
         self._watchdog.start()
@@ -106,13 +114,15 @@ class SSHTunnel:
         self._stop.set()
         if self._watchdog is not None:
             self._watchdog.join(timeout=5)
-        self._kill()
+        with self._lock:
+            self._kill()
 
     def _start(self) -> None:
         """Start ssh and wait until it listens on the local port (or fails)."""
-        self._stderr = tempfile.TemporaryFile(
-            mode="w+"
-        )  # a file, so a chatty ssh can't block on a pipe
+        if self._stop.is_set():
+            raise ComputeError("ssh tunnel closed")
+        # stderr to a file, so a chatty ssh can't block on a full pipe
+        self._stderr = tempfile.TemporaryFile(mode="w+")
         self._proc = self._popen(
             self._argv_for(self.local_port),
             stdin=subprocess.DEVNULL,
@@ -165,9 +175,10 @@ class SSHTunnel:
                 continue
             log.warning("ssh tunnel on port %s exited (%s); restarting", self.local_port,
                         self._error_text())  # fmt: skip
-            self._kill()
             try:
-                self._start()
+                with self._lock:
+                    self._kill()
+                    self._start()  # refuses once __exit__ has set _stop
                 self.restarts += 1
             except ComputeError as e:
                 log.warning("ssh tunnel restart failed: %s", e)

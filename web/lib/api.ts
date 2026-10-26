@@ -3,6 +3,8 @@
 // work; with Clerk we attach a Bearer token obtained from the Clerk hook.
 
 export type Provider = "anthropic" | "openai" | "vercel" | "vllm";
+// keys you can save: the model providers plus a Hugging Face token (GPU boxes download with it)
+export type KeyProvider = Provider | "huggingface";
 
 export interface ServerInfo {
   auth_provider: "local" | "clerk";
@@ -23,7 +25,7 @@ export interface User {
 }
 
 export interface KeyOut {
-  provider: Provider;
+  provider: KeyProvider;
   masked: string;
   base_url: string | null;
   updated_at: string;
@@ -440,9 +442,9 @@ export const Api = {
   changePassword: (current_password: string, new_password: string) =>
     api<void>("/api/me/password", { method: "POST", body: JSON.stringify({ current_password, new_password }) }),
   keys: () => api<KeyOut[]>("/api/me/keys"),
-  putKey: (provider: Provider, secret: string, base_url?: string) =>
+  putKey: (provider: KeyProvider, secret: string, base_url?: string) =>
     api<KeyOut[]>("/api/me/keys", { method: "PUT", body: JSON.stringify({ provider, secret, base_url: base_url || null }) }),
-  deleteKey: (provider: Provider) => api<KeyOut[]>(`/api/me/keys/${provider}`, { method: "DELETE" }),
+  deleteKey: (provider: KeyProvider) => api<KeyOut[]>(`/api/me/keys/${provider}`, { method: "DELETE" }),
 
   // environments runnable in a workspace: built-in packs + environments published from the builder
   wsPacks: (ws: string) => api<Pack[]>(`/api/workspaces/${ws}/packs`),

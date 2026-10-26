@@ -129,3 +129,32 @@ def test_grpo_step_makes_better_attempts_more_likely(tmp_path, separate_ref):
     assert logs and all(e["kl"] >= 0 for e in logs) and log.events[-1]["event"] == "done"
     manifest = json.loads((tmp_path / "out" / "envforge_manifest.json").read_text())
     assert manifest["method"] == "grpo" and manifest["n_train"] == 4
+
+
+def test_policy_loads_without_dropout_so_training_matches_the_reference(tmp_path):
+    """With LoRA dropout left on, train-mode log-probs differ from eval-mode ones before
+    any update, so GRPO's ratio isn't 1 at the start (audit finding C8)."""
+    torch = pytest.importorskip("torch")
+    from peft import LoraConfig, get_peft_model
+    from transformers import AutoModelForCausalLM
+
+    base = _tiny_base(tmp_path)
+    adapter = tmp_path / "noisy"
+    model = get_peft_model(AutoModelForCausalLM.from_pretrained(base),
+                           LoraConfig(task_type="CAUSAL_LM", r=4, lora_alpha=8, lora_dropout=0.5,
+                                      target_modules=["q_proj", "v_proj"]))  # fmt: skip
+    model.save_pretrained(adapter)
+    lora_tools = grpo.lora_tools
+    policy = lora_tools.load_policy(str(base), adapter_dir=adapter, dtype=torch.float32, cuda=False,
+                                    gradient_checkpointing=False)  # fmt: skip
+    t = WordTemplate()
+    row = grpo.tokenize_rollouts(
+        [_rollout("good answer here", 1.0)], lambda tools: t.render, 1000, {}
+    )[0]
+    policy.eval()
+    with torch.no_grad():
+        ref = lora_tools.label_logprobs(policy, row["ids"], row["labels"])
+    policy.train()
+    with torch.no_grad():
+        now = lora_tools.label_logprobs(policy, row["ids"], row["labels"])
+    assert torch.allclose(ref, now)  # ratio exactly 1 before any update

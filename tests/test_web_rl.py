@@ -166,6 +166,9 @@ def test_grpo_loop_runs_rounds_of_rollouts_and_updates(client, fake_boxes, fast_
 
     done = _until(client, path, lambda b: b["status"] == "completed")
     assert done["step"] == 2 and len(done["grpo"]["rounds"]) == 2
+    from envforge import config
+
+    assert not list((config.workspace_dir(ws["slug"]) / "grpo").rglob("*.jsonl"))  # uploaded, then removed
     a = next(x for x in client.get(f"{p}/adapters").json() if x["name"] == "netops-grpo")
     assert (
         a["metrics"]["method"] == "grpo"
@@ -211,3 +214,36 @@ def test_runs_take_attempts_per_task_and_temperature(client):  # noqa: F811
 
         row = db.get(Run, r.json()["id"])
         assert [t.task.seed for t in load_run(row.run_dir)] == [10_000] * 3 + [10_001] * 3
+
+
+def test_grpo_checks_round_size_and_waits_for_a_run_slot(client, fake_boxes, fast_polls):  # noqa: F811
+    _signup(client)
+    ws = _ws(client)
+    p = f"/api/workspaces/{ws['id']}"
+    box = _add_box(client, ws["id"])
+    sft = _sft_adapter(client, ws["id"], box["id"])
+    body = {"method": "grpo", "box_id": box["id"], "base_model": "Qwen/Qwen2.5-0.5B-Instruct",
+            "adapter_name": "g1", "init_adapter": sft["name"], "pack": "netops",
+            "rounds": 1, "tasks_per_round": 2, "group_size": 4}  # fmt: skip
+    r = client.post(f"{p}/training", json={**body, "tasks_per_round": 200, "group_size": 8})
+    assert r.status_code == 400 and "at most 1000" in r.json()["detail"]
+
+    # the workspace's run limit is full: the round waits instead of failing the job
+    fillers = [client.post(f"{p}/runs", json={"model": "scripted", "pack": "netops", "episodes": 1}).json()["id"]
+               for _ in range(3)]  # fmt: skip
+    tj = client.post(f"{p}/training", json=body).json()
+    path = f"{p}/training/{tj['id']}"
+    _work()  # grpo_rollout: serves, then finds no free run slot
+    b = client.get(path).json()
+    assert b["status"] == "running" and b["grpo"]["phase"] == "queue_rollout", b
+    serve_cmds = len(
+        [c for c in fake_boxes[box["id"]].commands if "docker run" in c and "vllm" in c]
+    )
+    for rid in fillers:
+        client.post(f"{p}/runs/{rid}/cancel")
+    _until(client, path, lambda x: x["grpo"]["phase"] == "rollouts")
+    # the retry found the adapter already served: vLLM was not started again
+    assert (
+        len([c for c in fake_boxes[box["id"]].commands if "docker run" in c and "vllm" in c])
+        == serve_cmds
+    )

@@ -12,11 +12,11 @@ import { invalidateModelCache } from "@/components/ModelPicker";
 import { Page, PageHeader, Panel } from "@/components/Page";
 import { Tabs, tabPanelProps, useHashTab } from "@/components/Tabs";
 import { useToast } from "@/components/Toast";
-import { Api, type KeyOut, type Provider } from "@/lib/api";
+import { Api, type KeyOut, type KeyProvider } from "@/lib/api";
 import { useAuthState } from "@/lib/auth";
 import { useWorkspace } from "@/lib/workspace";
 
-const PROVIDERS: { id: Provider; label: string; hint: string; needsUrl?: boolean }[] = [
+const PROVIDERS: { id: KeyProvider; label: string; hint: string; needsUrl?: boolean }[] = [
   { id: "anthropic", label: "Anthropic", hint: "sk-ant-… · checked with Anthropic when saved; models like claude-sonnet-5-5" },
   { id: "openai", label: "OpenAI", hint: "sk-… · checked with OpenAI when saved; models like gpt-5-mini" },
   { id: "vercel", label: "Vercel AI Gateway", hint: "AI Gateway key · 400+ models, ids like anthropic/claude-sonnet-4.5" },
@@ -25,6 +25,11 @@ const PROVIDERS: { id: Provider; label: string; hint: string; needsUrl?: boolean
     label: "vLLM (self-hosted)",
     hint: "your GPU box (public host or Tailscale 100.x), e.g. http://100.x.y.z:8000/v1 · key optional · docs/COMPUTE.md",
     needsUrl: true,
+  },
+  {
+    id: "huggingface",
+    label: "Hugging Face",
+    hint: "hf_… · use a fine-grained, read-only token: it is placed on the GPU boxes you serve or train on (anyone with SSH to a box could read it). Checked with Hugging Face when saved; needed for gated models like Llama or Gemma",
   },
 ];
 
@@ -97,7 +102,7 @@ export default function AccountPage() {
     }
   }
 
-  async function saveKey(p: Provider, label: string) {
+  async function saveKey(p: KeyProvider, label: string) {
     setBusy(p);
     try {
       const ks = await Api.putKey(p, secrets[p] ?? "", urls[p]);
@@ -116,7 +121,7 @@ export default function AccountPage() {
     }
   }
 
-  async function removeKey(p: Provider, label: string) {
+  async function removeKey(p: KeyProvider, label: string) {
     const ok = await confirm({
       title: `Remove your ${label} key?`,
       body: "Runs in all of your workspaces will stop being able to use this provider until you add a key again. Queued runs that need it will fail.",

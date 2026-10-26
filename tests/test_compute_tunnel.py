@@ -96,3 +96,38 @@ def test_free_local_port_is_bindable():
     port = free_local_port()
     with socket.socket() as s:
         s.bind(("127.0.0.1", port))
+
+
+def test_a_refused_login_fails_once_not_twice():
+    starts: list[int] = []
+
+    def argv_for(port: int) -> list[str]:
+        starts.append(port)
+        return [
+            sys.executable,
+            "-c",
+            "import sys; print('Permission denied (publickey).', file=sys.stderr); sys.exit(255)",
+        ]
+
+    with pytest.raises(ComputeError, match="Permission denied"):
+        with SSHTunnel(argv_for):
+            pass
+    assert len(starts) == 1  # only a lost port race is retried
+
+
+def test_closing_while_the_watchdog_restarts_leaves_no_ssh_behind():
+    procs: list[subprocess.Popen] = []
+
+    def argv_for(port: int) -> list[str]:
+        return [sys.executable, "-c", LISTENER, str(port)]
+
+    def popen(*args, **kwargs):
+        procs.append(subprocess.Popen(*args, **kwargs))
+        return procs[-1]
+
+    t = SSHTunnel(argv_for, popen=popen)
+    with t:
+        t._proc.kill()  # the watchdog will restart it...
+        time.sleep(1.2)  # ...around now, while we close
+    time.sleep(0.5)
+    assert all(p.poll() is not None for p in procs)  # every ssh it ever started is gone

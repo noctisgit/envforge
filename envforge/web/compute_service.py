@@ -465,6 +465,7 @@ def delete_box(
     if busy:
         raise HTTPException(409, "a training job is running on this box; cancel it first")
     if not force:
+        refuse_while_runs_use(db, box, "removing the box")
         return enqueue_box_job(db, box, user, "box_delete")
     _forget_box(db, box)
     return None
@@ -492,10 +493,24 @@ def refuse_while_training(db: Session, box: GpuBox) -> None:
         )
 
 
+def refuse_while_runs_use(db: Session, box: GpuBox, what: str) -> None:
+    """409 while a queued/running run uses the box's vLLM: `what` (stopping it, serving
+    something else, training) would pull the server out from under the run."""
+    run = db.scalar(select(Run).where(Run.gpu_box_id == box.id, Run.deleted_at.is_(None),
+                                      Run.status.in_(("queued", "running"))))  # fmt: skip
+    if run is not None:
+        raise HTTPException(
+            409, f"run {run.label or run.id} is using {box.name}; {what} would stop vLLM under it. "
+            "Wait for it to finish or cancel it.",
+        )  # fmt: skip
+
+
 def enqueue_box_job(
     db: Session, box: GpuBox, user: User, kind: str, payload: dict | None = None
 ) -> Job:
-    """Queue `kind` for this box. One job per box at a time."""
+    """Queue `kind` for this box. One job per box at a time (the box row is locked while
+    checking, so two clicks at once can't both queue one; SQLite ignores the lock)."""
+    db.execute(select(GpuBox.id).where(GpuBox.id == box.id).with_for_update())
     if active_box_job(db, box):
         raise HTTPException(409, "this box is busy with another job; wait for it to finish")
     job = Job(
@@ -558,6 +573,7 @@ def request_serve(
 
     require_gpu_admin(user)
     refuse_while_training(db, box)
+    refuse_while_runs_use(db, box, "serving something else")
     try:
         model = check_model_id(model)
     except ValueError as e:
@@ -598,6 +614,7 @@ def request_serve(
 
 def request_stop(db: Session, ws: Workspace, user: User, box: GpuBox) -> Job:
     require_gpu_admin(user)
+    refuse_while_runs_use(db, box, "stopping vLLM")
     job = enqueue_box_job(db, box, user, "box_stop")
     box.serve_state = "stopping"
     db.commit()
@@ -852,6 +869,18 @@ def _do_check(db: Session, job: Job, box: GpuBox) -> None:
     db.commit()
 
 
+def hf_token_for(db: Session, box: GpuBox, user_id: str | None) -> str | None:
+    """The Hugging Face token for downloads on this box: the box's own if it has one,
+    else the account token of the user whose job this is. Worker only: decrypts."""
+    if box.hf_token_ciphertext:
+        return crypto.decrypt(box.hf_token_ciphertext)
+    from envforge.web.models import ProviderKey
+
+    row = db.scalar(select(ProviderKey).where(ProviderKey.user_id == user_id,
+                                             ProviderKey.provider == "huggingface")) if user_id else None  # fmt: skip
+    return crypto.decrypt(row.ciphertext) if row else None
+
+
 def ensure_adapter_on_box(db: Session, cb: ComputeBox, box: GpuBox, name: str, job: Job) -> None:
     """Upload a workspace adapter's local copy unless the box already has it. Adapters
     that only exist on the box (a GRPO run's intermediate rounds) are found there first."""
@@ -892,7 +921,7 @@ def serve_on_box(
     box.served_model, box.served_adapters = model, list(adapters)
     db.commit()
     api_key = crypto.decrypt(box.vllm_key_ciphertext) if box.vllm_key_ciphertext else None
-    hf_token = crypto.decrypt(box.hf_token_ciphertext) if box.hf_token_ciphertext else None
+    hf_token = hf_token_for(db, box, job.created_by)
     with open_box(db, box) as cb:
         runtime = resolve_box_runtime(db, box, cb)
         for name in adapters:
@@ -989,9 +1018,32 @@ def fail_related(db: Session, job: Job, error: str) -> None:
     if job.kind in training_kinds and (tj := db.get(TrainingJob, payload.get("training_job_id"))):
         if tj.status in ("queued", "starting", "running"):
             tj.status, tj.error, tj.finished_at = "failed", error, datetime.now(UTC)
+            if job.kind in ("train_start", "grpo_train") and box is not None:
+                _stop_orphaned_training(db, job, box, tj)
         if job.kind == "grpo_rollout" and box is not None and box.serve_state == "starting":
             box.serve_state, box.serve_error = "failed", error
     db.commit()
+
+
+def _stop_orphaned_training(db: Session, job: Job, box: GpuBox, tj: TrainingJob) -> None:
+    """A training start can fail (or its worker die) after the process was started on the
+    box: stop it, best effort, so it doesn't keep the GPU busy for hours."""
+    from envforge.train import remote
+    from envforge.web import training_service as T
+
+    st = tj.state or {}
+    name = (
+        tj.adapter_name
+        if job.kind == "train_start"
+        else st.get("out") or T._round_out(tj, st.get("round", 0))
+    )
+    try:
+        with open_box(db, box) as cb:
+            remote.remove_container(cb, name, runtime=resolve_box_runtime(db, box, cb))  # type: ignore[arg-type]
+    except Exception as e:  # noqa: BLE001 - the job already failed; say what to check
+        tj.error = f"{tj.error}\n(couldn't stop a training process {name} that may still be running on the box: {e})"[
+            :2000
+        ]
 
 
 def process_compute_job(db: Session, job: Job) -> None:
