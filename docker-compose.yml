@@ -6,7 +6,7 @@
 # Host ports come from .env: WEB_LISTEN / WEB_PORT (the UI, default 127.0.0.1:3000),
 # API_PORT (8000) and POSTGRES_PORT (5432), the last two bound to 127.0.0.1 only.
 #
-# No long-running service is root: api, worker, builder and compute run as uid 10001
+# No long-running service is root: api, the workers, builder and compute run as uid 10001
 # (`envforge`, see deploy/Dockerfile.api), web as `node`, postgres as `postgres`. Only the
 # one-off `data-perms` step runs as root, to hand the data volume to uid 10001.
 
@@ -60,7 +60,10 @@ services:
       sh -c "alembic upgrade head &&
              uvicorn envforge.web.app:app --host 0.0.0.0 --port 8000 --workers 1"
 
-  worker:
+  # Evaluation runs, in two lanes: `worker` runs models behind provider APIs (Anthropic,
+  # OpenAI, Vercel), `worker-gpu` runs self-hosted vLLM models on your GPU boxes. An API
+  # run and a GPU run therefore go side by side, and two GPU runs never share the box.
+  worker: &run-worker
     build: { context: ., dockerfile: deploy/Dockerfile.api }
     restart: unless-stopped
     security_opt: ["no-new-privileges:true"]
@@ -82,7 +85,11 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
       data-perms: { condition: service_completed_successfully }
-    command: envforge-worker --poll 2 --kind runs
+    command: envforge-worker --poll 2 --kind runs --lane api
+
+  worker-gpu:
+    <<: *run-worker
+    command: envforge-worker --poll 2 --kind runs --lane gpu
 
   # Environment builder: chat turns and upload processing (parse + redact). Separate from
   # the run worker so a long evaluation never blocks the builder. No Docker socket needed.

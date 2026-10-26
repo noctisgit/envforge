@@ -9,7 +9,9 @@ The web layer is optional. The CLI and library work without it. It adds:
 - **a model picker** listing only models your keys can use, with prices
 - **an Environments explorer**: each pack's world diagram, dimensions, tools, tiers, reward
   rules and a live task preview, generated from the pack (see docs/PACKS.md)
-- **a run queue** executed by a separate worker process
+- **a run queue** executed by separate worker processes in two lanes (`envforge-worker
+  --kind runs --lane api|gpu`, the `worker` and `worker-gpu` compose services): a run on a
+  provider API and a run on your GPU box go side by side; GPU runs wait for each other
 - **a UI** for queuing runs, watching progress, reading metrics and transcripts,
   comparing runs, and **usage** (tokens and estimated cost per day, model, member and
   workspace)

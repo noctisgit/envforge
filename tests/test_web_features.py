@@ -425,6 +425,27 @@ def test_stale_running_runs_are_reaped(client):  # noqa: F811
         assert db.get(Run, run.id).finished_at is not None
 
 
+def test_gpu_and_api_lanes_take_different_runs(client):  # noqa: F811
+    _signup(client)
+    ws = _ws(client)
+    api_run = client.post(f"/api/workspaces/{ws['id']}/runs", json={"model": "scripted"}).json()
+    from envforge.web.models import Run
+    from envforge.web.worker import claim_next
+
+    with dbmod.session_factory()() as db:
+        gpu_run = db.get(Run, api_run["id"])  # a queued vLLM run, older than the API one
+        gpu_run = Run(**{c.name: getattr(gpu_run, c.name) for c in Run.__table__.columns
+                         if c.name not in ("id", "model", "created_at")},
+                      id="gpu-run", model="vllm:qwen-abcd-v1",
+                      created_at=gpu_run.created_at - timedelta(minutes=1))  # fmt: skip
+        db.add(gpu_run)
+        db.commit()
+        assert claim_next(db, "api").id == api_run["id"]  # skips the older vLLM run
+        assert claim_next(db, "api") is None
+        assert claim_next(db, "gpu").id == "gpu-run"  # while the API run is still running
+        assert claim_next(db, "any") is None
+
+
 # ---- key verification -------------------------------------------------------------
 
 

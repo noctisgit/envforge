@@ -4,7 +4,10 @@
     uv run envforge-worker --once     # process one run and exit (tests, cron)
 
 Claiming is a single UPDATE ... WHERE status='queued' so several workers can share
-one database safely (scale with `docker compose up -d --scale worker=3`). Progress,
+one database safely (scale with `docker compose up -d --scale worker=3`). `--lane` splits
+runs by where they execute: `gpu` takes only runs of self-hosted vLLM models, `api` only
+the rest, so an evaluation on the GPU box and one against a provider API run side by side
+(the compose file starts one worker per lane), while two vLLM runs never share the GPU. Progress,
 tokens and cost are written back after every episode; the UI polls. A side thread
 heartbeats the run, and any worker fails runs whose heartbeat went stale.
 """
@@ -31,9 +34,17 @@ from envforge.web.db import session_factory
 from envforge.web.models import Run, Workspace
 from envforge.web.settings import get_settings
 
+#: Which runs a worker takes: all of them, only vLLM (GPU box) runs, or only the others.
+LANES = ("any", "gpu", "api")
 
-def claim_next(db: Session) -> Run | None:
-    row = db.scalar(select(Run).where(Run.status == "queued").order_by(Run.created_at).limit(1))
+
+def claim_next(db: Session, lane: str = "any") -> Run | None:
+    q = select(Run).where(Run.status == "queued")
+    if lane == "gpu":
+        q = q.where(Run.model.like("vllm:%"))
+    elif lane == "api":
+        q = q.where(Run.model.not_like("vllm:%"))
+    row = db.scalar(q.order_by(Run.created_at).limit(1))
     if not row:
         return None
     res = db.execute(
@@ -456,11 +467,16 @@ def reap_stale_jobs(db: Session, minutes: int = 20) -> int:
     return n
 
 
-def run_forever(poll_s: float = 2.0, once: bool = False, kind: str = "all") -> int:
+def run_forever(
+    poll_s: float = 2.0, once: bool = False, kind: str = "all", lane: str = "any"
+) -> int:
     """Process work until stopped. `kind`: "runs" (evaluation runs), "builder" (builder
     chat turns + upload processing), "compute" (GPU box checks, vLLM serving, training
-    starts and training progress polls) or "all". Production runs one of each, so a long
-    evaluation never blocks the builder chat and a slow box never blocks either."""
+    starts and training progress polls) or "all". Production runs one of each (two run
+    workers: `lane` "gpu" and "api"), so a long evaluation never blocks the builder chat,
+    a slow box never blocks either, and a GPU run never waits behind an API run."""
+    if lane not in LANES:
+        raise ValueError(f"lane must be one of {LANES}")
     from envforge.web import builder as B
 
     if get_settings().DATABASE_URL.startswith("sqlite"):
@@ -497,7 +513,7 @@ def run_forever(poll_s: float = 2.0, once: bool = False, kind: str = "all") -> i
                         if once:
                             return handled
                         continue
-                if kind in ("runs", "all") and (run := claim_next(db)):
+                if kind in ("runs", "all") and (run := claim_next(db, lane)):
                     execute(db, run)
                     handled += 1
                     if once:
@@ -519,8 +535,10 @@ def main() -> None:
     ap.add_argument("--once", action="store_true", help="process one queued item and exit")
     ap.add_argument("--poll", type=float, default=2.0)
     ap.add_argument("--kind", choices=("runs", "builder", "compute", "all"), default="all")
+    ap.add_argument("--lane", choices=LANES, default="any",
+                    help="runs only: gpu = vLLM models, api = the others, any = both")  # fmt: skip
     args = ap.parse_args()
-    n = run_forever(poll_s=args.poll, once=args.once, kind=args.kind)
+    n = run_forever(poll_s=args.poll, once=args.once, kind=args.kind, lane=args.lane)
     if args.once:
         print(f"processed {n} item(s)")
 
