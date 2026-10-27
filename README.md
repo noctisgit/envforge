@@ -172,6 +172,9 @@ The sidebar follows the same pipeline: **Build** (Environments, Builder), **Eval
    - **Fine-tune**: train a LoRA adapter with **SFT**, **DPO** or **GRPO** on the box and follow
      its loss curve;
    - **Models**: serve an adapter next to its base model and score both on the evaluation seeds.
+
+   [docs/TUTORIAL.md](docs/TUTORIAL.md) walks through it end to end, with a worked example:
+   Qwen2.5-7B went from 5% to 56% on 181 held-out customer-service tasks (Claude Sonnet: 96%).
 6. **Settings** (per workspace): default model, environment and episodes, the builder model, the
    training base model (searchable live from Hugging Face, with a GPU-memory estimate) and GPU
    boxes. **Usage** shows tokens and cost per day, model, member and workspace.
@@ -277,6 +280,7 @@ before/after eval → DPO and GRPO).
 
 | doc | covers |
 |---|---|
+| [docs/TUTORIAL.md](docs/TUTORIAL.md) | **start here**: your first fine-tune in the browser, step by step, with a worked example and real numbers |
 | [docs/WEB.md](docs/WEB.md) | web layer: configuration, auth (local / Clerk), keys, isolation, deployment, API |
 | [docs/BUILDER.md](docs/BUILDER.md) | environment builder: uploads, redaction profiles, review, revisions, publishing |
 | [docs/COMPUTE.md](docs/COMPUTE.md) | GPU boxes, the envforge GPU image on RunPod/Vast, vLLM serving, Tailscale |
