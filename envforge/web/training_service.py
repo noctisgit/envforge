@@ -39,12 +39,22 @@ from sqlalchemy.orm import Session
 from envforge import config
 from envforge.compute.base import ComputeError
 from envforge.compute.vllm import stop_vllm
-from envforge.core.env import TRAIN_SEED_MIN
+from envforge.core.env import ALL_TASKS_TIER, TRAIN_SEED_MIN
 from envforge.train import dataset as ds
 from envforge.train import preference as pref
 from envforge.train import remote
 from envforge.web import compute_service as C
-from envforge.web.models import Adapter, Dataset, GpuBox, Job, Run, TrainingJob, User, Workspace
+from envforge.web.models import (
+    Adapter,
+    Dataset,
+    EnvVersion,
+    GpuBox,
+    Job,
+    Run,
+    TrainingJob,
+    User,
+    Workspace,
+)
 from envforge.web.settings import get_settings
 
 ACTIVE_TRAINING = ("queued", "starting", "running", "fetching")
@@ -1179,8 +1189,42 @@ def adapter_out(db: Session, a: Adapter) -> dict[str, Any]:
         "lora_rank": a.lora_rank, "metrics": {k: v for k, v in (a.metrics or {}).items() if k != "lineage"},
         "source_runs": lineage.get("source_runs") or [], "test_run_id": a.test_run_id,
         "method": lineage.get("method") or "sft", "init_adapter": lineage.get("init_adapter"),
-        "served_on": served, "created_at": a.created_at,
+        "served_on": served, "created_at": a.created_at, "test_plan": test_plan(db, a),
     }  # fmt: skip
+
+
+def test_plan(db: Session, a: Adapter) -> dict[str, Any] | None:
+    """What "Test" scores the adapter on: {"pack", "every_task_once", "episodes"}.
+
+    For an environment built in the builder that is its newest published version, because
+    a task stays on the same side of the held-out split in every version: newer versions
+    only add or fix evaluation tasks, never move training tasks into the test. Such an
+    environment has a fixed task list, so the test covers every held-out task once, the
+    same tasks other models are scored on with "every task once". A generated pack (netops)
+    is tested on its own name for the number of episodes the caller picks (episodes None)."""
+    if not a.pack:
+        return None
+    from envforge.web.builder import resolve_pack
+
+    ws = db.get(Workspace, a.workspace_id)
+    pack = a.pack
+    current = db.scalar(
+        select(EnvVersion).where(EnvVersion.workspace_id == ws.id, EnvVersion.pack_name == pack)
+    )
+    if current is not None:
+        newest = db.scalar(
+            select(EnvVersion)
+            .where(EnvVersion.project_id == current.project_id, EnvVersion.deleted_at.is_(None))
+            .order_by(EnvVersion.version.desc())
+            .limit(1)
+        )
+        pack = newest.pack_name if newest is not None else pack
+    try:
+        counts = resolve_pack(db, ws, pack).task_counts()
+    except Exception:  # noqa: BLE001 - a deleted environment: the run will say so
+        counts = None
+    return {"pack": pack, "every_task_once": counts is not None,
+            "episodes": counts["eval"] if counts else None}  # fmt: skip
 
 
 def serve_adapter(db: Session, ws: Workspace, user: User, a: Adapter, box_id: str) -> Job:
@@ -1196,7 +1240,8 @@ def serve_adapter(db: Session, ws: Workspace, user: User, a: Adapter, box_id: st
 def test_adapter(
     db: Session, ws: Workspace, user: User, a: Adapter, box_id: str, episodes: int = 50
 ) -> Job:
-    """Queue `adapter_test`: serve on the box if needed, then an eval run on seeds 0+."""
+    """Queue `adapter_test`: serve on the box if needed, then an eval run on seeds 0+
+    (see `test_plan` for which environment version and how many episodes)."""
     C.require_gpu_admin(user)
     if not a.pack:
         raise HTTPException(
@@ -1245,11 +1290,15 @@ def run_adapter_test(db: Session, job: Job, box: GpuBox) -> None:
             adapters=names,
             max_lora_rank=C._lora_rank_bucket(ranks),
         )
+    plan = test_plan(db, a) or {"pack": ws.default_pack, "every_task_once": False}
+    if plan["every_task_once"]:
+        episodes, tiers, what = plan["episodes"], [ALL_TASKS_TIER], "every task once"
+    else:
+        episodes, tiers, what = int((job.payload or {}).get("episodes") or 50), [], "eval seeds"
     try:
         run = enqueue_run(
-            db, ws, user, pack=a.pack or ws.default_pack, model=f"vllm:{a.name}",
-            episodes=int((job.payload or {}).get("episodes") or 50), tiers=[], seed_start=0,
-            label=f"{a.name} · test (eval seeds)",
+            db, ws, user, pack=plan["pack"], model=f"vllm:{a.name}", episodes=episodes,
+            tiers=tiers, seed_start=0, label=f"{a.name} · test ({what})",
         )  # fmt: skip
     except HTTPException as e:
         raise ValueError(str(e.detail)) from e

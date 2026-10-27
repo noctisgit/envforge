@@ -339,6 +339,37 @@ def test_a_run_can_score_every_held_out_task_once(builder):
     assert builtin["task_counts"] is None
 
 
+def test_adapter_test_uses_the_newest_version_and_every_task_once(builder):
+    """An adapter trained on v1 is tested on v2 (a task never changes sides of the held-out
+    split between versions), on every held-out task once."""
+    from envforge.web import db as dbmod
+    from envforge.web.models import Adapter, User
+    from envforge.web.training_service import test_plan
+
+    c, ws, p, set_script = builder
+    v1 = _published(c, ws, p, set_script)
+    set_script(
+        [[("edit_tasks", {"upsert": [dict(t) for t in TASKS[6:12]], "message": "more"})], []]
+    )
+    c.post(f"{_base(ws, p)}/messages", json={"content": "add tasks"})
+    _work()
+    v2 = c.post(f"{_base(ws, p)}/publish", json={}).json()["pack_name"]
+    assert v1.endswith("@v1") and v2.endswith("@v2")
+    n = {x["name"]: x for x in c.get(f"/api/workspaces/{ws}/packs").json()}[v2]["task_counts"][
+        "eval"
+    ]
+
+    with dbmod.session_factory()() as db:
+        user = db.query(User).first()
+        a = Adapter(workspace_id=ws, name="a1", base_model="Qwen/Qwen2.5-0.5B-Instruct",
+                    pack=v1, path="/nowhere", created_by=user.id)  # fmt: skip
+        db.add(a)
+        db.commit()
+        assert test_plan(db, a) == {"pack": v2, "every_task_once": True, "episodes": n}
+        a.pack = "netops"  # generated tasks: the caller picks the episodes
+        assert test_plan(db, a) == {"pack": "netops", "every_task_once": False, "episodes": None}
+
+
 def test_delete_published_environment_keeps_past_runs(builder):
     from envforge.web.worker import run_forever
 

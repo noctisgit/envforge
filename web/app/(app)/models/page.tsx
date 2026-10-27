@@ -50,6 +50,7 @@ function AdapterCard({
   const box = boxes.find((b) => b.id === boxId);
   const busy = !!box?.job;
   const served = a.served_on[0];
+  const plan = a.test_plan;
   const testRun = a.test_run_id ? runs.find((r) => r.id === a.test_run_id) : undefined;
   const teacher = latestEval(runs, a.pack, (r) => modelRole(r.model) === "teacher");
   const baseRun = latestEval(runs, a.pack, (r) => r.model === `vllm:${a.base_model}`);
@@ -171,8 +172,18 @@ print(reply.choices[0].message.content)`;
       <div className="space-y-3 border-t pt-4" style={{ borderColor: "var(--line)" }}>
         <div className="font-semibold">Test it</div>
         <p className="hint">
-          Serves base + adapter on the box (if it isn&apos;t already), then runs it on the evaluation seeds (0+) of {a.pack ?? "its environment"}: the same tasks the
-          teacher and the untrained base model were scored on.
+          {plan?.every_task_once ? (
+            <>
+              Serves base + adapter on the box (if it isn&apos;t already), then scores it on every held-out task of <span className="mono">{plan.pack}</span> once (
+              {plan.episodes} episodes): the newest version of its environment. Score the teacher and the untrained base model the same way (Runs, &quot;every task
+              once&quot;) and Compare them on exactly the same tasks.
+            </>
+          ) : (
+            <>
+              Serves base + adapter on the box (if it isn&apos;t already), then runs it on the evaluation seeds (0+) of {plan?.pack ?? a.pack ?? "its environment"}:
+              the same tasks the teacher and the untrained base model were scored on.
+            </>
+          )}
         </p>
         {boxes.length === 0 ? (
           <p className="hint">
@@ -195,14 +206,16 @@ print(reply.choices[0].message.content)`;
                 ))}
               </select>
             </div>
-            <div className="w-28">
-              <label className="label" htmlFor={`ep-${a.id}`}>
-                Episodes
-              </label>
-              <input id={`ep-${a.id}`} className="input" type="number" min={1} max={1000} value={episodes} onChange={(e) => setEpisodes(Number(e.target.value))} />
-            </div>
+            {!plan?.every_task_once && (
+              <div className="w-28">
+                <label className="label" htmlFor={`ep-${a.id}`}>
+                  Episodes
+                </label>
+                <input id={`ep-${a.id}`} className="input" type="number" min={1} max={1000} value={episodes} onChange={(e) => setEpisodes(Number(e.target.value))} />
+              </div>
+            )}
             <button className="btn btn-field" disabled={busy || !boxId || !a.pack} onClick={() => act("start the test", () => Compute.testAdapter(wsId, a.id, boxId, episodes), "Test queued: serving, then an evaluation run")}>
-              Test on eval seeds
+              {plan?.every_task_once ? "Test on every held-out task" : "Test on eval seeds"}
             </button>
             <button
               className="btn-ghost btn-field"

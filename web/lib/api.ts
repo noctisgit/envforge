@@ -856,6 +856,9 @@ export interface AdapterRow {
   source_runs: string[];
   test_run_id: string | null;
   served_on: { box_id: string; box_name: string; endpoint_url: string | null }[];
+  // what "Test" scores it on: the newest version of its environment; every held-out task once
+  // when that environment has a fixed task list (episodes = their count), else `episodes` you pick
+  test_plan: { pack: string; every_task_once: boolean; episodes: number | null } | null;
   created_at: string;
 }
 
