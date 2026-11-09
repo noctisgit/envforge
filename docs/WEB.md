@@ -284,11 +284,24 @@ Cloudflare's edge. `API_PORT` / `POSTGRES_PORT` are published on 127.0.0.1 only,
 development; the installer moves them if the defaults are taken.
 
 Trajectories live in the `envdata` volume under `/data/workspaces/<slug>/runs/`; the DB holds
-users, workspaces, encrypted keys, and run status/metrics/usage. Back up both:
+users, workspaces, encrypted keys, and run status/metrics/usage. `deploy/redeploy.sh` backs up
+both together with `.env`, and restores them on another machine:
 
 ```bash
-docker compose exec -T postgres pg_dump -U envforge envforge > backup-$(date +%F).sql
+deploy/redeploy.sh backup [--stop] [--with-tunnel] [--no-cache]   # -> ../envforge-backups/envforge-backup-<host>-<stamp>.tar
+# on the new machine, in a fresh clone:
+sudo deploy/redeploy.sh restore envforge-backup-….tar [--with-tunnel] [--url https://…]
 ```
+
+The backup is a `pg_dump`, a tar of the `envdata` volume (`--no-cache` leaves out the
+re-downloadable PII model), `.env` and, with `--with-tunnel`, the Cloudflare Tunnel token.
+It holds `APP_SECRET_KEY`, so it can decrypt every saved key: keep it private. `--stop` stops
+the app first and leaves it stopped, so nothing changes after the backup when you move.
+`restore` installs Docker if it's missing, refuses to run over an existing envforge, loads the
+database and the volume, then runs `./install.sh --yes --no-build`, which applies newer
+migrations and starts the stack. With `--with-tunnel` it installs `cloudflared` and starts
+the tunnel from the token: stop it on the old machine first, or Cloudflare splits visitors
+between the two.
 
 No long-running container runs as root: api, worker, builder and compute run as uid 10001
 (`envforge`), web as `node`, and they get `no-new-privileges`. The one-off `data-perms`

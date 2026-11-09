@@ -117,8 +117,9 @@ wrong?
   training task at temperature 0.7–1.
 - **GRPO** needs no dataset. Each round, the current adapter attempts training tasks several
   times, the environment scores every attempt, and the update favours the attempts that beat
-  their group's average. **Fine-tune → GRPO**, starting from your SFT adapter; 3 rounds, 16 tasks
-  per round, 8 attempts per task, temperature 0.8, learning rate 1e-5. Then test it like any
+  their group's average. **Fine-tune → GRPO**, starting from your SFT adapter; 4 rounds, 32 tasks
+  per round, 8 attempts per task, temperature 1.0, learning rate 1e-5. Every round takes fresh
+  training tasks, so it needs rounds × tasks per round of them (128 here). Then test it like any
   adapter.
 
 ## Reading your results
@@ -175,26 +176,39 @@ solution earns reward 1.0 in the simulator.
 | v3 | 30 | 84 | the first held-out split |
 | v4 | 178 | 84 | about 150 more held-out tasks, extracted with Claude Opus from held-out conversations, 3 per kind of request ($5.35), then audited (27 fixes) |
 | v5 | **181** (50 easy, 103 medium, 28 hard) | 84 | 6 broken tasks fixed after reading Sonnet's v4 failures; 4 tasks the privacy pass had dropped restored |
+| v6 | 181 (unchanged) | **374** | 291 training tasks extracted from training-side conversations, 6 per kind of request ($9.96) |
 
-The training side never changed, so one dataset served every version.
+The held-out tasks are identical in v5 and v6, so scores on either compare directly.
 
-## Results on v5: 181 held-out tasks, every task once
+## Results: 181 held-out tasks, every task once
 
 | model | solved | easy | medium | hard | cost / episode |
 |---|---|---|---|---|---|
 | Claude Fable 5.1 | **99.4%** | 100% | 99% | 100% | $0.096 |
 | Claude Sonnet 5.5 | **96.1%** | 100% | 96% | 89% | $0.018 |
-| Qwen2.5-7B + LoRA SFT | **55.8%** | 70% | 51% | 46% | GPU time |
+| Qwen2.5-7B + LoRA SFT + GRPO | **64.6%** | 72% | 59% | 71% | GPU time |
+| Qwen2.5-7B + LoRA SFT, 3 epochs | **55.8%** | 70% | 51% | 46% | GPU time |
+| Qwen2.5-7B + LoRA SFT, 2 epochs | 50.8% | 62% | 43% | 61% | GPU time |
 | Qwen2.5-7B, untrained | **5.0%** | 6% | 5% | 4% | GPU time |
 
-Fine-tuning took the 7B model from 9 to 101 of the 181 held-out tasks.
+Fine-tuning took the 7B model from 9 to 101 of the 181 held-out tasks, and GRPO took it to 117.
 
 **The fine-tune.** Dataset: 216 training and 27 validation examples, the best solves from Sonnet
 and Fable on the 84 training tasks (seeds 10000+), about $7 of teacher runs. LoRA rank 16
 (alpha 32), learning rate 2e-4, 3 epochs, max length 16384, batch 1 with 8 gradient
 accumulation steps: 81 steps, 1 h 44 min on an RTX A6000 (48 GB). Training loss went from 0.57
 to 0.08. Validation loss went 0.290 → **0.268** → 0.283 over the three epochs: the third epoch
-had started to memorise, so 2 epochs is the obvious next experiment.
+had started to memorise. Training again with 2 epochs scored 50.8%: 30 tasks only the 3-epoch
+adapter solved, 21 only the 2-epoch one, a split that chance explains (p ≈ 0.2). Epochs weren't
+the lever.
+
+**GRPO on top.** Starting from the 3-epoch adapter, on v6's 374 training tasks: 4 rounds of 32
+tasks × 8 attempts at temperature 1.0, learning rate 1e-5, KL weight 0.04; about 2 hours on the
+same A6000, no API cost. Each round's training-task score went 62.5% → 64.8% → 68.8% → 66.4%, and
+15–22 of the 32 tasks per round had mixed outcomes, so it never ran out of things to learn from.
+On the held-out tasks, 26 were solved only after GRPO and 10 only before it (p ≈ 0.01): a real
+gain, mostly on medium and hard tasks. It also made fewer wrong changes to the customer's account
+(3.9% → 1.7% of episodes), but more of its tool calls returned an error (1% → 5%).
 
 ## The earlier round: Qwen2.5-3B on v3
 
@@ -225,6 +239,9 @@ come from a smaller, easier test set, so they don't compare directly with the 7B
    validation loss had already turned.
 4. **Imitation from 84 tasks goes a long way, then stops.** DPO and GRPO on the same 84 tasks didn't
    beat SFT for the 3B. More training tasks is the next lever.
-5. **Rented GPUs drop off the network.** One pod lost its Tailscale connection, then its public SSH
+5. **GRPO needs tasks the model sometimes solves.** On the 3B with 16 tasks a round, the tasks with
+   mixed outcomes fell from 13 to 6. The 7B started at about 60% on its training tasks and had 374
+   of them: 32 fresh tasks a round kept 15–22 informative, and GRPO gained 9 points.
+6. **Rented GPUs drop off the network.** One pod lost its Tailscale connection, then its public SSH
    port, for minutes at a time. Connecting over plain SSH with a tunnel, and runs that wait for
    the box and then stop cleanly, made that survivable.

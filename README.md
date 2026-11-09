@@ -126,7 +126,8 @@ listen on every interface instead, use `--listen 0.0.0.0`.
 | stop / start | `docker compose stop` / `docker compose start` (the stack also restarts with the machine) |
 | logs | `docker compose logs -f api worker worker-gpu compute builder web` |
 | accounts | `docker compose exec api envforge admin users` · `create-user EMAIL [--admin]` · `reset-password EMAIL` · `set-admin EMAIL` · `sign-out EMAIL` |
-| back up | `docker compose exec -T postgres pg_dump -U envforge envforge \| gzip > envforge.sql.gz`, plus the `envdata` volume (runs, datasets) and your `.env` |
+| back up | `deploy/redeploy.sh backup`: the database, the `envdata` volume (runs, datasets, adapters) and `.env`, in one file |
+| move to a new server | on the old one `deploy/redeploy.sh backup --stop --with-tunnel`; copy the file over; on the new one, in a fresh clone, `sudo deploy/redeploy.sh restore <file> --with-tunnel` (installs Docker if needed; see [docs/WEB.md](docs/WEB.md#deploying-one-machine)) |
 
 **Security model.** Every user has private workspaces: other users get "not found". A workspace
 has an owner and members, and the first account is the server admin. Passwords are hashed with

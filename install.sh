@@ -312,6 +312,6 @@ ${G}${B}envforge is running.${N}
   Stop/start  docker compose stop  |  docker compose start
   Logs        docker compose logs -f api worker builder web
   Users       docker compose exec api envforge admin users | create-user EMAIL | reset-password EMAIL
-  Back up     docker compose exec -T postgres pg_dump -U envforge envforge | gzip > envforge.sql.gz
-              plus the 'envdata' volume (runs, datasets) and your .env (it decrypts saved keys)
+  Back up     deploy/redeploy.sh backup      (database, data volume and .env in one file;
+              deploy/redeploy.sh restore FILE on a new machine puts it all back)
 EOF
