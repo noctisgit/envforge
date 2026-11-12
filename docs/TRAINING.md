@@ -77,6 +77,21 @@ per task (the shortest best one), holds out ~5% of *tasks* for validation, and w
 The web UI's **Datasets** page builds the same files (and manifest) with a live preview;
 `best per task` off keeps every passing episode, still split by task.
 
+**Datasets from elsewhere.** Any JSONL in the same chat format trains the same way, such as
+conversations exported from a voice or chat agent platform. An assistant message may carry
+`"train": false` to keep it as context without training on it: earlier turns that are only
+history, or text the serving runtime wrote rather than the model. It stays in the rendered
+conversation, and its tokens get no labels. `"train": true` or no `train` key trains it as
+usual. This holds for SFT, and for DPO's `chosen` and `rejected` sides. A line whose
+assistant messages are all `"train": false` has nothing to learn from, so it is dropped and
+counted under `dropped_no_assistant_tokens`.
+
+Such exports run about 7–12k tokens per example, mostly the system prompt and tool
+definitions, so train them with `--max-len 16384` (**Max tokens** in the web UI). The
+default of 8192 would drop most of them, since over-long examples are dropped, not
+truncated. Run `--dry-run` first: its `dropped_too_long` count shows what a limit would cost.
+A longer limit also needs more GPU memory (see GPU sizing below).
+
 ## 3. Baseline the student — on *evaluation* seeds
 
 Serve the untrained base model and evaluate it exactly as you will evaluate the result:

@@ -235,6 +235,29 @@ def test_build_labels_marks_only_assistant_turns():
     assert tok.n_assistant_tokens == sum(len(s) for s in EXPECTED_SPANS)
 
 
+def test_build_labels_skips_assistant_turns_marked_train_false():
+    # Context only (history, or text the serving runtime wrote): rendered, never labelled.
+    msgs = _conversation()
+    msgs[2]["train"] = False
+    tmpl = FakeTemplate()
+    tok = sft.build_labels(msgs, tmpl.render)
+    assert tok.input_ids == tmpl.render(msgs)
+    assert tmpl.labelled_words(tok) == EXPECTED_SPANS[1:]
+    assert not tok.mismatch and tok.unlocated_turns == 0
+
+
+def test_a_line_with_only_train_false_assistant_turns_has_nothing_to_learn():
+    msgs = _conversation()
+    for m in msgs:
+        if m["role"] == "assistant":
+            m["train"] = False
+    tmpl = FakeTemplate()
+    assert sft.build_labels(msgs, tmpl.render).n_assistant_tokens == 0
+    stats = sft.DatasetStats()
+    rows = sft.tokenize_examples([{"messages": msgs}], lambda tools: tmpl.render, 1000, stats)
+    assert rows == [] and stats.dropped_no_assistant_tokens == 1 and stats.kept == 0
+
+
 def test_build_labels_without_assistant_turns_masks_everything():
     msgs = [{"role": "system", "content": "s"}, {"role": "user", "content": "u"}]
     tok = sft.build_labels(msgs, FakeTemplate().render)

@@ -89,6 +89,21 @@ def test_tokenize_pairs_labels_only_the_answers():
     assert stats["dropped_too_long"] == 1
 
 
+def test_tokenize_pairs_skips_train_false_turns_in_either_side():
+    def side(answer: str) -> list:
+        return [{"role": "assistant", "content": "checking now", "train": False},
+                {"role": "user", "content": "ok"},
+                {"role": "assistant", "content": answer}]  # fmt: skip
+
+    t = WordTemplate()
+    pair = {**_pair(), "chosen": side("fixed it"), "rejected": side("gave up")}
+    rows = dpo.tokenize_pairs([pair], lambda tools: t.render, 1000, {})
+    inv = {v: k for k, v in t.vocab.items()}
+    for s, words in (("chosen", ["fixed", "it", "</s>"]), ("rejected", ["gave", "up", "</s>"])):
+        assert "checking" in [inv[x] for x in rows[0][f"{s}_ids"]]  # still in the context
+        assert [inv[x] for x in rows[0][f"{s}_labels"] if x != IGNORE] == words
+
+
 def test_dpo_loss_math():
     torch = pytest.importorskip("torch")
     zero = torch.tensor(0.0)

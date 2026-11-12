@@ -308,6 +308,9 @@ def build_labels(messages: list[dict[str, Any]], render: Render) -> Tokenized:
     last assistant header) and search for them in the full rendering. Turns that still
     can't be found (the template renders them differently once they are history) stay
     masked and are counted in `unlocated_turns`.
+
+    An assistant message with `"train": false` is context, not a target: it stays in the
+    rendering and is never labelled. A missing `train` key means it is trained on.
     """
     full = render(messages, add_generation_prompt=False)
     labels = [IGNORE_INDEX] * len(full)
@@ -315,7 +318,7 @@ def build_labels(messages: list[dict[str, Any]], render: Render) -> Tokenized:
     unlocated = 0
     cursor = 0  # labelled spans must appear in order
     for i, msg in enumerate(messages):
-        if msg.get("role") != "assistant":
+        if msg.get("role") != "assistant" or msg.get("train") is False:
             continue
         before = render(messages[:i], add_generation_prompt=True) if i > 0 else []
         through = render(messages[: i + 1], add_generation_prompt=False)
